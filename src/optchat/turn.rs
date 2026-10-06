@@ -2,7 +2,7 @@
 // [system][view][new message]; nothing is carried over between calls.
 //
 // Mid-run messages, the part that is easy to get wrong with `claude -p` (measured, see
-// DEVIATIONS.md): Claude Code delivers a message written to its stdin at the next tool
+// README.md, Departures): Claude Code delivers a message written to its stdin at the next tool
 // boundary, as part of the running call, cached normally. But a message written while the
 // model is writing its final reply is not delivered: Claude Code runs it as a follow-up turn
 // of the SAME conversation, with a stale view, which is the one thing the gist forbids.

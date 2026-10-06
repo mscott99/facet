@@ -1,6 +1,6 @@
 // The memory: an implementation of Taelin's OptChat gist
 // (gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449), driving `claude -p`.
-// Section numbers in comments (§n) refer to that gist. Deviations are listed in DEVIATIONS.md.
+// Section numbers in comments (§n) refer to that gist. Departures are listed in README.md.
 //
 //   store    the log and the tree, append-only JSONL, fsync per line (§2)
 //   view     the fold: append, then merge the most due pair (§5)

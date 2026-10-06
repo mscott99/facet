@@ -1,6 +1,6 @@
 // The prompts. COMPACT and VIEW_DOC are the gist's, verbatim (§4.4, §7.2), with the agent's
 // name substituted. MASTER is the gist's minus its subagent paragraph (this engine has no
-// spawn tool) plus one fact about `claude -p` (see DEVIATIONS.md).
+// spawn tool) plus one fact about `claude -p` (see README.md, Departures from the gist).
 //
 // These strings are the head of every cached prefix: they must not change between calls,
 // so nothing volatile (dates, state) may ever be put in them (§7.2, §11.9).

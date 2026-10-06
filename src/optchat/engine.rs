@@ -233,6 +233,7 @@ impl Engine {
             "model": self.model(), "compact_model": self.conf.compact_model,
             "mcp": self.mcp_url.get().is_some(),
             "limits": super::usage::limits_line(&self.limits()),
+            "dir": self.dir.display().to_string(), "state_dir": state_dir(&self.dir).display().to_string(),
         })
     }
 }

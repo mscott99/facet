@@ -3,7 +3,7 @@
 // cached context, the size enforced by cut-at-limit feedback in the same conversation.
 //
 // Two things are added for `claude -p`, both about the cache and both invisible to the model
-// (see DEVIATIONS.md):
+// (see README.md, Departures from the gist):
 //   * the chain: the context's tail after the last view mark is kept as one block per call
 //     increment, so the next call's end mark finds the previous call's end within the 20-block
 //     lookback and reads the whole previous context instead of rewriting its tail;
