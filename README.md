@@ -29,6 +29,11 @@ Loopback only; published over the tailnet by `tailscale serve --bg --https=10443
 ## use
 
     facet post <file> [slug]   publish a note (writes `facet: <slug>` into its frontmatter)
+    facet review <note>        write a batch of comments from a spec on stdin:
+                                 @ verbatim anchor (unique; may wrap across lines)
+                                 ! [severity] message
+                                 ? long explanation, markdown + math
+                                 + replacement for the anchored line(s)
     facet diag                 open comments; apply/dismiss by code
     facet send <text>          put a message into the conversation
     facet push <text>          push to Telegram
