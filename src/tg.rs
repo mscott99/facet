@@ -115,12 +115,11 @@ pub fn command(cfg: &Cfg, text: &str) -> (String, bool) {
              /diag  open comments      /notes  published notes\n\
              /cal N days ahead         /mail [query]\n\
              /last N  recent messages  /buffer  what is queued   /flush  send it now\n\
-             /link  the reader         /ping  is the input path alive\n\n{}",
+             /link  the reader         /ping  engine and usage left\n\n{}",
             cfg.url("/")), false),
-        "link" => (format!("reader {}\nnotes {}\ncomments {}",
-            cfg.url("/"), cfg.url("/m/"), cfg.url("/d/")), false),
-        "ping" => (format!("alive · {} messages · input {}", log::last(cfg) + 1,
-            if crate::tell::healthy(cfg) { "ok" } else { "DOWN" }), false),
+        "link" => (format!("home {}\nchat {}\nnotes {}\ncomments {}\nmemory {}",
+            cfg.url("/"), cfg.url("/chat"), cfg.url("/m/"), cfg.url("/d/"), cfg.url("/tree")), false),
+        "ping" | "usage" => (engine_line(cfg), false),
         "buffer" => (peek_prelude(), false),
         "flush" => (match take_prelude() {
             Some(p) => match crate::tell::tell(cfg, &p, "telegram") { Ok(_) => "sent".into(), Err(e) => e },
@@ -145,6 +144,19 @@ pub fn command(cfg: &Cfg, text: &str) -> (String, bool) {
             (msgs.join("\n\n"), false)
         }
         _ => (format!("no such command: /{}  (try /help)", cmd), false),
+    }
+}
+
+/// "engine idle · 12 messages · session 88% left · resets 15:00 · week 72% left"
+fn engine_line(cfg: &Cfg) -> String {
+    match crate::optchat::engine::request(&crate::optchat::engine::dir(), json!({"op": "status"})) {
+        Ok(v) => {
+            let mut s = format!("engine {} · {} messages", if v["busy"] == true { "working" } else { "idle" }, v["messages"]);
+            if let Some(l) = v["limits"].as_str().filter(|l| !l.is_empty()) { s.push_str(" · "); s.push_str(l); }
+            if let Some(p) = v["paused"].as_str() { s.push_str(&format!("\ncompactor paused: {}", p)); }
+            s
+        }
+        Err(e) => format!("engine DOWN: {} · {} messages in the log", e, log::last(cfg) + 1),
     }
 }
 
@@ -207,7 +219,8 @@ fn outbound(_cfg: Cfg) {
         let mut st = cfg::state();
 
         // replies
-        let last = st["tg_sent"].as_i64().unwrap_or_else(|| log::last(&c));
+        // never ahead of the log: a fresh log (ids from 0 again) would otherwise stay silent
+        let last = st["tg_sent"].as_i64().unwrap_or_else(|| log::last(&c)).min(log::last(&c));
         let mut high = last;
         for m in log::since(&c, last) {
             high = high.max(m.i);

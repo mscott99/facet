@@ -15,7 +15,9 @@ mod diag;
 mod doc;
 mod log;
 mod md;
+mod optchat;
 mod tell;
+mod tui;
 mod tg;
 mod web;
 
@@ -42,6 +44,31 @@ fn main() {
 
     match cmd {
         "serve" => web::serve(cfg),
+
+        // the memory: the engine, and the terminal route into it
+        "chat" => tui::run(),
+        "engine" => optchat::engine::serve(),
+        "view" => {
+            let dir = optchat::engine::dir();
+            match optchat::engine::request(&dir, serde_json::json!({"op": "view"})) {
+                Ok(v) => println!("{}", v["view"].as_str().unwrap_or("")),
+                Err(_) => { // no engine: the view is a fold of the files
+                    let s = optchat::store::Store::open(&dir);
+                    println!("{}", optchat::view::View::fold(&s, optchat::VIEW).render(&s));
+                }
+            }
+        }
+        "browse" => {
+            let out = PathBuf::from(rest.first().map(|s| s.as_str()).unwrap_or("memory.html"));
+            let dir = optchat::engine::dir();
+            let s = optchat::store::Store::open(&dir);
+            let v = optchat::view::View::fold(&s, optchat::VIEW);
+            match std::fs::write(&out, optchat::browse::html(&s, &v, optchat::VIEW, None)) {
+                Ok(()) => println!("{}", out.display()), Err(e) => die(&e.to_string()) }
+        }
+        "stats" => print!("{}", optchat::usage::table(&optchat::engine::dir())),
+        "cancel" => match optchat::engine::request(&optchat::engine::dir(), serde_json::json!({"op": "cancel"})) {
+            Ok(_) => println!("cancelled"), Err(e) => die(&e) },
 
         "init" => init(),
 
@@ -88,12 +115,13 @@ fn main() {
         "url" => println!("{}", cfg.url(&rest.first().map(|s| format!("/m/{}", s)).unwrap_or("/".into()))),
 
         "status" => {
-            println!("reader     {}", cfg.url("/"));
+            println!("home       {}", cfg.url("/"));
             println!("memory     {} · {} messages", cfg.store().display(), log::last(&cfg) + 1);
             println!("vault      {}", cfg.vault().display());
-            println!("input      {} {} ({})", cfg.str("input.mode", "tmux"),
-                cfg.str("input.tmux_target", "TMUX:1.0"),
-                if tell::healthy(&cfg) { "alive" } else { "DOWN" });
+            match optchat::engine::request(&optchat::engine::dir(), serde_json::json!({"op": "status"})) {
+                Ok(v) => println!("engine     {}", v),
+                Err(e) => println!("engine     DOWN ({})", e),
+            }
             println!("telegram   {}", match cfg.num("telegram.chat_id", 0) {
                 0 => "unpaired".to_string(), c => format!("chat {}", c) });
             println!("notes      {}", doc::table(&cfg).len());
@@ -106,6 +134,12 @@ fn main() {
 }
 
 const HELP: &str = "\
+facet chat                  the conversation in this terminal (starts the engine if needed)
+facet engine                run the engine in the foreground (LaunchAgent: launchd/com.facet.engine.plist)
+facet view                  print the view the model sees
+facet browse [out.html]     the whole memory tree as one page (also served at /tree)
+facet stats                 token usage per day and kind
+facet cancel                stop the running turn
 facet serve                 the web route, plus Telegram if configured
 facet init                  write ~/.config/facet/facet.json from what is already here
 facet post <file> [slug]    publish a note (writes `facet: slug` into its frontmatter)

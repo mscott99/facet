@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.facet.engine</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/you/Prog/tools/facet/target/release/facet</string>
+    <string>engine</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/you/.nvm/versions/node/v24.13.1/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/you/.local/share/facet/engine.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/you/.local/share/facet/engine.err.log</string>
+</dict>
+</plist>

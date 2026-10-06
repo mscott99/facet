@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 pub fn home() -> PathBuf { PathBuf::from(std::env::var("HOME").expect("HOME")) }
 pub fn dir() -> PathBuf { home().join(".config/facet") }
 pub fn tilde(s: &str) -> PathBuf {
+    if s == "~" { return home() }
     if let Some(r) = s.strip_prefix("~/") { home().join(r) } else { PathBuf::from(s) }
 }
 
@@ -37,6 +38,7 @@ impl Cfg {
     pub fn opt(&self, k: &str) -> Option<String> {
         self.get(k).and_then(|v| v.as_str()).map(|s| s.to_string()).filter(|s| !s.is_empty())
     }
+    pub fn get_bool(&self, k: &str, dflt: bool) -> bool { self.get(k).and_then(|v| v.as_bool()).unwrap_or(dflt) }
     pub fn num(&self, k: &str, dflt: i64) -> i64 { self.get(k).and_then(|v| v.as_i64()).unwrap_or(dflt) }
     pub fn set(&mut self, k: &str, v: Value) {
         let parts: Vec<&str> = k.split('.').collect();

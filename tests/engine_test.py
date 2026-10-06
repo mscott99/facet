@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+# End-to-end test of the engine against tests/fake_claude.py: no model is called.
+#   python3 tests/engine_test.py [path/to/facet]
+import json, os, socket, subprocess, sys, tempfile, time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+BIN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "target", "debug", "facet")
+D = tempfile.mkdtemp(prefix="facet-e2e-")
+FAKE_LOG = os.path.join(D, "fake.jsonl")
+env = dict(os.environ, OPTCHAT_DIR=D, FACET_CLAUDE=os.path.join(HERE, "fake_claude.py"), FAKE_LOG=FAKE_LOG)
+fails = []
+
+def check(cond, what):
+    print(("ok   " if cond else "FAIL ") + what)
+    if not cond: fails.append(what)
+
+def req(v):
+    s = socket.socket(socket.AF_UNIX); s.connect(os.path.join(D, "lock"))
+    s.sendall((json.dumps(v) + "\n").encode())
+    data = b""
+    while not data.endswith(b"\n"):
+        c = s.recv(65536)
+        if not c: break
+        data += c
+    s.close()
+    return json.loads(data)
+
+def log():
+    out = []
+    d = os.path.join(D, "chat/main")
+    for f in sorted(os.listdir(d)):
+        out += [json.loads(l) for l in open(os.path.join(d, f)) if l.strip()]
+    return sorted(out, key=lambda m: m["i"])
+
+def fake():
+    return [json.loads(l) for l in open(FAKE_LOG)] if os.path.exists(FAKE_LOG) else []
+
+def wait(pred, secs, what):
+    t = time.time()
+    while time.time() - t < secs:
+        if pred(): return True
+        time.sleep(0.1)
+    check(False, "timed out: " + what)
+    return False
+
+def idle():
+    s = req({"op": "status"})
+    return not s["busy"] and s["unsummarized"] == 0 and s["compacting"] == 0
+
+# seed: 300 messages, each with a 250-byte summary already built (a view of ~77k chars,
+# so the master call is primed); merges are left to the compactor
+os.makedirs(os.path.join(D, "chat/main")); os.makedirs(os.path.join(D, "chat/tree"))
+with open(os.path.join(D, "chat/main/2020-01-01.jsonl"), "w") as f, open(os.path.join(D, "chat/tree/2020-01-01.jsonl"), "w") as g:
+    for i in range(300):
+        text = "seed message %d " % i + "q" * 600
+        f.write(json.dumps({"i": i, "kind": "note", "text": text, "size": len(text) + 6, "date": "2020-01-01T00:00:00.000Z"}) + "\n")
+        node = ("note: seed %d " % i).ljust(250, "s")
+        g.write(json.dumps({"l": 0, "i": i, "text": node, "size": 250}) + "\n")
+
+eng = subprocess.Popen([BIN, "engine"], env=env, stdout=subprocess.DEVNULL, stderr=open(os.path.join(D, "engine.err"), "w"))
+try:
+    wait(lambda: os.path.exists(os.path.join(D, "lock")) and req({"op": "status"}) is not None, 10, "engine up")
+    second = subprocess.run([BIN, "engine"], env=env, capture_output=True, timeout=10)
+    check(second.returncode == 1 and b"another engine" in second.stderr, "a second engine exits (lock socket)")
+    wait(idle, 120, "seed compaction")
+    st = req({"op": "status"})
+    check(st["unsummarized"] == 0, "seeded chat settles (%d messages)" % st["messages"])
+    merges = [x for x in fake() if x["kind"] == "compact"]
+    check(len(merges) > 0, "compactor built merges with a model call (%d calls)" % len(merges))
+    # compactor input: no ids in the context; the context's last block marked; </chat> in the step
+    c = merges[0]["content"]
+    check(all("|" not in b["text"].split("\n")[1][:12] for b in c[:-1] if b["text"].startswith("<chat>\n") and len(b["text"]) > 8), "no ids in compactor context")
+    check(c[-1]["text"].startswith("</chat>\n\nFor scale, this line is exactly 512 bytes:"), "step block opens with </chat> and SCALE")
+    check(sum(1 for b in c if "cache_control" in b) <= 4, "at most 4 cache marks per compactor call")
+    check(all(x["env"]["DISABLE_PROMPT_CACHING"] == "1" for x in merges), "compactor runs with Claude Code marks off")
+    retries = [x for x in fake() if x["kind"] == "compact-retry"]
+    check(len(retries) == len(merges) and all(r["text"].startswith("That line is 600 bytes; the limit is 512. It must end where it is cut here:\n") and r["text"].endswith("| ← LIMIT") for r in retries),
+          "one size retry per node, with the cut-at-limit feedback")
+    tree = [json.loads(l) for f in os.listdir(os.path.join(D, "chat/tree")) for l in open(os.path.join(D, "chat/tree", f))]
+    called = [n for n in tree if n["text"].startswith("S")]
+    check(called and all(n["size"] == 300 for n in called), "node keeps the try that fits")
+
+    # A: a plain turn, primed
+    n0 = len(log())
+    req({"op": "send", "text": "hello"})
+    wait(lambda: any(m["kind"] == "talk" for m in log()[n0:]), 30, "reply to hello")
+    wait(idle, 30, "idle after hello")
+    L = log()[n0:]
+    check([m["kind"] for m in L[:2]] == ["user", "talk"] and L[0]["text"] == "hello" and L[1]["text"] == "ok", "turn: user, talk")
+    F = fake()
+    primes = [x for x in F if x["kind"] == "prime"]
+    turns = [x for x in F if x["kind"] == "turn"]
+    check(len(primes) == 1 and not any(x["kind"] == "prime-not-killed" for x in F), "the call was primed and the priming call killed")
+    pv = [b["text"] for b in primes[0]["content"]]
+    tv = [b["text"] for b in turns[0]["content"]]
+    check(pv == tv[:-1] and tv[-1] == "hello", "priming sends exactly the real call's view blocks")
+    check(all("cache_control" in b for b in primes[0]["content"]) and not any("cache_control" in b for b in turns[0]["content"]), "marks on the priming call only")
+    check(primes[0]["argv"] == turns[0]["argv"], "priming and real call use identical arguments")
+    check(turns[0]["env"]["CLAUDE_CODE_PROMPT_CACHE_TTL"] == "5m" and primes[0]["env"]["DISABLE_PROMPT_CACHING"] == "1", "5m entries; priming with Claude Code marks off")
+    check("hello" not in "".join(tv[:-1]), "the view is rendered before the new message is logged")
+
+    # B: mid-run messages
+    n0 = len(log())
+    req({"op": "send", "text": "TOOLS 3"})
+    wait(lambda: any(m["kind"] == "tool" for m in log()[n0:]), 30, "first tool")
+    time.sleep(0.2)
+    req({"op": "send", "text": "MID during tool"})
+    wait(lambda: sum(1 for m in log()[n0:] if m["kind"] == "echo") >= 3, 30, "third tool result")
+    time.sleep(0.15)
+    req({"op": "send", "text": "LATE during reply"})
+    wait(lambda: any(m["text"] == "LATE during reply" for m in log()[n0:]), 30, "late message logged")
+    wait(idle, 30, "idle after mid-run")
+    L = [(m["kind"], m["text"]) for m in log()[n0:]]
+    print("     ", [k if k != "user" else "user:" + t for k, t in L])
+    ki = [k for k, _ in L]
+    mid = L.index(("user", "MID during tool"))
+    check(ki[mid - 1] == "echo" and ki[mid - 2] == "tool", "mid-run message logged right after the tool result it rode on")
+    late = L.index(("user", "LATE during reply"))
+    check(("talk", "done") in L[:late] and L[late + 1:] and L[late + 1] == ("talk", "ok"), "a message during the final reply starts a fresh call")
+    F = fake()
+    check(not any(x["kind"] == "followup" for x in F), "no follow-up turn in a stale conversation")
+    check(any(x["kind"] == "midrun" and x["text"] == "MID during tool" for x in F), "mid-run message was delivered to the running call")
+
+    # C: cancel during a tool
+    n0 = len(log())
+    req({"op": "send", "text": "TOOLS 6"})
+    wait(lambda: any(m["kind"] == "tool" for m in log()[n0:]), 30, "tool before cancel")
+    req({"op": "cancel"})
+    wait(lambda: not req({"op": "status"})["busy"], 10, "idle after cancel")
+    st = req({"op": "status"})
+    check(not st["busy"] and st["queued"] == 0, "cancel stops the call")
+    n1 = len(log()); time.sleep(1.5)
+    check(len(log()) == n1, "nothing is logged after the cancel")
+
+    # D: a stubborn node keeps the shortest of TRIES tries
+    req({"op": "send", "text": "STUBBORN " + "w" * 700})
+    wait(idle, 60, "idle after stubborn")
+    tries = [x for x in fake() if x["kind"] == "compact-retry" and "STUBBORN" not in x["text"]]
+    F = fake()
+    last_stub = max(k for k, x in enumerate(F) if x["kind"] == "compact" and "STUBBORN" in x["content"][-1]["text"])
+    n_retry = 0
+    for x in F[last_stub + 1:]:
+        if x["kind"] == "compact-retry": n_retry += 1
+        elif x["kind"] == "compact": break
+    check(n_retry == 4, "TRIES = 5: four feedback rounds for a node that never fits (%d)" % n_retry)
+
+    # E: a crash loses no accepted message: kill -9 with one written mid-run, not yet consumed
+    n0 = len(log())
+    req({"op": "send", "text": "TOOLS 4"})
+    wait(lambda: any(m["kind"] == "tool" for m in log()[n0:]), 30, "tool before crash")
+    req({"op": "send", "text": "SURVIVOR"})
+    eng.kill(); eng.wait()
+    eng = subprocess.Popen([BIN, "engine"], env=env, stdout=subprocess.DEVNULL, stderr=open(os.path.join(D, "engine2.err"), "w"))
+    wait(lambda: os.path.exists(os.path.join(D, "lock")) and any(m["text"] == "SURVIVOR" for m in log()[n0:]), 30, "survivor logged after restart")
+    wait(idle, 60, "idle after restart")
+    L = [(m["kind"], m["text"]) for m in log()[n0:]]
+    k = L.index(("user", "SURVIVOR"))
+    check(L[k + 1:k + 2] == [("talk", "ok")], "a message accepted before a crash is answered after the restart")
+
+    u = [json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))]
+    check({"compact", "prime", "turn"} <= {x["kind"] for x in u}, "usage logged per request for compact, prime and turn")
+    check(os.path.isdir(os.path.join(D, ".git")), "chat directory committed after turns")
+finally:
+    eng.kill()
+print("\n%d failure(s); dir %s" % (len(fails), D))
+sys.exit(1 if fails else 0)

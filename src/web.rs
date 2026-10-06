@@ -77,9 +77,11 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
             if key == nav_on { " class=on" } else { "" }, label)
     };
     let mut nav = String::new();
-    nav.push_str(&item("/", "chat", "chat"));
+    nav.push_str(&item("/", "home", "home"));
+    nav.push_str(&item("/chat", "chat", "chat"));
     nav.push_str(&item("/m/", "notes", "notes"));
     nav.push_str(&item("/d/", "comments", "diag"));
+    nav.push_str(&item("/tree", "memory", "tree"));
     if !cfg.vault_phone().is_empty() { nav.push_str(&format!("<a href=\"{}\">vault</a>", cfg.vault_phone())); }
     if !cfg.terminal().is_empty() { nav.push_str(&format!("<a href=\"{}\">term</a>", cfg.terminal())); }
     let n = diag::all(cfg).len();
@@ -232,6 +234,38 @@ fn diag_page(cfg: &Cfg) -> String {
 
 // ---- the server -------------------------------------------------------------------------
 
+/// One page that links every other one, each with a line of live state.
+fn home(cfg: &Cfg) -> String {
+    let t = cfg.token_path();
+    let st = crate::optchat::engine::request(&crate::optchat::engine::dir(), serde_json::json!({"op": "status"}));
+    let (engine, usage) = match &st {
+        Ok(v) => (format!("{} · {} messages{}", if v["busy"] == true { "working" } else { "idle" }, v["messages"],
+                          v["paused"].as_str().map(|p| format!(" · compactor paused: {}", p)).unwrap_or_default()),
+                  v["limits"].as_str().unwrap_or("").to_string()),
+        Err(e) => (format!("engine DOWN: {}", e), String::new()),
+    };
+    let notes = doc::table(cfg).len();
+    let comments = diag::all(cfg).len();
+    let mut rows: Vec<(String, &str, String)> = vec![
+        (format!("{}/chat", t), "Chat", engine),
+        (format!("{}/tree", t), "Memory", "the whole tree: summaries down to every message, searchable".into()),
+        (format!("{}/m/", t), "Notes", format!("{} published", notes)),
+        (format!("{}/d/", t), "Comments", format!("{} open", comments)),
+    ];
+    if !cfg.terminal().is_empty() { rows.push((cfg.terminal(), "Terminal", "the chat in a terminal (facet chat)".into())); }
+    if !cfg.vault_phone().is_empty() { rows.push((cfg.vault_phone(), "Vault", "notes viewer and editor".into())); }
+    if let Some(u) = cfg.opt("telegram.username") { rows.push((format!("https://t.me/{}", u), "Telegram", format!("@{} · /ping, /last, /help", u))); }
+    let mut b = String::from("<style>.home a.card{display:block;margin:10px 0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;text-decoration:none;color:var(--fg)}\
+        .home a.card:hover{border-color:var(--acc)}.home .n{font-weight:600;color:var(--acc)}.home .d{font-size:14px;color:var(--dim)}\
+        .home .u{font-size:13px;color:var(--dim);margin:14px 0}</style><div class=home>");
+    if !usage.is_empty() { b.push_str(&format!("<div class=u>{}</div>", md::esc(&usage))); }
+    for (href, name, desc) in rows {
+        b.push_str(&format!("<a class=card href=\"{}\"><div class=n>{}</div><div class=d>{}</div></a>", md::esc(&href), name, md::esc(&desc)));
+    }
+    b.push_str("</div>");
+    b
+}
+
 fn html(body: String, code: u16) -> Response<std::io::Cursor<Vec<u8>>> {
     Response::from_string(body).with_status_code(code)
         .with_header(Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap())
@@ -282,9 +316,18 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
     let f = form(&body);
 
     match rest.as_slice() {
-        [] => html(chat_page(cfg), 200),
+        // the root is the home page; /home stays as an alias for old links
+        [] | ["home"] => html(page(cfg, "Facet", "home", &home(cfg), false), 200),
+        ["chat"] => html(chat_page(cfg), 200),
 
         ["f", "log"] => html(log_fragment(cfg, qnum("since")), 200),
+
+        // the memory tree (folded from the files: the engine's view is the same fold)
+        ["tree"] => {
+            let s = crate::optchat::store::Store::open(&cfg.store());
+            let v = crate::optchat::view::View::fold(&s, crate::optchat::VIEW);
+            html(crate::optchat::browse::html(&s, &v, crate::optchat::VIEW, Some(&format!("{}/", cfg.token_path()))), 200)
+        }
 
         ["m"] => html(page(cfg, "Notes", "notes", &format!("<div id=docwrap>{}</div>",
             md::render(&doc::index(cfg).text, &note_base(cfg))), true), 200),
