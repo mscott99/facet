@@ -24,6 +24,21 @@ Design, in full: `myVault/tmp/Facet core design.md`, published at `/m/design`.
 
 ## run
 
+Everything runs from this repository. Services (LaunchAgents, copies in `launchd/`; symlinks
+in `~/.local/bin` point into `bin/` and `target/release/`):
+
+    com.facet.engine   facet engine        the memory; owns ~/.optchat and its socket
+    com.facet          facet serve         web pages + Telegram            127.0.0.1:8730 -> tailnet :10443
+    com.facet.term     bin/facet-term      ttyd running `facet chat`       127.0.0.1:8731 -> tailnet :8443
+    com.facet.vault    bin/facet-vault-bridge  vault-phone (~/Prog/vault-phone), its
+                                           feedback into the chat          127.0.0.1:8765 -> tailnet :9443
+
+    bin/life           mail / calendar / web (used by Telegram /cal and /mail)
+    bin/facet-scrub    length-preserving secret redaction over the chat log
+
+The older optchat engine (TypeScript) and the optchat-surface scripts are archived in
+`../archive/`, with their LaunchAgents in `../archive/launchagents/`.
+
     cargo build --release
     facet init          # takes token, bot token and paths from what is already configured
     facet serve         # LaunchAgent: launchd/com.facet.plist

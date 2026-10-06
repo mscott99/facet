@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""life — read/act on your mail, calendar and the web from the shell.
+
+Read paths go straight at the macOS SQLite stores (fast, no app interaction):
+  mail      ~/Library/Mail/V10/MailData/Envelope Index   (+ .emlx bodies)
+  calendar  ~/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb
+Write paths (send mail, add event) go through AppleScript so the real apps own the change.
+"""
+import argparse, glob, html, json, os, plistlib, re, shutil, sqlite3, subprocess, sys, tempfile, time
+from datetime import datetime, timedelta
+from email import policy
+from email.parser import BytesParser
+
+HOME = os.path.expanduser("~")
+MAILDIR = f"{HOME}/Library/Mail/V10"
+MAILDB = f"{MAILDIR}/MailData/Envelope Index"
+CALDB = f"{HOME}/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb"
+APPLE_EPOCH = 978307200  # 2001-01-01 in unix time
+
+
+def osa(script):
+    p = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    if p.returncode:
+        sys.exit(f"applescript failed: {p.stderr.strip()}")
+    return p.stdout.strip()
+
+
+def ro(path, wal=False):
+    """Open a live macOS store read-only; copy it first when it has a WAL we must see."""
+    if wal:
+        tmp = os.path.join(tempfile.mkdtemp(prefix="life-"), os.path.basename(path))
+        for suf in ("", "-wal", "-shm"):
+            if os.path.exists(path + suf):
+                shutil.copy2(path + suf, tmp + suf)
+        path = tmp
+        return sqlite3.connect(path)
+    return sqlite3.connect(f"file:{path}?immutable=1", uri=True)
+
+
+# ---------------------------------------------------------------- mail
+def mail_db():
+    if not os.path.exists(MAILDB):
+        sys.exit(f"no mail index at {MAILDB}")
+    return ro(MAILDB)
+
+
+def inbox_ids(db):
+    return [r[0] for r in db.execute("select ROWID from mailboxes where url like '%/INBOX' or url like '%/INBOX/%'")]
+
+
+ROW = """select m.ROWID, m.date_received, a.address, a.comment, s.subject, m.read, m.flagged,
+                 substr(coalesce(m.summary,''),1,160), mb.url
+          from messages m left join addresses a on a.ROWID=m.sender
+          left join subjects s on s.ROWID=m.subject left join mailboxes mb on mb.ROWID=m.mailbox """
+
+
+def fmt(rows, verbose=False):
+    out = []
+    for rid, ts, addr, name, subj, read, flag, summ, url in rows:
+        when = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+        who = (name or addr or "?")[:34]
+        marks = ("" if read else "*") + ("!" if flag else "")
+        out.append(f"{rid:>7} {marks:<2} {when}  {who:<34}  {(subj or '(no subject)')[:70]}")
+        if verbose and summ:
+            out.append(f"{'':>10}   {summ.strip()[:150]}")
+    return "\n".join(out) or "(nothing)"
+
+
+def cmd_mail_list(a):
+    db = mail_db()
+    where, args = [], []
+    if not a.everywhere:
+        ids = inbox_ids(db)
+        where.append("m.mailbox in (%s)" % ",".join("?" * len(ids)))
+        args += ids
+    if a.unread:
+        where.append("m.read = 0")
+    if a.sender:
+        where.append("(a.address like ? or a.comment like ?)")
+        args += [f"%{a.sender}%"] * 2
+    if a.query:
+        where.append("(s.subject like ? or m.summary like ? or a.address like ? or a.comment like ?)")
+        args += [f"%{a.query}%"] * 4
+    if a.since:
+        where.append("m.date_received > ?")
+        args.append(int(time.time()) - int(a.since) * 86400)
+    where.append("m.deleted = 0")
+    sql = ROW + "where " + " and ".join(where) + " order by m.date_received desc limit ?"
+    rows = db.execute(sql, args + [a.n]).fetchall()
+    print(fmt(rows, verbose=a.verbose))
+
+
+def emlx_path(rid):
+    hits = glob.glob(f"{MAILDIR}/*/*/*/*/Data/*/*/Messages/{rid}.emlx") + \
+           glob.glob(f"{MAILDIR}/*/*/*/*/*/Data/*/*/Messages/{rid}.emlx") + \
+           glob.glob(f"{MAILDIR}/**/{rid}.emlx", recursive=True)
+    return hits[0] if hits else None
+
+
+def text_of(msg):
+    if msg.is_multipart():
+        part = msg.get_body(preferencelist=("plain", "html"))
+        if part is None:
+            return ""
+        body = part.get_content()
+    else:
+        body = msg.get_content()
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", "replace")
+    if "<" in body and ">" in body and re.search(r"<(p|div|br|html)\b", body, re.I):
+        p = subprocess.run(["pandoc", "-f", "html", "-t", "gfm", "--wrap=none"],
+                           input=body, capture_output=True, text=True)
+        if p.returncode == 0:
+            body = p.stdout
+    return re.sub(r"\n{3,}", "\n\n", body).strip()
+
+
+def cmd_mail_show(a):
+    path = emlx_path(a.id)
+    if not path:
+        sys.exit(f"no message file for id {a.id} (not cached locally?)")
+    raw = open(path, "rb").read()
+    nl = raw.index(b"\n")                        # emlx = byte-count line, rfc822, plist
+    body = raw[nl + 1:]
+    cut = body.rfind(b"<?xml")
+    msg = BytesParser(policy=policy.default).parsebytes(body[:cut] if cut > 0 else body)
+    for h in ("From", "To", "Cc", "Date", "Subject"):
+        if msg[h]:
+            print(f"{h}: {msg[h]}")
+    print(f"File: {path}\n{'-' * 72}")
+    t = text_of(msg)
+    print(t if a.full else t[:a.chars])
+    if not a.full and len(t) > a.chars:
+        print(f"\n[... {len(t) - a.chars} more chars; --full for all]")
+    att = [p.get_filename() for p in msg.walk() if p.get_filename()]
+    if att:
+        print("\nattachments: " + ", ".join(att))
+
+
+def cmd_mail_send(a):
+    body = open(a.body_file).read() if a.body_file else (a.body or "")
+    q = lambda s: s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    recips = "".join(f'make new to recipient at end of to recipients with properties {{address:"{q(t)}"}}\n' for t in a.to)
+    recips += "".join(f'make new cc recipient at end of cc recipients with properties {{address:"{q(t)}"}}\n' for t in (a.cc or []))
+    act = "send m" if a.send else "set visible of m to true"
+    print(osa(f'''tell application "Mail"
+  set m to make new outgoing message with properties {{subject:"{q(a.subject)}", content:"{q(body)}", visible:false}}
+  tell m
+    {recips}
+  end tell
+  {act}
+  return "{'sent' if a.send else 'draft open in Mail'}"
+end tell'''))
+
+
+# ---------------------------------------------------------------- calendar
+def cal_rows(lo, hi):
+    """Events overlapping [lo, hi] (unix seconds): base rows plus expanded recurrences."""
+    db = ro(CALDB, wal=True)
+    base = db.execute(
+        """select ci.ROWID, ci.summary, ci.start_date, ci.end_date, ci.start_tz, ci.all_day,
+                  c.title, l.title, ci.has_recurrences
+           from CalendarItem ci left join Calendar c on c.ROWID = ci.calendar_id
+           left join Location l on l.ROWID = ci.location_id
+           where ci.entity_type = 2 and coalesce(ci.hidden, 0) = 0""").fetchall()
+    recur = {r[0]: r[1:] for r in db.execute(
+        "select owner_id, frequency, interval, count, end_date, specifier from Recurrence")}
+    excs = {}
+    for owner, dt in db.execute("select owner_id, date from ExceptionDate"):
+        excs.setdefault(owner, set()).add(round(dt))
+    WD = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"]
+    out = []
+    for rid, summ, st, en, tz, allday, cal, where, has_rec in base:
+        if st is None:
+            continue
+        dur = (en - st) if en else 0
+        starts = [st]
+        if has_rec and rid in recur:
+            freq, interval, count, until, spec = recur[rid]
+            interval = int(interval or 1)
+            days = [WD.index(w[-2:]) for w in (spec or "").split(",") if len(w) >= 2 and w[-2:] in WD]
+            limit = min(until or hi - APPLE_EPOCH, hi - APPLE_EPOCH)
+            cur, n, starts = st, 0, []
+            step = {1: 86400, 2: 7 * 86400}.get(freq)
+            while cur <= limit and n < 2000:
+                if freq == 2 and days:                     # weekly: one hit per listed weekday
+                    base_dt = datetime.fromtimestamp(cur + APPLE_EPOCH)
+                    monday = base_dt - timedelta(days=(base_dt.weekday() + 1) % 7)   # week starts Sunday
+                    for wd in days:
+                        starts.append((monday + timedelta(days=wd)).timestamp() - APPLE_EPOCH)
+                else:
+                    starts.append(cur)
+                n += 1
+                if step:
+                    cur += step * interval
+                elif freq in (3, 4):                       # monthly / yearly: calendar arithmetic
+                    d0 = datetime.fromtimestamp(cur + APPLE_EPOCH)
+                    months = (interval if freq == 3 else 12 * interval) + (d0.year * 12 + d0.month - 1)
+                    try:
+                        d1 = d0.replace(year=months // 12, month=months % 12 + 1)
+                    except ValueError:
+                        break
+                    cur = d1.timestamp() - APPLE_EPOCH
+                else:
+                    break
+                if count and len(starts) >= count:
+                    break
+        for s0 in starts:
+            if round(s0) in excs.get(rid, ()):  continue
+            if not (lo - APPLE_EPOCH <= s0 + dur and s0 <= hi - APPLE_EPOCH):  continue
+            out.append((s0, s0 + dur, summ, cal, allday or tz == "_float", where))
+    return sorted(set(out), key=lambda r: r[0])
+
+
+def cmd_cal(a):
+    now = time.time()
+    rows = cal_rows(now - a.past * 86400, now + a.days * 86400)
+    lines, day = [], None
+    for s, e, summ, cal, floating, where in rows:
+        # floating/all-day times are stored as if UTC; timed events are real instants
+        st = datetime.utcfromtimestamp(s + APPLE_EPOCH) if floating else datetime.fromtimestamp(s + APPLE_EPOCH)
+        en = datetime.utcfromtimestamp(e + APPLE_EPOCH) if floating else datetime.fromtimestamp(e + APPLE_EPOCH)
+        if st.strftime("%F") != day:
+            day = st.strftime("%F")
+            lines.append(f"\n{st.strftime('%a %d %b')}")
+        clock = "all day" if (floating and e - s >= 86399) else st.strftime("%H:%M") + en.strftime("-%H:%M")
+        lines.append(f"  {clock:<12} {(summ or '(untitled)')[:56]:<56} [{(cal or '?')[:20]}]" + (f" @ {where[:28]}" if where else ""))
+    print("\n".join(lines).strip() or "(no events)")
+
+
+def cmd_cal_add(a):
+    st = datetime.fromisoformat(a.start)
+    en = st + timedelta(minutes=a.minutes)
+    d = lambda x: x.strftime('%m/%d/%Y %H:%M:%S')
+    q = lambda s: s.replace('\\', '\\\\').replace('"', '\\"')
+    print(osa(f'''tell application "Calendar"
+  tell calendar "{q(a.calendar)}"
+    make new event with properties {{summary:"{q(a.title)}", start date:date "{d(st)}", end date:date "{d(en)}"{', description:"' + q(a.notes) + '"' if a.notes else ''}}}
+  end tell
+  return "added: {q(a.title)} {d(st)}"
+end tell'''))
+
+
+def cmd_cal_list(a):
+    print(osa('tell application "Calendar" to get name of every calendar').replace(", ", "\n"))
+
+
+# ---------------------------------------------------------------- web
+def cmd_web_get(a):
+    p = subprocess.run(["curl", "-sL", "--compressed", "-A",
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+                        "-m", str(a.timeout), a.url], capture_output=True, text=True)
+    doc = p.stdout
+    if a.raw:
+        print(doc[:a.chars]); return
+    md = subprocess.run(["pandoc", "-f", "html", "-t", "gfm", "--wrap=none"],
+                        input=doc, capture_output=True, text=True).stdout or doc
+    md = re.sub(r"\n{3,}", "\n\n", re.sub(r"<[^>]+>", "", md)).strip()
+    print(md[:a.chars] + (f"\n\n[... {len(md) - a.chars} more chars]" if len(md) > a.chars else ""))
+
+
+def cmd_web_js(a):
+    expr = a.js.replace("\\", "\\\\").replace('"', '\\"')
+    print(osa(f'tell application "{a.browser}" to execute front window\'s active tab javascript "{expr}"'))
+
+
+def cmd_web_open(a):
+    osa(f'tell application "{a.browser}" to open location "{a.url}"')
+    time.sleep(a.wait)
+    if a.text:
+        cmd_web_js(argparse.Namespace(browser=a.browser, js="document.body.innerText.slice(0,%d)" % a.chars))
+
+
+def cmd_web_tabs(a):
+    print(osa(f'''tell application "{a.browser}"
+  set out to ""
+  repeat with w in windows
+    repeat with t in tabs of w
+      set out to out & (title of t) & "  ::  " & (URL of t) & linefeed
+    end repeat
+  end repeat
+  return out
+end tell'''))
+
+
+# ---------------------------------------------------------------- cli
+def main():
+    p = argparse.ArgumentParser(prog="life", description=__doc__.splitlines()[0])
+    sub = p.add_subparsers(dest="top", required=True)
+
+    m = sub.add_parser("mail").add_subparsers(dest="c", required=True)
+    for name in ("inbox", "search"):
+        s = m.add_parser(name)
+        if name == "search":
+            s.add_argument("query")
+        else:
+            s.add_argument("query", nargs="?")
+        s.add_argument("-n", type=int, default=20)
+        s.add_argument("--unread", action="store_true")
+        s.add_argument("--sender")
+        s.add_argument("--since", help="only the last N days")
+        s.add_argument("--everywhere", action="store_true", help="all mailboxes, not just inboxes")
+        s.add_argument("-v", "--verbose", action="store_true", help="show snippets")
+        s.set_defaults(fn=cmd_mail_list)
+    s = m.add_parser("show"); s.add_argument("id", type=int); s.add_argument("--full", action="store_true")
+    s.add_argument("--chars", type=int, default=4000); s.set_defaults(fn=cmd_mail_show)
+    s = m.add_parser("send"); s.add_argument("--to", action="append", required=True); s.add_argument("--cc", action="append")
+    s.add_argument("--subject", required=True); s.add_argument("--body"); s.add_argument("--body-file")
+    s.add_argument("--send", action="store_true", help="actually send (default: open a draft)")
+    s.set_defaults(fn=cmd_mail_send)
+
+    c = sub.add_parser("cal").add_subparsers(dest="c")
+    s = c.add_parser("next"); s.add_argument("--days", type=int, default=14); s.add_argument("--past", type=int, default=0)
+    s.set_defaults(fn=cmd_cal)
+    s = c.add_parser("add"); s.add_argument("--title", required=True); s.add_argument("--start", required=True, help="YYYY-MM-DD HH:MM")
+    s.add_argument("--minutes", type=int, default=60); s.add_argument("--calendar", default="Work"); s.add_argument("--notes")
+    s.set_defaults(fn=cmd_cal_add)
+    c.add_parser("calendars").set_defaults(fn=cmd_cal_list)
+
+    w = sub.add_parser("web").add_subparsers(dest="c", required=True)
+    s = w.add_parser("get"); s.add_argument("url"); s.add_argument("--chars", type=int, default=6000)
+    s.add_argument("--raw", action="store_true"); s.add_argument("--timeout", type=int, default=25); s.set_defaults(fn=cmd_web_get)
+    s = w.add_parser("js"); s.add_argument("js"); s.add_argument("--browser", default="Google Chrome"); s.set_defaults(fn=cmd_web_js)
+    s = w.add_parser("open"); s.add_argument("url"); s.add_argument("--browser", default="Google Chrome")
+    s.add_argument("--wait", type=float, default=2.5); s.add_argument("--text", action="store_true")
+    s.add_argument("--chars", type=int, default=6000); s.set_defaults(fn=cmd_web_open)
+    s = w.add_parser("tabs"); s.add_argument("--browser", default="Google Chrome"); s.set_defaults(fn=cmd_web_tabs)
+
+    a = p.parse_args()
+    if not hasattr(a, "fn"):
+        if a.top == "cal":
+            a.days, a.past = 14, 0
+            return cmd_cal(a)
+        p.error("missing subcommand")
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

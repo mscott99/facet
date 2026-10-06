@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""vault-phone, with its inbox wired into the running OptChat session.
+
+server.py --agent inbox prints `MESSAGE {"note":..,"text":..}` for every message
+sent from a note page. This hands each one to the engine (`facet send`, its Unix socket),
+so feedback from the vault viewer arrives as a normal chat message. OptChat answers
+the page with:  curl -sX POST --data-binary @- http://127.0.0.1:8765/reply
+"""
+import json, os, subprocess, sys
+
+FACET = os.path.expanduser("~/.local/bin/facet")
+VP = "/Users/you/Prog/vault-phone"
+HINT = "(answer the page: curl -sX POST --data-binary @- http://127.0.0.1:8765/reply)"
+
+p = subprocess.Popen([VP + "/.venv/bin/python", "-u", VP + "/server.py",
+                      "--port", os.environ.get("VAULT_PHONE_PORT", "8765"), "--agent", "inbox"],
+                     cwd=VP, stdout=subprocess.PIPE, stderr=None, text=True)
+for line in p.stdout:
+    sys.stdout.write(line); sys.stdout.flush()
+    if not line.startswith("MESSAGE "):
+        continue
+    try:
+        m = json.loads(line[8:])
+    except Exception:
+        continue
+    text = " ".join((m.get("text") or "").split())
+    one = f"[vault-phone · {m.get('note','?')}] {text} {HINT}"
+    subprocess.run([FACET, "send", one], check=False)
+sys.exit(p.wait())

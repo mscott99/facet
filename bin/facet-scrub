@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Redact secrets from the OptChat memory store, in place, length-preserving
+(so the append-only log and the summary tree stay byte-consistent).
+
+  facet-scrub            # scan + redact known secrets and token-shaped strings
+  facet-scrub --dry-run  # report only
+  facet-scrub --include-reader  # also redact the reader URL token (breaks logged links)
+
+Known secrets are read from ~/.config/optchat-web/* (never printed).
+"""
+import glob, json, os, re, sys
+
+DIR  = os.path.expanduser(os.environ.get("OPTCHAT_DIR", "~/.optchat"))
+CFGD = os.path.expanduser("~/.config/optchat-web")
+dry  = "--dry-run" in sys.argv
+
+def pad(label, n):
+    b = ("[redacted-%s" % label).encode()
+    return b + b"-" * (n - len(b) - 1) + b"]" if n > len(b) else b"[redacted]"[:n].ljust(n, b"-")
+
+secrets = []  # (bytes, label)
+tg = os.path.join(CFGD, "telegram.json")
+if os.path.exists(tg):
+    t = json.load(open(tg)).get("bot_token") or ""
+    if t:
+        secrets.append((t.encode(), "telegram-bot-token"))
+        if ":" in t: secrets.append((t.split(":", 1)[1].encode(), "bot-secret"))
+for name, label in ((("token", "reader-token"), ("credential", "reader-credential"))
+                    if "--include-reader" in sys.argv else ()):
+    p = os.path.join(CFGD, name)
+    if os.path.exists(p):
+        v = open(p).read().strip()
+        if len(v) > 7: secrets.append((v.encode(), label))
+
+PATS = [(re.compile(rb"\d{9,11}:AA[A-Za-z0-9_-]{30,40}"), "telegram-bot-token"),
+        (re.compile(rb"sk-[A-Za-z0-9_-]{20,}"), "api-key"),
+        (re.compile(rb"ghp_[A-Za-z0-9]{30,}"), "github-token")]
+
+total = 0
+for p in sorted(glob.glob(os.path.join(DIR, "**", "*.jsonl"), recursive=True)):
+    d = open(p, "rb").read(); o = d; hits = {}
+    for s, label in secrets:
+        n = d.count(s)
+        if n: hits[label] = hits.get(label, 0) + n; d = d.replace(s, pad(label, len(s)))
+    for pat, label in PATS:
+        for m in set(pat.findall(d)):
+            hits[label] = hits.get(label, 0) + d.count(m)
+            d = d.replace(m, pad(label, len(m)))
+    if hits:
+        total += sum(hits.values())
+        print("%s %s: %s" % ("would redact" if dry else "redacted", os.path.relpath(p, DIR),
+                             ", ".join("%s x%d" % kv for kv in sorted(hits.items()))))
+        if not dry:
+            assert len(d) == len(o)
+            with open(p, "r+b") as f: f.seek(0); f.write(d)
+print("clean" if not total else "%d occurrence(s)" % total)

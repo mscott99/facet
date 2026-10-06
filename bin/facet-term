@@ -1,0 +1,12 @@
+#!/bin/zsh
+# ttyd on the tailnet: `facet chat` in a browser terminal, from any logged-in device.
+# No HTTP basic auth: iOS/Safari does not send the Authorization header on the WebSocket upgrade,
+# which made the terminal connect-then-die. The secret is the URL path instead (token file below),
+# and ttyd listens only on the Tailscale IP, so only tailnet devices can reach it at all.
+PORT=${OPTCHAT_WEB_PORT:-8731}
+TOKEN=$(cat "$HOME/.config/optchat-web/token")
+# Loopback only: reached from the tailnet through `tailscale serve` (real TLS cert), port 8443.
+echo "$(date '+%F %T') serving facet chat on https://your-machine.your-tailnet.ts.net:8443/$TOKEN/"
+exec /opt/homebrew/bin/ttyd -i 127.0.0.1 -p "$PORT" -b "/$TOKEN" -W -m 4 \
+  -t fontSize=13 -t 'theme={"background":"#101014"}' -t cursorBlink=true -T xterm-256color \
+  "$HOME/.local/bin/facet-term-shell"
