@@ -157,6 +157,19 @@ try:
     k = L.index(("user", "SURVIVOR"))
     check(L[k + 1:k + 2] == [("talk", "ok")], "a message accepted before a crash is answered after the restart")
 
+    # G: /model and /zoom
+    r = req({"op": "model", "name": "sonnet"})
+    check(r["ok"] and req({"op": "status"})["model"] == "sonnet", "/model switches the master model")
+    check(req({"op": "model", "name": "gpt"})["ok"] is False, "/model refuses an unknown model")
+    z = req({"op": "zoom", "id": 3, "n": 1})["text"]
+    check(z.startswith("3+0|note: seed message 3 "), "/zoom gives a message whole")
+    check(req({"op": "zoom", "id": 1, "n": 2})["text"] == "No line 1+2.", "/zoom refuses an unaligned line")
+    n0 = len(log()); req({"op": "send", "text": "after switch"})
+    wait(lambda: any(m["kind"] == "talk" for m in log()[n0:]), 30, "turn after model switch")
+    last = [x for x in fake() if x["kind"] == "turn"][-1]
+    check(last["argv"][last["argv"].index("--model") + 1] == "sonnet", "the next turn runs on the new model")
+    wait(idle, 60, "idle after model switch")
+
     # F: importing notes
     nf = os.path.join(D, "a note.md")
     open(nf, "w").write("# Title\nsome remembered fact\n")

@@ -156,6 +156,22 @@ fn editor(dir: &std::path::Path, mut rl: DefaultEditor) {
                     "/stats" => Ok(crate::optchat::usage::table(&dir)),
                     "/tree" => tree(&dir),
                     "/help" | "/?" => Ok(format!("{}{}{}", DIM, HELP, OFF)),
+                    "/model" => engine::request(&dir, json!({"op": "status"}))
+                        .map(|v| format!("{}· model {} · /model opus|sonnet to switch{}", DIM, v["model"].as_str().unwrap_or("?"), OFF)),
+                    t if t.starts_with("/model ") => engine::request(&dir, json!({"op": "model", "name": t[7..].trim()}))
+                        .map(|v| if v["ok"] == true {
+                            format!("{}· next turns use {} (its first turn re-caches the view once){}", DIM, v["model"].as_str().unwrap_or("?"), OFF)
+                        } else { format!("{}· {}{}", DIM, v["error"].as_str().unwrap_or("refused"), OFF) }),
+                    t if t == "/zoom" || t.starts_with("/zoom ") => {
+                        // "/zoom 12", "/zoom 8 4", "/zoom 8+4" (as lines are written in /view)
+                        let p: Vec<i64> = t[5..].split(|c: char| c == '+' || c == ',' || c.is_whitespace())
+                            .filter_map(|x| x.parse().ok()).collect();
+                        match p.first() {
+                            Some(&id) => engine::request(&dir, json!({"op": "zoom", "id": id, "n": p.get(1).copied().unwrap_or(1)}))
+                                .map(|v| v["text"].as_str().unwrap_or("").to_string()),
+                            None => Ok(format!("{}· /zoom <id+n> as written in /view; /zoom <id> is message id whole{}", DIM, OFF)),
+                        }
+                    }
                     t if t.starts_with("/import ") => Ok(format!("{}{}{}", DIM,
                         crate::optchat::import::files(&crate::optchat::import::split(&t[8..])).iter()
                             .map(|l| format!("· {}", l)).collect::<Vec<_>>().join("\n"), OFF)),
@@ -185,6 +201,8 @@ const HELP: &str = "\
 /tree     the memory tree in the browser (also /tree on the web route)
 /import <file>...  add files to the memory, one note each (drag files in)
 /view     what the agent sees of its memory
+/zoom <id+n>  open a line of the view, as the agent does (/zoom 12: message 12 whole)
+/model [opus|sonnet]  the model for the next turns (Opus costs more per turn)
 /cancel   stop the running turn
 /resume   restart the compactor after a pause
 /stats    cost per day and kind

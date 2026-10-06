@@ -154,7 +154,7 @@ fn run(e: &Arc<Engine>) {
             "first": first, "last": e.mem.lock().unwrap().store.t().saturating_sub(1), "messages_in": texts.len(),
             "settle_ms": settle_ms, "ms": tc.elapsed().as_millis(), "steps": tr.steps, "primed": tr.primed,
             "prime_read": tr.prime_read, "prime_write": tr.prime_write, "midrun_delivered": tr.delivered,
-            "queue_after": tr.requeued, "outcome": tr.outcome, "model": e.conf.model, "effort": e.conf.effort,
+            "queue_after": tr.requeued, "outcome": tr.outcome, "model": e.model(), "effort": e.conf.effort,
         });
         if let (Some(r), Some(v)) = (rec.as_object_mut(), vstats.as_object()) { for (k, x) in v { r.insert(k.clone(), x.clone()); } }
         super::events::log(&e.dir, "turn", rec);
@@ -214,7 +214,7 @@ fn args(e: &Engine) -> Vec<String> {
     super::events::system(&e.dir, "master", &sys);
     let f = sd.join("system.txt");
     if std::fs::read_to_string(&f).ok().as_deref() != Some(sys.as_str()) { let _ = std::fs::write(&f, &sys); }
-    let mut a = claude::base_args(&e.conf.model, &e.conf.effort, &f.to_string_lossy(), &e.conf.tools);
+    let mut a = claude::base_args(&e.model(), &e.conf.effort, &f.to_string_lossy(), &e.conf.tools);
     let mcp = json!({"mcpServers": {"optchat": {"type": "http", "url": e.mcp_url.get().cloned().unwrap_or_default()}}});
     a.extend(["--mcp-config".into(), mcp.to_string(), "--permission-mode".into(), e.conf.permission.clone(), "--replay-user-messages".into()]);
     if e.conf.safe_mode { a.push("--safe-mode".into()); }

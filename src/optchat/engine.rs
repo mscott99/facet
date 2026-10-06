@@ -7,7 +7,8 @@
 //   -> {"op":"cancel"}                stop the wait or the running call
 //   -> {"op":"note","text":..,"date":..}  import a note (refused during a turn; duplicates skipped)
 //   -> {"op":"resume"}                lift a compactor pause
-//   -> {"op":"view"} / {"op":"status"}
+//   -> {"op":"view"} / {"op":"status"} / {"op":"zoom","id":..,"n":..}
+//   -> {"op":"model","name":..}       the master model for the next turns
 //   -> {"op":"watch"}                 then a stream of events, one per line:
 //        {"ev":"msg","i":..,"kind":..,"text":..}   a logged message
 //        {"ev":"delta","text":..}                  streamed reply text (not logged as such)
@@ -123,6 +124,8 @@ pub struct Engine {
     /// the last `rate_limit_info` any call reported, and the session use at the last turn's end
     limits: Mutex<Value>,
     pub util_mark: Mutex<Option<f64>>,
+    /// the master model, switchable at runtime (/model); starts as chat.model
+    model: Mutex<String>,
 }
 
 pub fn dir() -> PathBuf {
@@ -208,6 +211,9 @@ impl Engine {
             self.notice(&format!("usage limit reached; compactor waits: {}", super::usage::limits_line(&info)));
         }
     }
+    /// The model the next turn uses.
+    pub fn model(&self) -> String { self.model.lock().unwrap().clone() }
+
     pub fn limits(&self) -> Value { self.limits.lock().unwrap().clone() }
     pub fn session_used(&self) -> Option<f64> { self.limits.lock().unwrap()["unifiedWindows"]["five_hour"]["utilization"].as_f64() }
 
@@ -224,7 +230,7 @@ impl Engine {
             "unsummarized": unbuilt, "compacting": m.busy.len(), "failing": m.failed.len(),
             "paused": m.pause_reason(), "busy": t.running, "queued": t.queue.len() + t.held.len(),
             "phase": t.phase, "hour_eq": self.hour_eq().round(),
-            "model": self.conf.model, "compact_model": self.conf.compact_model,
+            "model": self.model(), "compact_model": self.conf.compact_model,
             "mcp": self.mcp_url.get().is_some(),
             "limits": super::usage::limits_line(&self.limits()),
         })
@@ -273,7 +279,10 @@ pub fn serve() -> ! {
         limits: Mutex::new(std::fs::read_to_string(sd.join("limits.json")).ok()
             .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null)),
         util_mark: Mutex::new(None),
+        model: Mutex::new(String::new()),
     });
+    *e.model.lock().unwrap() = std::fs::read_to_string(sd.join("model")).ok().map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty()).unwrap_or_else(|| e.conf.model.clone());
     let u = e.session_used();
     *e.util_mark.lock().unwrap() = u;
     {
@@ -337,6 +346,25 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
                 json!({"ok": true})
             }
             "view" => { let m = e.mem.lock().unwrap(); json!({"view": m.view.render(&m.store)}) }
+            // zoom(id, n) as the agent sees it (§7.1), for a person
+            "zoom" => {
+                let m = e.mem.lock().unwrap();
+                json!({"text": super::mcp::zoom(&m.store, v["id"].as_i64().unwrap_or(-1), v["n"].as_i64().unwrap_or(1))})
+            }
+            // the master model for the next turns; kept in the state dir across restarts (it wins
+            // over chat.model). A new model starts with a cold cache once: its first turn writes
+            // the view again.
+            "model" => {
+                let name = v["name"].as_str().unwrap_or("").trim().to_string();
+                let ok = matches!(name.as_str(), "opus" | "sonnet" | "haiku" | "fable") || name.starts_with("claude-");
+                if !ok { json!({"ok": false, "error": "opus, sonnet, haiku, fable, or a full model id (claude-…)"}) }
+                else {
+                    *e.model.lock().unwrap() = name.clone();
+                    let _ = std::fs::write(state_dir(&e.dir).join("model"), &name);
+                    super::events::log(&e.dir, "model", json!({"model": name}));
+                    json!({"ok": true, "model": name})
+                }
+            }
             "status" => e.status(),
             "watch" => {
                 let _ = w.set_write_timeout(Some(Duration::from_secs(2)));
