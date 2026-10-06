@@ -189,3 +189,158 @@ pub fn brief(cfg: &Cfg) -> String {
     }
     out
 }
+
+// ---- writing diagnostics ----------------------------------------------------------------
+//
+// Forming a diagnostic is an output like any other, and it should cost one call, not a
+// sequence of them. Hand-writing the JSON means finding a line number, copying the line
+// verbatim for the stale guard, inventing a unique code and escaping markdown into JSON —
+// four chances to be wrong, all of them mechanical. So the spec is declarative and anchored
+// by *text*; the code does the rest, reading the file to get `old_text` exactly right:
+//
+//     @ the table is what is wired, not what is possible.     <- verbatim, must be unique
+//     ! warn  the sentence is doing two jobs                  <- severity + message
+//     ? Keep the claim, drop the excuse. Math is fine: $a \preceq b$.
+//     + artifact knows about neither renderer nor form.       <- the replacement line(s)
+//
+// `?` and `+` may run over several lines. Repeat the block for each comment.
+
+pub struct Draft {
+    pub anchor: String,
+    pub severity: String,
+    pub message: String,
+    pub detail: String,
+    pub fix: String,
+}
+
+pub fn parse_spec(spec: &str) -> Result<Vec<Draft>, String> {
+    let mut out: Vec<Draft> = Vec::new();
+    let mut mode = ' ';
+    for raw in spec.lines() {
+        let (m, rest) = match raw.chars().next() {
+            Some(c @ ('@' | '!' | '?' | '+')) => (c, raw[1..].trim_start().to_string()),
+            _ => (' ', raw.to_string()),
+        };
+        if m == '@' {
+            out.push(Draft { anchor: rest, severity: "warn".into(), message: String::new(),
+                             detail: String::new(), fix: String::new() });
+            mode = '@';
+            continue;
+        }
+        let d = out.last_mut().ok_or("the spec must start with an @anchor line")?;
+        match m {
+            '!' => {
+                let (first, tail) = rest.split_once(char::is_whitespace).unwrap_or((rest.as_str(), ""));
+                if ["error", "warn", "info", "hint"].contains(&first) {
+                    d.severity = first.to_string();
+                    d.message = tail.trim().to_string();
+                } else { d.message = rest.clone(); }
+                mode = '!';
+            }
+            '?' => { d.detail = rest; mode = '?' }
+            '+' => { d.fix = rest; mode = '+' }
+            _ => match mode {   // a continuation line belongs to whichever block is open
+                '?' => { d.detail.push('\n'); d.detail.push_str(&rest) }
+                '+' => { d.fix.push('\n'); d.fix.push_str(&rest) }
+                '!' => { d.message.push(' '); d.message.push_str(rest.trim()) }
+                _ => {}
+            },
+        }
+    }
+    if out.is_empty() { return Err("empty spec".into()) }
+    Ok(out)
+}
+
+/// Resolve what a note was called on the command line: a slug, a vault-relative path, or a path.
+pub fn resolve(cfg: &Cfg, name: &str) -> Result<String, String> {
+    if let Some(d) = crate::doc::get(cfg, name) { return Ok(rel(cfg, &d.path)) }
+    let p = PathBuf::from(name);
+    if p.is_file() {
+        let abs = p.canonicalize().map_err(|e| e.to_string())?;
+        return Ok(rel(cfg, &abs));
+    }
+    if cfg.vault().join(name).is_file() { return Ok(name.to_string()) }
+    Err(format!("no note '{}'", name))
+}
+
+/// Whitespace-collapsed text, plus the source line of every *byte* of it — byte offsets,
+/// because that is what `match_indices` reports and the notes are full of em dashes.
+fn normalize(text: &str) -> (String, Vec<usize>) {
+    let (mut out, mut at) = (String::new(), Vec::new());
+    let mut line = 0usize;
+    let mut space = true;        // leading whitespace is dropped
+    for c in text.chars() {
+        if c.is_whitespace() {
+            if !space { out.push(' '); at.push(line) }
+            space = true;
+        } else {
+            out.push(c);
+            for _ in 0..c.len_utf8() { at.push(line) }
+            space = false;
+        }
+        if c == '\n' { line += 1 }
+    }
+    at.push(line);
+    (out, at)
+}
+
+fn code_for(taken: &[String], n: usize) -> String {
+    let abc = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64).unwrap_or(1) ^ ((n as u64 + 1) * 0x9E37_79B9_7F4A_7C15);
+    loop {
+        let mut c = String::new();
+        for _ in 0..4 {
+            seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+            c.push(abc[(seed % abc.len() as u64) as usize] as char);
+        }
+        if !taken.contains(&c) { return c }
+    }
+}
+
+/// Write a batch of comments onto one note. One call, one event.
+pub fn review(cfg: &Cfg, name: &str, spec: &str, replace: bool) -> Result<String, String> {
+    let note = resolve(cfg, name)?;
+    let drafts = parse_spec(spec)?;
+    let text = std::fs::read_to_string(cfg.vault().join(&note)).map_err(|e| e.to_string())?;
+    let lines: Vec<&str> = text.split('\n').collect();
+
+    let mut data = load(cfg);
+    let mut list: Vec<Value> = if replace { Vec::new() }
+        else { data.get(&note).and_then(|l| l.as_array()).cloned().unwrap_or_default() };
+    let mut taken: Vec<String> = all(cfg).into_iter().map(|d| d.code).collect();
+
+    let (norm, at) = normalize(&text);
+    for (n, d) in drafts.iter().enumerate() {
+        // Anchors are matched on whitespace-collapsed text, so a sentence that happens to wrap
+        // still matches: where the note breaks its lines is not something I should have to know.
+        let (a, _) = normalize(&d.anchor);
+        let a = a.trim();
+        if a.is_empty() { return Err("an @anchor is empty".into()) }
+        let hits: Vec<usize> = norm.match_indices(a).map(|(i, _)| i).collect();
+        match hits.len() {
+            0 => return Err(format!("anchor not in {}: {:?}", note, d.anchor.trim())),
+            1 => {}
+            k => return Err(format!("anchor occurs {} times in {}: {:?}", k, note, d.anchor.trim())),
+        }
+        let first = at[hits[0].min(at.len() - 1)];
+        let last = at[(hits[0] + a.len()).min(at.len() - 1)].max(first);
+        let code = code_for(&taken, n);
+        taken.push(code.clone());
+        let mut e = serde_json::json!({
+            "code": code, "line": first as i64 + 1, "col": 1,
+            "severity": d.severity, "message": d.message,
+        });
+        if !d.detail.trim().is_empty() { e["detail"] = Value::from(d.detail.trim()); }
+        if !d.fix.trim().is_empty() {
+            // the fix replaces whole lines, and old_text comes from the file, never from the
+            // model: the stale guard is right by construction instead of by transcription
+            e["fix"] = serde_json::json!([{ "start_line": first as i64 + 1, "end_line": last as i64 + 1,
+                "old_text": lines[first..=last].join("\n"), "new_text": d.fix.trim_end() }]);
+        }
+        list.push(e);
+    }
+    let n = list.len();
+    put(cfg, &mut data, &note, list);
+    Ok(format!("{} comment(s) on {}", n, note))
+}

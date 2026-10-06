@@ -70,6 +70,16 @@ fn main() {
         },
 
         "diag" => print!("{}", diag::brief(&cfg)),
+        // one call, N comments: anchors are verbatim text, the binary finds the lines
+        "review" => {
+            let replace = rest.iter().any(|a| a == "--replace");
+            let note = rest.iter().find(|a| !a.starts_with("--")).cloned().unwrap_or_default();
+            let mut spec = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut spec).ok();
+            match diag::review(&cfg, &note, &spec, replace) {
+                Ok(m) => println!("{}", m), Err(e) => die(&e),
+            }
+        }
         "apply" => match diag::apply(&cfg, rest.first().map(|s| s.as_str()).unwrap_or("")) {
             Ok(m) => println!("{}", m), Err(e) => die(&e) },
         "dismiss" => match diag::dismiss(&cfg, rest.first().map(|s| s.as_str()).unwrap_or(""), &rest[1..].join(" ")) {
@@ -103,6 +113,12 @@ facet unpost <slug>         unpublish
 facet docs                  what is published
 facet send <text>           put a message into the conversation
 facet push <text>           push a message to Telegram
+facet review <note> [--replace] < spec
+                            write comments on a note; the spec is
+                              @ verbatim anchor text (must be unique in the note)
+                              ! [severity] message
+                              ? long explanation, markdown + math (optional, multi-line)
+                              + replacement for the anchored line (optional, multi-line)
 facet diag                  open comments
 facet apply|dismiss <code>  triage one
 facet status                where everything stands";
