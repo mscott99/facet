@@ -188,9 +188,15 @@ fn note_html(cfg: &Cfg, d: &doc::Doc) -> String {
         let tl = l.trim_start();
         if tl.starts_with("```") { fence = !fence }
         if tl == "$$" { math = !math }
-        if l.trim().is_empty() && !fence && !math {
+        if fence || math { continue }
+        // Cut at blank lines, and at the start of a top-level list item: lists have no blank
+        // lines inside them, and without this a comment on one bullet lands under the last.
+        if l.trim().is_empty() {
             emit(&mut out, start, i + 1);
             start = i + 1;
+        } else if (l.starts_with("- ") || l.starts_with("* ")) && i > start {
+            emit(&mut out, start, i);
+            start = i;
         }
     }
     emit(&mut out, start, lines.len());
