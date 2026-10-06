@@ -156,6 +156,9 @@ fn editor(dir: &std::path::Path, mut rl: DefaultEditor) {
                     "/stats" => Ok(crate::optchat::usage::table(&dir)),
                     "/tree" => tree(&dir),
                     "/help" | "/?" => Ok(format!("{}{}{}", DIM, HELP, OFF)),
+                    t if t.starts_with("/import ") => Ok(format!("{}{}{}", DIM,
+                        crate::optchat::import::files(&crate::optchat::import::split(&t[8..])).iter()
+                            .map(|l| format!("· {}", l)).collect::<Vec<_>>().join("\n"), OFF)),
                     "/usage" => engine::request(&dir, json!({"op": "status"})).map(|v| v["limits"].as_str().unwrap_or("not known yet (no call since the engine started)").to_string()),
                     "/resume" => engine::request(&dir, json!({"op": "resume"})).map(|_| String::new()),
                     "/cancel" => engine::request(&dir, json!({"op": "cancel"})).map(|_| String::new()),
@@ -180,6 +183,7 @@ fn editor(dir: &std::path::Path, mut rl: DefaultEditor) {
 const HELP: &str = "\
 /usage    session and week left, reset time
 /tree     the memory tree in the browser (also /tree on the web route)
+/import <file>...  add files to the memory, one note each (drag files in)
 /view     what the agent sees of its memory
 /cancel   stop the running turn
 /resume   restart the compactor after a pause

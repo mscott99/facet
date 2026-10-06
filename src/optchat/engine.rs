@@ -5,6 +5,7 @@
 //
 //   -> {"op":"send","text":"..."}     a user message (queued, or delivered mid-run)
 //   -> {"op":"cancel"}                stop the wait or the running call
+//   -> {"op":"note","text":..,"date":..}  import a note (refused during a turn; duplicates skipped)
 //   -> {"op":"resume"}                lift a compactor pause
 //   -> {"op":"view"} / {"op":"status"}
 //   -> {"op":"watch"}                 then a stream of events, one per line:
@@ -150,11 +151,13 @@ impl Engine {
     }
 
     /// Append to the log, extend the view, and let the compactor at it.
-    pub fn log(self: &Arc<Self>, kind: &str, text: &str) {
+    pub fn log(self: &Arc<Self>, kind: &str, text: &str) { self.log_at(kind, text, &super::store::now_iso()) }
+
+    pub fn log_at(self: &Arc<Self>, kind: &str, text: &str, date: &str) {
         let r = {
             let mut m = self.mem.lock().unwrap();
             let mm = &mut *m;
-            let r = mm.store.log(kind, text);
+            let r = mm.store.log_at(kind, text, date);
             if let Ok(i) = r { mm.view.append(&mm.store, i, self.conf.view); }
             self.changed.notify_all();
             r
@@ -313,6 +316,17 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
                 if text.is_empty() { json!({"ok": false, "error": "empty"}) } else { turn::input(e, text); json!({"ok": true}) }
             }
             "cancel" => { turn::cancel(e); json!({"ok": true}) }
+            // §10 importing: a note (kind `note`) with its own date, appended between turns;
+            // the same text twice is added once
+            "note" => {
+                let text = v["text"].as_str().unwrap_or("").to_string();
+                let date = v["date"].as_str().map(String::from).unwrap_or_else(super::store::now_iso);
+                let dup = e.mem.lock().unwrap().store.msgs.iter().any(|m| m.kind == "note" && m.text == text);
+                if text.trim().is_empty() { json!({"ok": false, "error": "empty"}) }
+                else if e.turn.lock().unwrap().running { json!({"ok": false, "error": "a turn is running; import when it is done"}) }
+                else if dup { json!({"ok": true, "skipped": "already in the memory"}) }
+                else { e.log_at("note", &text, &date); json!({"ok": true, "i": e.mem.lock().unwrap().store.t() - 1}) }
+            }
             "resume" => {
                 let mut m = e.mem.lock().unwrap();
                 m.pause = None;

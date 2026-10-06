@@ -66,6 +66,10 @@ fn main() {
             match std::fs::write(&out, optchat::browse::html(&s, &v, optchat::VIEW, None)) {
                 Ok(()) => println!("{}", out.display()), Err(e) => die(&e.to_string()) }
         }
+        "import" => {
+            if rest.is_empty() { die("facet import <file>...") }
+            for l in optchat::import::files(rest) { println!("{}", l); }
+        }
         "stats" => print!("{}", optchat::usage::table(&optchat::engine::dir())),
         "cancel" => match optchat::engine::request(&optchat::engine::dir(), serde_json::json!({"op": "cancel"})) {
             Ok(_) => println!("cancelled"), Err(e) => die(&e) },
@@ -138,6 +142,7 @@ facet chat                  the conversation in this terminal (starts the engine
 facet engine                run the engine in the foreground (LaunchAgent: launchd/com.facet.engine.plist)
 facet view                  print the view the model sees
 facet browse [out.html]     the whole memory tree as one page (also served at /tree)
+facet import <file>...      add files to the memory, one note each (between turns)
 facet stats                 token usage per day and kind
 facet cancel                stop the running turn
 facet serve                 the web route, plus Telegram if configured

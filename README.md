@@ -40,6 +40,7 @@ Loopback only; published over the tailnet by `tailscale serve --bg --https=10443
     facet view          the view the model sees
     facet stats         usage per day and kind, from ~/.optchat/usage.jsonl
     facet browse [f]    the whole memory tree as one page (live at /tree in the web route)
+    facet import <f>... add files to the memory, one note each (also /import in the chat)
 
 Settings live under `chat` in facet.json (all optional): `model` (opus), `effort` (high),
 `compact_model` (sonnet), `compact_effort` (medium), `tools`, `permission`

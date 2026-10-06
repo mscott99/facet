@@ -17,6 +17,7 @@ pub mod claude;
 pub mod compact;
 pub mod engine;
 pub mod events;
+pub mod import;
 pub mod mcp;
 pub mod prompts;
 pub mod store;

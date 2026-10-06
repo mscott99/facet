@@ -111,10 +111,13 @@ impl Store {
     }
 
     /// Append message `i = T`. Returns its id.
-    pub fn log(&mut self, kind: &str, text: &str) -> std::io::Result<usize> {
+    pub fn log(&mut self, kind: &str, text: &str) -> std::io::Result<usize> { self.log_at(kind, text, &now_iso()) }
+
+    /// Append with a given date (an imported note keeps the date it was written).
+    pub fn log_at(&mut self, kind: &str, text: &str, date: &str) -> std::io::Result<usize> {
         let i = self.msgs.len();
         let size = kind.len() + 2 + text.len();
-        let date = now_iso();
+        let date = date.to_string();
         let line = json!({"i": i, "kind": kind, "text": text, "size": size, "date": date}).to_string();
         append_line(&self.dir.join("chat/main").join(format!("{}.jsonl", today())), &line)?;
         self.msgs.push(Msg { kind: kind.into(), text: text.into(), date });

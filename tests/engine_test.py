@@ -157,6 +157,26 @@ try:
     k = L.index(("user", "SURVIVOR"))
     check(L[k + 1:k + 2] == [("talk", "ok")], "a message accepted before a crash is answered after the restart")
 
+    # F: importing notes
+    nf = os.path.join(D, "a note.md")
+    open(nf, "w").write("# Title\nsome remembered fact\n")
+    os.utime(nf, (1700000000, 1700000000))
+    out = subprocess.run([BIN, "import", nf], env=env, capture_output=True, text=True, timeout=30).stdout
+    m = log()[-1]
+    check("message" in out and m["kind"] == "note" and m["text"].endswith("# Title\nsome remembered fact") and "a note.md" in m["text"].split("\n")[0],
+          "a file becomes one note: its path, then its content")
+    check(m["date"].startswith("2023-11-14"), "the note keeps the file's date")
+    out2 = subprocess.run([BIN, "import", nf], env=env, capture_output=True, text=True, timeout=30).stdout
+    check("skipped" in out2 and log()[-1]["i"] == m["i"], "importing the same file again adds nothing")
+    bf = os.path.join(D, "bin.dat"); open(bf, "wb").write(b"\xff\xfe\x00\x01")
+    out3 = subprocess.run([BIN, "import", bf], env=env, capture_output=True, text=True, timeout=30).stdout
+    check("NOT imported: not a text file" in out3, "a binary file is refused")
+    req({"op": "send", "text": "TOOLS 3"})
+    wait(lambda: req({"op": "status"})["busy"], 10, "turn for import refusal")
+    r = req({"op": "note", "text": "during a turn"})
+    check(r["ok"] is False and "turn is running" in r["error"], "no import while a turn runs")
+    wait(idle, 60, "idle after import tests")
+
     u = [json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))]
     check({"compact", "prime", "turn"} <= {x["kind"] for x in u}, "usage logged per request for compact, prime and turn")
     check(os.path.isdir(os.path.join(D, ".git")), "chat directory committed after turns")
