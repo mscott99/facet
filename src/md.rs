@@ -40,8 +40,61 @@ pub fn render_at(src: &str, note_base: &str, srcs: &[crate::doc::Src]) -> String
     let mut o = opts();
     o.render.sourcepos = true;        // comrak stamps every block tag with its own source line
     let html = mark_lines(&markdown_to_html(src, &o), srcs);
+    let html = dim_glyphs(&wrap_embeds(&html));
     if note_base.is_empty() { return html }
     rewrite_links(&html, note_base)
+}
+
+/// `doc::inline` surrounds a resolved embed with two sentinel paragraphs, each alone in a
+/// `<code>` span (see `doc::open_marker`/`close_marker`): the opening one names the
+/// environment and the note it came from, the closing one has no payload at all. Found here
+/// and turned into the one piece of HTML on the page that markdown did not generate itself —
+/// a `<div>` with a hairline rule, a quiet label, and (nested embeds being just more of the
+/// same markers, correctly ordered by construction) a matching `</div>` wherever it closes.
+fn wrap_embeds(html: &str) -> String {
+    use crate::doc::{MARK_OPEN, MARK_CLOSE, MARK_SEP};
+    let mut out = String::with_capacity(html.len() + 512);
+    let mut rest = html;
+    loop {
+        // the sentinel itself, not the `<code>` around it: comrak's sourcepos option tags
+        // that inline span too, so it carries attributes of its own (a marker's `data-line`
+        // and `data-note`, harmless but not literal `<code>`) which a fixed string would miss
+        let o = rest.find(MARK_OPEN);
+        let c = rest.find(MARK_CLOSE);
+        let (at, opening) = match (o, c) {
+            (None, None) => break,
+            (Some(o), None) => (o, true),
+            (None, Some(c)) => (c, false),
+            (Some(o), Some(c)) => if o < c { (o, true) } else { (c, false) },
+        };
+        // back up to the start of the `<p>` this marker sits alone in
+        let head = &rest[..at];
+        let p_at = head.rfind("<p").unwrap_or(head.len());
+        out.push_str(&head[..p_at]);
+        let tail = &rest[at..];
+        let Some(end) = tail.find("</code></p>") else { out.push_str(tail); break };
+        if opening {
+            let payload = &tail[MARK_OPEN.len_utf8()..end];
+            let (env, note) = payload.split_once(MARK_SEP).unwrap_or(("", payload));
+            out.push_str("<div class=embed><p class=envlabel>");
+            if !env.is_empty() { out.push_str(env); out.push_str(" &middot; "); }
+            out.push_str(note);
+            out.push_str("</p>");
+        } else {
+            out.push_str("</div>");
+        }
+        rest = &tail[end + "</code></p>".len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `doc::close` dims the ∎ / □ it appends by prefixing it with `MARK_GLYPH`, wherever that
+/// line ends up — inline on prose, or alone when a fence or a display forced its own line.
+fn dim_glyphs(html: &str) -> String {
+    let g = crate::doc::MARK_GLYPH.to_string();
+    html.replace(&format!("{}∎", g), "<span class=envclose>∎</span>")
+        .replace(&format!("{}□", g), "<span class=envclose>□</span>")
 }
 
 /// comrak's `data-sourcepos="startline:col-endline:col"` on each block tag, turned into the
@@ -211,6 +264,61 @@ mod tests {
         let html = render_at("a paragraph", "", &[]);
         assert!(!html.contains("data-line"));
         assert!(!html.contains("data-sourcepos"));
+    }
+
+    /// A vault of one or more notes, to assemble a real embed through `doc::assemble` and
+    /// render it, rather than hand-building the sentinel text `wrap_embeds` expects.
+    fn vault(name: &str, notes: &[(&str, &str)]) -> crate::cfg::Cfg {
+        let d = std::env::temp_dir().join(format!("facet-md-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for (n, text) in notes { std::fs::write(d.join(format!("{}.md", n)), text).unwrap(); }
+        crate::cfg::Cfg(serde_json::json!({"vault": d.to_string_lossy()}))
+    }
+
+    #[test]
+    fn an_embed_renders_as_a_delimited_block_with_its_label_and_dimmed_close() {
+        let cfg = vault("embed-render", &[("A", "# Statement\nA network $G$.\n")]);
+        let (text, srcs) = crate::doc::assemble(&cfg, "Home", &["theorem::![[A#Statement]]"], 0);
+        let html = render_at(&text, "/n/", &srcs);
+        assert!(html.contains("<div class=embed>"), "the block gets a wrapper: {}", html);
+        assert!(html.contains("<p class=envlabel>Theorem &middot; A</p>"),
+            "the opening cue names the environment and the note: {}", html);
+        assert!(html.contains("<span class=envclose>□</span>"), "the closing glyph is dimmed: {}", html);
+        // no sentinel survives into the served page
+        for c in ['\u{E001}', '\u{E002}', '\u{E003}', '\u{E004}'] {
+            assert!(!html.contains(c), "sentinel {:?} leaked into: {}", c, html);
+        }
+        // the content inside still carries its click-to-comment provenance, from the note
+        // the statement actually came from — the wrapper must not have swallowed it
+        assert!(html.contains("data-note=\"A\""), "provenance survives the wrap: {}", html);
+    }
+
+    #[test]
+    fn an_unlabelled_embed_is_still_delimited_by_its_section_name() {
+        let cfg = vault("embed-plain", &[("A", "# Statement\nA network $G$.\n")]);
+        let (text, srcs) = crate::doc::assemble(&cfg, "Home", &["![[A#Statement]]"], 0);
+        let html = render_at(&text, "", &srcs);
+        assert!(html.contains("<p class=envlabel>Statement &middot; A</p>"), "{}", html);
+        assert!(html.contains("<span class=envclose>□</span>"), "{}", html);
+    }
+
+    #[test]
+    fn nested_embeds_render_as_nested_wrappers_that_close_innermost_first() {
+        let cfg = vault("embed-nest", &[
+            ("A", "# Statement\nfrom A\n\nlemma::![[B#Statement]]\n"),
+            ("B", "# Statement\nfrom B\n"),
+        ]);
+        let (text, srcs) = crate::doc::assemble(&cfg, "Home", &["theorem::![[A#Statement]]"], 0);
+        let html = render_at(&text, "", &srcs);
+        assert_eq!(html.matches("<div class=embed>").count(), 2, "one wrapper each for A and B: {}", html);
+        let closes: Vec<usize> = html.match_indices("</div>").map(|(i, _)| i).collect();
+        assert_eq!(closes.len(), 2, "one close each: {}", html);
+        let open_a = html.find("Theorem &middot; A").unwrap();
+        let open_b = html.find("Lemma &middot; B").unwrap();
+        assert!(open_a < open_b, "A opens before the embed nested inside it: {}", html);
+        assert!(open_b < closes[0] && closes[0] < closes[1],
+            "B's wrapper closes before A's own, which closes last: {}", html);
     }
 
     #[test]

@@ -357,12 +357,28 @@ fn inline(cfg: &Cfg, line: &str, at: &Src, depth: usize, seen: &mut Vec<String>,
     while acc.first().is_some_and(|(t, _)| t.trim().is_empty()) { acc.remove(0); }
     while acc.last().is_some_and(|(t, _)| t.trim().is_empty()) { acc.pop(); }
     labelled(e.label.as_deref(), &mut acc);
-    if let Some(lbl) = &e.label { close(lbl, &mut acc); }
+    let proof = e.label.as_deref().is_some_and(|l| l.eq_ignore_ascii_case("proof"))
+        || e.section.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("proof"));
+    close(proof, &mut acc);
+    let env = e.label.as_deref().map(cap).or_else(|| e.section.clone());
     // Blank lines around it: in a longform the embeds sit on consecutive lines, and two
-    // statements with no blank line between them would render as one paragraph.
-    out.push((String::new(), at.clone()));
+    // statements with no blank line between them would render as one paragraph. The open
+    // and close markers are each a paragraph of their own for the same reason.
+    let blank = (String::new(), at.clone());
+    out.push(blank.clone());
+    out.push((open_marker(env.as_deref(), &e.note), at.clone()));
+    out.push(blank.clone());
     out.append(&mut acc);
-    out.push((String::new(), at.clone()));
+    out.push(blank.clone());
+    out.push((close_marker(), at.clone()));
+    out.push(blank);
+}
+
+/// The capitalized word a reader sees for a label or a section name: `"proof"` or `"Proof"`
+/// alike become `"Proof"`.
+fn cap(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// The label a reader sees: "Definition." in bold, run into the first line, which is how the
@@ -370,9 +386,11 @@ fn inline(cfg: &Cfg, line: &str, at: &Src, depth: usize, seen: &mut Vec<String>,
 /// which belongs to the embedded note too, so the label is clickable like the rest of it.
 fn labelled(label: Option<&str>, body: &mut Vec<(String, Src)>) {
     let (Some(label), Some(first)) = (label, body.first().cloned()) else { return };
-    let mut c = label.chars();
-    let name: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
-    if first.0.starts_with(|c: char| "#->|*".contains(c)) || first.0.starts_with("$$") {
+    let name = cap(label);
+    // A first line that is itself a nested embed's opening marker is run into nothing:
+    // merging text into it would corrupt the marker `labelled` has no business touching.
+    if first.0.starts_with(|c: char| "#->|*".contains(c)) || first.0.starts_with("$$")
+        || first.0.contains(MARK_OPEN) {
         body.insert(0, (String::new(), first.1.clone()));
         body.insert(0, (format!("**{}.**", name), first.1));
     } else {
@@ -380,20 +398,44 @@ fn labelled(label: Option<&str>, body: &mut Vec<(String, Src)>) {
     }
 }
 
+/// Sentinels threading an embed's edges through plain markdown text: invisible to a reader,
+/// each alone in a code span (so no markdown feature — emphasis, a link, a heading — can
+/// touch the text riding with it), and gone by the time the page is served. `md::render_at`
+/// finds them again in the rendered HTML and turns each into the block's rule, its quiet
+/// opening label, and the `</div>` that closes it; `MARK_GLYPH` just dims the tombstone that
+/// was already there. None of the four is a character a note would plausibly contain itself.
+pub const MARK_OPEN: char = '\u{E001}';
+pub const MARK_CLOSE: char = '\u{E002}';
+pub const MARK_SEP: char = '\u{E003}';
+pub const MARK_GLYPH: char = '\u{E004}';
+
+/// The paragraph that opens a delimited embed: its environment name (a label, or failing
+/// that a section name — "Lemma", "Proof", "Statement" — empty when the embed names neither)
+/// and the note it came from.
+fn open_marker(env: Option<&str>, note: &str) -> String {
+    format!("`{}{}{}{}`", MARK_OPEN, env.unwrap_or(""), MARK_SEP, note)
+}
+
+fn close_marker() -> String { format!("`{}`", MARK_CLOSE) }
+
 /// Where an embedded environment ends, for a reader who only sees it inlined and has no page
 /// boundary to tell it apart from the prose around it. A proof earns the usual tombstone; any
-/// other labelled block (a theorem, a definition...) a plainer mark — either way, appended to
-/// the last line it can safely join, or its own line when that would break a fence or a display.
-fn close(label: &str, body: &mut Vec<(String, Src)>) {
-    let mark = if label.eq_ignore_ascii_case("proof") { " ∎" } else { " □" };
+/// other block (a theorem, a definition, even one named by neither a label nor a section) a
+/// plainer mark — either way, appended to the last line it can safely join, or its own line
+/// when that would break a fence or a display, and marked for `md::render_at` to dim.
+fn close(proof: bool, body: &mut Vec<(String, Src)>) {
+    let glyph = if proof { '∎' } else { '□' };
     let Some(last) = body.last_mut() else { return };
-    let risky = { let t = last.0.trim(); t == "$$" || t.starts_with("```") || t.ends_with("```") };
+    // A last line that is itself a nested embed's closing marker is left untouched, same
+    // reasoning as `labelled`'s: the mark gets its own line rather than joining that text.
+    let risky = { let t = last.0.trim();
+        t == "$$" || t.starts_with("```") || t.ends_with("```") || t.contains(MARK_CLOSE) };
     if risky {
         let src = last.1.clone();
         body.push((String::new(), src.clone()));
-        body.push((mark.trim().to_string(), src));
+        body.push((format!("{}{}", MARK_GLYPH, glyph), src));
     } else {
-        last.0.push_str(mark);
+        last.0.push_str(&format!(" {}{}", MARK_GLYPH, glyph));
     }
 }
 
@@ -447,7 +489,9 @@ mod tests {
             ("C", "# Statement\nfrom C\n\nlemma::![[A#Statement]]\n"),
         ]);
         let out = expand(&cfg, "proposition::![[A#Statement]]");
-        assert!(out.starts_with("\n**Proposition.** from A"), "run-in label: {}", out);
+        assert!(out.contains(&format!("{}Proposition{}A", MARK_OPEN, MARK_SEP)),
+            "the opening cue names the environment and the note: {}", out);
+        assert!(out.contains("**Proposition.** from A"), "run-in label: {}", out);
         assert!(out.contains("**Lemma.** from B") && out.contains("**Lemma.** from C"));
         assert!(out.contains("nested too deep"), "the fourth level is refused: {}", out);
         assert!(!out.contains("from A\n\n**Lemma.** from B\n\n**Lemma.** from C\n\n**Lemma.** from A"));
@@ -462,26 +506,50 @@ mod tests {
         let (text, srcs) = assemble(&cfg, "A", &lines, 4);
         let home = |n| ("A".to_string(), n);
         let there = |n| ("B".to_string(), n);
-        assert_eq!(srcs, vec![home(5), home(6), there(2), there(3), home(6)]);
+        // every blank and marker around the embed is tagged with the embed line itself (6)
+        assert_eq!(srcs, vec![home(5), home(6), home(6), home(6), there(2), there(3), home(6), home(6), home(6)]);
         let got: Vec<&str> = text.lines().collect();
         assert_eq!(got[0], "intro line");
-        assert_eq!(got[2], "**Theorem.** first");
-        assert_eq!(got[3], "second □");   // the close mark lands on B's own last line
+        assert!(got[2].contains(&format!("{}Theorem{}B", MARK_OPEN, MARK_SEP)), "open marker: {}", got[2]);
+        assert_eq!(got[4], "**Theorem.** first");
+        assert_eq!(got[5], format!("second {}□", MARK_GLYPH));   // the close mark lands on B's own last line
+        assert!(got[7].contains(MARK_CLOSE), "close marker: {}", got[7]);
     }
 
     #[test]
-    fn a_labelled_embed_is_closed_where_it_ends() {
+    fn every_embed_is_delimited_and_closed_even_without_a_label() {
         let cfg = vault("closed", &[
             ("A", "# Statement\nA network $G$.\n"),
             ("B", "# Proof\nBy induction on depth.\n"),
         ]);
         let thm = expand(&cfg, "theorem::![[A#Statement]]");
-        assert!(thm.trim_end().ends_with("A network $G$. □"), "theorem gets a plain mark: {}", thm);
+        assert!(thm.contains(&format!("A network $G$. {}□", MARK_GLYPH)), "theorem gets a plain mark: {}", thm);
+        assert!(thm.contains(&format!("{}Theorem{}A", MARK_OPEN, MARK_SEP)), "opening cue: {}", thm);
+        assert!(thm.contains(MARK_CLOSE), "closing cue: {}", thm);
         let proof = expand(&cfg, "proof::![[B#Proof]]");
-        assert!(proof.trim_end().ends_with("By induction on depth. ∎"), "proof gets a tombstone: {}", proof);
-        // an unlabelled embed names nothing to close
+        assert!(proof.contains(&format!("By induction on depth. {}∎", MARK_GLYPH)), "proof gets a tombstone: {}", proof);
+        // an unlabelled embed has no label to run in, but still gets delimited and closed —
+        // named by its section instead
         let cfg2 = vault("closed-plain", &[("A", "# Statement\nA network $G$.\n")]);
-        assert!(!expand(&cfg2, "![[A#Statement]]").contains('□'));
+        let plain = expand(&cfg2, "![[A#Statement]]");
+        assert!(plain.contains(&format!("{}□", MARK_GLYPH)), "an unlabelled embed still closes: {}", plain);
+        assert!(plain.contains(&format!("{}Statement{}A", MARK_OPEN, MARK_SEP)), "named by its section: {}", plain);
+    }
+
+    #[test]
+    fn nested_embeds_each_get_their_own_markers_correctly_ordered() {
+        let cfg = vault("nest-marks", &[
+            ("A", "# Statement\nfrom A\n\nlemma::![[B#Statement]]\n"),
+            ("B", "# Statement\nfrom B\n"),
+        ]);
+        let out = expand(&cfg, "theorem::![[A#Statement]]");
+        let open_a = out.find(&format!("{}Theorem{}A", MARK_OPEN, MARK_SEP)).expect("A's open marker");
+        let open_b = out.find(&format!("{}Lemma{}B", MARK_OPEN, MARK_SEP)).expect("B's open marker");
+        let close_b = out[open_b..].find(MARK_CLOSE).map(|i| i + open_b).expect("B's close marker");
+        let after_b = close_b + MARK_CLOSE.len_utf8();
+        let close_a = out[after_b..].find(MARK_CLOSE).map(|i| i + after_b).expect("A's close marker");
+        assert!(open_a < open_b && open_b < close_b && close_b < close_a,
+            "B nests inside A, opened after and closed before it: {}", out);
     }
 
     #[test]
