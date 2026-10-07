@@ -300,8 +300,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     steps leave no line to summarize — but every node the compactor has already built is
     there, so the depth of the chat is open to it while only the summary is pushed on it.
     Because that reading is free, the `AGENT` prompt tells the subagent so and tells it to
-    zoom freely rather than guess from a summary line — the same stance `MASTER` takes, and
-    with the same rule for a conflict: the later line is the sharper memory.
+    zoom freely rather than guess from a summary line — the same stance `MASTER` takes.
     Measured against the CLI: a subagent given those names in its definition called
     `mcp__optchat__zoom` with `{id: 0, n: 1}` and got `0+0|user: Can you put on my alarm?`
     back from the live engine, with no permission prompt. The MCP tool names need not be in
