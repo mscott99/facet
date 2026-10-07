@@ -16,6 +16,9 @@
 #                 follow-up turn of this conversation (a second `init`) to hand it over —
 #                 all as measured on the real CLI (2.1.268)
 #   otherwise  -> one reply "ok"
+# A detached agent (`facet spawn`, FACET_SPAWN=1 in the environment): sleeps 1 s, then one
+# reply "SPAWN REPORT: looked into it, done" — long enough that a turn sent right after the
+# spawn call finishes first, proving the engine does not wait on it.
 # Compactor (no --tools): replies 600 bytes first, then 300 bytes after the size feedback,
 # unless the step contains "STUBBORN" (always 600). "REFUSE" makes it fail.
 # Every invocation is appended to $FAKE_LOG as one JSON line (argv, env, inputs).
@@ -65,9 +68,19 @@ def result(text, err=False):
 out({"type": "system", "subtype": "init", "tools": ["Bash", "mcp__optchat__zoom", "mcp__optchat__date"]})
 first = inbox.get()
 if first is None: sys.exit(0)
-note(kind="compact" if compactor else ("prime" if prime else "turn"), argv=argv,
+spawned = os.environ.get("FACET_SPAWN") == "1"
+note(kind="spawn" if spawned else ("compact" if compactor else ("prime" if prime else "turn")), argv=argv,
      env={k: os.environ.get(k) for k in ["DISABLE_PROMPT_CACHING", "CLAUDE_CODE_PROMPT_CACHE_TTL"]},
      content=first["message"]["content"])
+
+# a detached agent (`facet spawn`): no Task tool, no engine-side stdin left open after this
+# one message, and no engine thread tied to the turn is waiting on it — a deliberate delay
+# proves the engine (and a turn sent meanwhile) does not wait for it either
+if spawned:
+    time.sleep(1.0)
+    step([{"type": "text", "text": "SPAWN REPORT: looked into it, done"}])
+    result("SPAWN REPORT: looked into it, done")
+    sys.exit(0)
 
 if prime:
     out({"type": "stream_event", "event": {"type": "message_start", "message": {"model": "fake-model", "usage": usage(0, 5000)}}})

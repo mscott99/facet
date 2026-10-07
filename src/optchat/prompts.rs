@@ -5,10 +5,18 @@
 // `claude -p` (see README.md, Departures from the gist). AGENT is ours, and says what the gist says to a subagent: one
 // task, the view as it stood at the spawn, and a report that stands on its own.
 //
+// Two ways to send one out, both told with AGENT: a Claude Code `Task` call, which lives and
+// dies inside the master's own `claude -p` process (so a backgrounded one is killed the moment
+// the turn's reply ends — the master's wording below says this plainly, since it was measured),
+// and `facet spawn` (src/optchat/agent.rs), the engine's own `claude -p`, which outlives any one
+// turn. Both report the same way once they are done: a message starting "[id] " that begins a
+// fresh turn.
+//
 // MASTER, COMPACT and VIEW_DOC are the head of every cached prefix: they must not change
 // between calls, so nothing volatile (dates, state) may ever be put in them (§7.2, §11.9).
 // AGENT is the exception, since an agent definition's prompt never enters the master's own
-// request: the view is appended to it (see `agents` below).
+// request: the view is appended to it (see `agents` below), the same text `facet spawn` sends
+// a detached agent as its system prompt.
 
 pub const MASTER: &str = "\
 You are {NAME}, an AI agent that works for one user in a single chat that
@@ -39,9 +47,14 @@ as it stands and can zoom it as you can, but it cannot ask you
 anything: put in the task what the view would not tell it, and ask for
 what it found and where that came from. Send it in the foreground
 (run_in_background false) when you need what it finds to finish what
-you are doing: a backgrounded one cannot reach you in this turn, and
-its report comes back on its own, as a message that starts another
-turn.";
+you are doing: a backgrounded one is killed the moment your reply ends
+(Claude Code's own doing, not yours), so its report rarely comes back.
+For work that should outlive this turn, use `facet spawn [--model M]
+[--kind general-purpose|explore] [--desc D] <task>` with Bash instead:
+it is not a Task call, so your turn ending does not touch it, and its
+report reaches you later the same way a backgrounded one would, had it
+lived — a message of its own, starting \"[id] \", that begins a fresh
+turn whenever it is ready.";
 
 pub const VIEW_DOC: &str = "\
 The view: the whole chat between {NAME} and the user, oldest first, inside

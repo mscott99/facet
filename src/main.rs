@@ -101,6 +101,29 @@ fn main() {
             Err(e) => die(&e),
         },
 
+        // a subagent that outlives this turn (§9, detached): returns at once; its report
+        // arrives later, as a message of its own
+        "spawn" => {
+            let (mut model, mut kind, mut desc) = (String::new(), String::new(), String::new());
+            let mut words = Vec::new();
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--model" => { model = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                    "--kind" => { kind = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                    "--desc" => { desc = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                    w => { words.push(w.to_string()); i += 1; }
+                }
+            }
+            let task = words.join(" ");
+            match optchat::engine::request(&optchat::engine::dir(),
+                serde_json::json!({"op": "spawn", "model": model, "kind": kind, "desc": desc, "task": task})) {
+                Ok(v) if v["ok"].as_bool() == Some(true) => println!("{}", v["id"].as_str().unwrap_or("")),
+                Ok(v) => die(v["error"].as_str().unwrap_or("refused")),
+                Err(e) => die(&e),
+            }
+        }
+
         "diag" => print!("{}", diag::brief(&cfg)),
         // one call, N comments: anchors are verbatim text, the binary finds the lines
         "review" => {
@@ -154,6 +177,9 @@ facet docs                  what is published
 facet send [--later] <text> put a message into the conversation (--later: a turn of its own,
                             after the running one, instead of at its next tool call)
 facet push <text>           push a message to Telegram
+facet spawn [--model M] [--kind general-purpose|explore] [--desc D] <task>
+                            a subagent that outlives this turn: returns its id at once; its
+                            report arrives later, as a message of its own starting \"[id] \"
 facet review <note> [--replace] < spec
                             write comments on a note; the spec is
                               @ verbatim anchor text (must be unique in the note)

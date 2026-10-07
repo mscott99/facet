@@ -12,6 +12,9 @@
 //   usage    one line per API request, and the tables made from them
 //   browse   the whole tree as one HTML page (§10)
 //   events   introspection log, outside the chat directory (never read back)
+//   agent    a subagent spawned to outlive its turn: its own `claude -p`, owned by the
+//            engine, not the turn (§9, detached)
+pub mod agent;
 pub mod browse;
 pub mod claude;
 pub mod compact;

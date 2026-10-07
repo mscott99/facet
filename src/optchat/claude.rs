@@ -34,6 +34,23 @@ pub fn bin() -> String {
 
 impl Proc {
     pub fn spawn(args: &[String], env: &[(&str, &str)], cwd: &std::path::Path) -> std::io::Result<Proc> {
+        Self::start(Self::command(args, env, cwd))
+    }
+
+    /// Like `spawn`, but in its own process group (a `setsid`-equivalent): it does not share
+    /// the master's call's fate. Used for a subagent spawned to outlive the turn that asked
+    /// for it (§9, detached) — the engine process that calls this already outlives any one
+    /// turn, but a process group of its own keeps a signal meant for a terminal or a job's
+    /// whole group from reaching it too.
+    pub fn spawn_detached(args: &[String], env: &[(&str, &str)], cwd: &std::path::Path) -> std::io::Result<Proc> {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Self::command(args, env, cwd);
+        cmd.process_group(0);
+        Self::start(cmd)
+    }
+
+    /// The flags and environment every call shares, built but not yet spawned.
+    fn command(args: &[String], env: &[(&str, &str)], cwd: &std::path::Path) -> Command {
         let mut cmd = Command::new(bin());
         cmd.args(args).current_dir(cwd)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -54,6 +71,10 @@ impl Proc {
             cmd.env(k, "1");
         }
         for (k, v) in env { cmd.env(k, v); }
+        cmd
+    }
+
+    fn start(mut cmd: Command) -> std::io::Result<Proc> {
         let mut child = cmd.spawn()?;
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();

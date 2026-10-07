@@ -201,10 +201,10 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     programming); much, do it here. Cost alone must not decide it, since the saving and the
     loss are the same fact. The choice is left to the agent's judgement rather than made a
     rule of. Added:
-    each turn is a fresh process, so anything started in the background dies with it — except
-    a backgrounded subagent, which the call waits for whether or not the master does, so the
-    paragraph tells it to spawn in the foreground when it needs what the subagent finds
-    (see 19).
+    each turn is a fresh process, so anything started in the background dies with it — a
+    backgrounded Task subagent included, the moment the reply ends, so the paragraph tells it
+    to spawn in the foreground when it needs what the subagent finds. For work that should
+    outlive the turn, it names `facet spawn` (see 21) instead of backgrounding a Task call.
 13. *Free nodes are built at once*, without waiting for rule 3 (§4.1): they need no model call,
     so the compactor never sees them; the result is the same.
 14. *Failures do not retry forever at 10 s (§4.1).* A usage-limit error pauses the compactor
@@ -325,7 +325,43 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     done (97 kB for the same $37). Nothing else changes: the merge order, the tiling and the
     equality of a folded and a grown view are all as they were.
 
-Not implemented: computer use, and the gist's own spawn/tell protocol (§9).
+21. *A subagent that outlives its turn (§9, partial spawn).* A Task subagent lives and dies
+    inside the master's own `claude -p` process: when the call's reply ends, Claude Code kills
+    whatever it was still running in the background, no matter how it was told to behave.
+    Measured: three backgrounded Task agents, 831k eq between them (one alone 564k eq, 21
+    requests), logged "unfinished" with no report the instant their parent's process exited —
+    the work, and its cost, both lost. `facet spawn [--model] [--kind] [--desc] <task>` is a
+    second way to send one out, not a Task call at all: the CLI op reaches the engine over its
+    socket (the same one `facet send` uses) and `src/optchat/agent.rs::spawn` starts its own
+    `claude -p`, as a child of the engine process — which already outlives any one turn, since
+    a turn is only a thread inside it — and in its own process group besides
+    (`Proc::spawn_detached`, a `setsid`-equivalent), so nothing a turn does, including ending,
+    can reach it. It is given the same AGENT prompt a Task subagent gets, as its
+    `--system-prompt-file`, with the view at the moment of the call and the task as its first
+    message (mirroring the master's own call shape), the cheap model by default
+    (`agent_model`), and the same read tools plus `mcp__optchat__zoom`/`date` (`--kind explore`
+    withholds `Edit`/`Write`). A thread the engine owns — not the turn, which may have long
+    since ended — reads its stream-json, metering each request the way a turn meters its own
+    and writing every event to `<state dir>/agents/<id>.jsonl` (so its usage can be reconstructed
+    even if the thread died first). When it ends, it is logged as one `agent` event exactly like
+    a Task subagent's (`status` now also "failed" or "timed out", and `"detached": true`), and
+    its report — its last assistant text, or the call's own `result` text, whichever there is —
+    is delivered the same way a backgrounded Task subagent's report is: `turn::input`, a message
+    starting `[id] `, `later = true`, so it reaches the chat and starts a turn whether or not one
+    is running, and whether or not the turn that spawned it is still alive. Verified against
+    the fake CLI: `facet spawn` returns an id while the engine's `status` still shows no turn
+    running; a turn sent immediately afterward settles and goes idle on its own; the spawned
+    process's report (after a deliberate delay past that) still arrives, as `[id] ...`, kind
+    `user`, starting a fresh turn, with one `agent` event (`status: "done"`) and `agent`-kind
+    rows in usage.jsonl. Open: if the engine itself is killed while a spawn is still running,
+    the detached process (being in its own process group) keeps running, but nothing is left to
+    read its pipe or deliver its report — a restart does not reconnect to it. The master is told
+    about both paths (12), and which to use for what: a Task call when the result is needed
+    inside the turn, `facet spawn` for anything that should still be working after the reply.
+
+Not implemented: computer use, and `tell` — a running `facet spawn` cannot be messaged once
+sent, only awaited for its report (§9); `facet spawn` itself (21) is this engine's answer to
+the gist's `spawn`.
 
 ## measured and rejected
 
@@ -463,6 +499,9 @@ cache claim above from request usage; with `ANTHROPIC_BASE_URL` at a logging pro
     facet diag                 open comments; apply/dismiss by code
     facet send [--later] <text>  put a message into the conversation (--later: a turn of its own)
     facet push <text>          push to Telegram
+    facet spawn [--model M] [--kind general-purpose|explore] [--desc D] <task>
+                                a subagent that outlives this turn (21): returns its id at
+                                  once; its report arrives later, as a message of its own
     facet status               where everything stands
 
 A longform keeps its prose in one note and every statement and proof in a note of its own,

@@ -332,6 +332,14 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
                 if text.is_empty() { json!({"ok": false, "error": "empty"}) } else { turn::input(e, text, later); json!({"ok": true}) }
             }
             "cancel" => { turn::cancel(e); json!({"ok": true}) }
+            // a detached subagent (§9): its own `claude -p`, owned by this engine, not by the
+            // turn that asked for it, so it outlives the turn's reply; its report arrives
+            // later as a message of its own
+            "spawn" => match super::agent::spawn(e, v["model"].as_str().unwrap_or(""), v["kind"].as_str().unwrap_or(""),
+                v["desc"].as_str().unwrap_or(""), v["task"].as_str().unwrap_or("")) {
+                Ok(id) => json!({"ok": true, "id": id}),
+                Err(x) => json!({"ok": false, "error": x}),
+            },
             // §10 importing: a note (kind `note`) with its own date, appended between turns
             // (during a turn it is queued until the turn is done); the same text twice is added once
             "note" => turn::note(e, v["text"].as_str().unwrap_or("").to_string(),

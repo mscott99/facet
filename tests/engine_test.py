@@ -299,6 +299,37 @@ try:
     u = [json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))]
     check(sum(1 for x in u if x["kind"] == "agent") == 4, "its own two requests are priced apart too")
 
+    # I: a detached subagent (`facet spawn`) is not a Task call and not owned by any turn: it
+    # must survive the turn that launched it ending, and report later as its own turn (§9)
+    n0 = len(log())
+    u0 = sum(1 for x in (json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))) if x["kind"] == "agent")
+    sp = subprocess.run([BIN, "spawn", "--model", "sonnet", "--kind", "general-purpose", "--desc", "test spawn",
+                          "look into the thing and report back"], env=env, capture_output=True, text=True, timeout=10)
+    check(sp.returncode == 0 and sp.stdout.strip() != "", "facet spawn returns an id at once: %r" % ((sp.stdout, sp.stderr),))
+    sid = sp.stdout.strip()
+    check(not req({"op": "status"})["busy"], "the engine is not busy right after a spawn (it is not a turn)")
+    # a normal turn, started right after the spawn, runs and finishes well inside the 1s the
+    # fake's detached agent sleeps before it reports: proof the engine does not wait on it
+    req({"op": "send", "text": "hi again"})
+    wait(lambda: any(m["kind"] == "talk" for m in log()[n0:]), 30, "an ordinary turn still runs fine right after a spawn")
+    wait(idle, 10, "idle right after that turn, before the spawn has reported")
+    check(not any(sid in m["text"] for m in log()[n0:]), "the spawn's report has not arrived yet at that point")
+    wait(lambda: any(m["kind"] == "user" and m["text"].startswith("[%s] " % sid) for m in log()[n0:]),
+         15, "the detached agent's report joins the chat, after the turn that spawned it is long done")
+    wait(idle, 30, "idle after the spawn's own turn")
+    L = log()[n0:]
+    rep = [m for m in L if m["kind"] == "user" and m["text"].startswith("[%s] " % sid)]
+    check(len(rep) == 1 and "SPAWN REPORT" in rep[0]["text"],
+          "the detached agent's report starts a turn of its own, the same shape as a backgrounded Task agent's")
+    check(any(m["kind"] == "talk" and m["i"] > rep[0]["i"] for m in L), "that turn replies")
+    ev = events()
+    asp = [x for x in ev if x["ev"] == "agent" and x.get("tool_use_id") == sid]
+    check(len(asp) == 1 and asp[0]["status"] == "done" and asp[0]["reqs"] >= 1 and asp[0]["eq"] > 0
+          and asp[0].get("detached") is True and asp[0]["report_bytes"] == len(rep[0]["text"]) - len("[%s] " % sid),
+          "the detached agent's own cost is recorded, kind agent, status done: %r" % (asp[0] if asp else None))
+    u1 = sum(1 for x in (json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))) if x["kind"] == "agent")
+    check(u1 > u0, "its own requests are priced as kind agent too (%d -> %d)" % (u0, u1))
+
     check(os.path.isdir(os.path.join(D, ".git")), "chat directory committed after turns")
 finally:
     eng.kill()
