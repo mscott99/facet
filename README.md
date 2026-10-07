@@ -130,7 +130,8 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 
 1. *Priming instead of cache marks inside the view (§8).* From its second step on, a call
    uses all 4 of the API's cache breakpoints itself (2 on the system prompt, 2 rolling); one
-   more is a `400`. So before each turn whose view passes the first mark (50k characters), a
+   more is a `400`. So before each turn whose view passes the first mark (3/8 of the budget,
+   48k characters), a
    priming request goes out: the same arguments, Claude Code's own marks off
    (`DISABLE_PROMPT_CACHING=1`), ours on each view piece. It is killed as soon as the API
    accepts it; the real call then reads the whole view back (measured: read 30,003 of 30,003
@@ -218,6 +219,22 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     pays the subagent's own reads once, out of a fresh context instead of the turn's growing
     one. The report is a message too: a transcript handed back buys nothing.
 
+20. *The view has two limits, and the cache marks sit under the budget (§5.2, §8).* The gist
+    collapses whenever the view is over its budget, which in practice is nearly every append:
+    each collapse merges a pair at the front, every cache mark moves, and the compactor's
+    context is written from scratch again. Instead, appends may carry the view up to 8% past
+    the budget (`over`) and a collapse then takes it back to the budget in one batch, so the
+    marked prefix is byte-identical across the appends in between. The marks moved with it:
+    they are now fractions of the budget (3/8, 5/8, 15/16) rather than fixed offsets, so a view
+    sitting at its budget has nearly all of itself inside the cacheable prefix instead of 28 kB
+    of it past the last mark. Replayed over this chat's own logs (1100 messages, 2.15 compactor
+    calls each, per-token Sonnet rates): the old rule invalidates the cached prefix on 39% of
+    calls, collapses 592 times and costs $83; the two limits with the marks moved invalidate on
+    17%, collapse 24 times and cost $40. The view keeps its whole budget of history — it averages
+    more of it than before (108 kB against 105 kB), which a floor below the budget would not have
+    done (97 kB for the same $37). Nothing else changes: the merge order, the tiling and the
+    equality of a folded and a grown view are all as they were.
+
 Not implemented: computer use, and the gist's own spawn/tell protocol (§9).
 
 ## measured and rejected
@@ -230,8 +247,8 @@ $240 of model time at list prices) and each dropped. Kept here so they are not t
    current collapse-to-budget rule invalidates the cached prefix on 75.8% of appends and
    costs $111 of compaction; freezing to the turn's start brings that to 38.2% and $81, but
    the view overshoots its own budget (153 kB against VIEW = 128 kB) because nothing may
-   collapse while a turn runs. Collapsing in one batch to a floor below the budget does
-   better on both counts (31.1%, $52) and freezing on top of it adds nothing (31.1%, $54).
+   collapse while a turn runs. Collapsing in one batch (§20) does better on both counts
+   (31.1%, $52) and freezing on top of it adds nothing (31.1%, $54).
    Worse than useless: nodes are built on top of nodes built in the same turn, so a parent
    and its own children would both be written against the turn's starting view, and the
    parent's line would summarize children it cannot see. Batching the collapse is the fix;

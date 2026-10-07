@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn chain_grows_one_block_per_call_and_marks_stay_four() {
         let mut ch = Chain::default();
-        let mut chat = format!("<chat>\n{}", lines(1150, "a")); // ~110k chars: three cuts
+        let mut chat = format!("<chat>\n{}", lines(crate::optchat::MARKS[2] / 90 + 100, "a")); // past the last cut
         let b1 = layout(&mut ch, &chat, "STEP1");
         assert_eq!(b1.iter().filter(|b| b.1).count(), 4);
         assert_eq!(b1.len(), 5); // 3 pieces, tail, step

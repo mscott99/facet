@@ -34,7 +34,16 @@ pub const JOBS: usize = 8;
 pub const TRIES: usize = 5;
 pub const RETRY: Duration = Duration::from_secs(10);
 pub const CAP: usize = 30_000;
-pub const MARKS: [usize; 3] = [50_000, 80_000, 100_000];
+/// Where the view is cut for the cache marks. Tied to the budget, the last one just under it,
+/// so that a view sitting at its budget is almost entirely inside the cacheable prefix (§8).
+pub const MARKS: [usize; 3] = [VIEW * 3 / 8, VIEW * 5 / 8, VIEW * 15 / 16];
+
+/// The outer limit on the view: appends may carry it this far past its budget before anything
+/// collapses, and a collapse then takes it back to the budget in one batch. One limit instead
+/// of two means a collapse on nearly every append, each one reshaping the front of the view and
+/// so throwing away the compactor's cached prefix. The view holds its full budget of history
+/// either way; it is simply allowed to drift a little above it between collapses.
+pub const fn over(budget: usize) -> usize { budget * 27 / 25 }
 
 /// A compactor call that has produced no result by then is failed like any other.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(180);

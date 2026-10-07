@@ -41,8 +41,9 @@ impl View {
         self.fit(s, budget);
     }
 
-    /// While over budget, replace the most due mergeable pair by its parent. A pair whose
-    /// parent is not built yet is passed over; if none is built, stay over budget (§5.2).
+    /// Past the outer limit, replace the most due mergeable pair by its parent until back at
+    /// the budget. A pair whose parent is not built yet is passed over; if none is built, stay
+    /// over budget (§5.2).
     pub fn fit(&mut self, s: &Store, budget: usize) -> bool {
         let before = self.parts.len();
         let size = self.size(s);
@@ -51,6 +52,10 @@ impl View {
     }
 
     fn fit_from(&mut self, s: &Store, budget: usize, mut size: usize, t: usize) -> usize {
+        // Two limits: nothing collapses until the view has drifted past the outer one, and then
+        // it collapses all the way back to the budget, so the marked prefix holds still in
+        // between and the compactor's cache survives the appends (§8, `over`).
+        if size <= super::over(budget) { return size }
         while size > budget {
             let mut best: Option<usize> = None;
             for k in 0..self.parts.len().saturating_sub(1) {
@@ -167,7 +172,7 @@ mod tests {
         build_all(&mut s, 100);
         let v = View::fold(&s, 20_000);
         assert!(tiles(&v, 3000));
-        assert!(v.size(&s) <= 20_000);
+        assert!(v.size(&s) <= crate::optchat::over(20_000)); // the outer limit, not the budget
         // older parts are at least as coarse as newer ones, roughly: the first is the coarsest
         assert!(v.parts[0].l >= v.parts.last().unwrap().l);
         assert_eq!(v.parts.last().unwrap().l, 0);
@@ -222,12 +227,13 @@ mod tests {
     #[test]
     fn cut_at_line_ends() {
         let line = format!("{}\n", "a".repeat(99)); // 100 chars per line
-        let s = line.repeat(1100); // 110,000 chars
+        let s = line.repeat(MARKS[2] / 100 + 100); // past the last mark
         let c = cuts(&s);
-        assert_eq!(c, vec![50_000, 80_000, 100_000]);
+        // every mark is a whole number of lines in, so each cut lands on the mark itself
+        assert_eq!(c, MARKS.iter().map(|m| m / 100 * 100).collect::<Vec<_>>());
         let s2 = format!("é{}", s); // one 2-byte char shifts lines: cut before the line crossing the mark
         let c2 = cuts(&s2);
-        assert_eq!(c2, vec![49_902, 79_902, 99_902]);
+        assert_eq!(c2, MARKS.iter().map(|m| (m - 1) / 100 * 100 + 2).collect::<Vec<_>>());
         assert!(c2.iter().all(|&k| s2.as_bytes()[k - 1] == b'\n'));
         assert_eq!(pieces(&s).concat(), s);
         assert_eq!(cuts(&"x\n".repeat(100)), Vec::<usize>::new());
