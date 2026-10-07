@@ -31,12 +31,11 @@ sending out is work whose steps you don't need to keep: a focused piece
 of programming, a search, a survey of a tree, a fact to check. Several
 can run at once. Choose its model yourself: the small one when you can
 say exactly what the task is, your own when the work is genuinely hard.
-A subagent is sent the view as it stands, so it knows the chat in
-summary but not in detail, and it cannot ask: put in the task what the
-view would not tell it, and ask for what it found and where that came
-from. Keep the work when
-you must see one result to choose the next, or the user waits on each
-step.";
+A subagent is sent the view as it stands and can zoom it as you can,
+but it cannot ask you anything: put in the task what the view would not
+tell it, and ask for what it found and where that came from. Keep the
+work when you must see one result to choose the next, or the user waits
+on each step.";
 
 pub const VIEW_DOC: &str = "\
 The view: the whole chat between {NAME} and the user, oldest first, inside
@@ -127,8 +126,10 @@ pub const ZOOM_DOC: &str = "Open the line id+n of the view into the two lines of
 pub const DATE_DOC: &str = "The date and time of message id.";
 
 /// What a subagent is told (§9). As in the gist, it is sent the view as it stood when it
-/// was spawned, as context and nothing more; it has no memory of the chat, cannot open a
-/// line of the view further and cannot ask, so it is asked for a self-contained report.
+/// was spawned, as context and nothing more; it has no memory of the chat and cannot ask,
+/// so it is asked for a self-contained report. It does get zoom and date, the same two
+/// tools the master has (§7.1): the nodes are all built already, and none of its own
+/// reading is compacted, so opening a line costs the chat nothing.
 pub const AGENT: &str = "\
 You are a subagent of {NAME}, an agent that works for one user. You are
 given one task, and the view of the chat as it stood when you were sent.
@@ -152,8 +153,14 @@ each line \"id+n|text\" for the n messages from id on. A summary tags
 each item with its kind: user (the user's words), talk ({NAME}'s
 replies), tool ({NAME}'s tool calls), echo (their results), note
 (older memories), or work (an earlier subagent's report). No message
-appears in full, and you cannot open one: where the task and the view
-disagree, the task is what was meant.";
+appears in full, but you can open one: zoom(id, n) gives the two lines
+of n/2 under the line id+n, and zoom(id, 1) gives message id whole;
+date(id) gives when it was sent. Zoom when a line only mentions
+something the task turns on, and stop when the task is answered: this
+reading is yours alone and no summary of it is kept. A line reading
+\"(not summarized yet: zoom it)\" has no summary yet, only the messages
+under it. Where the task and the view disagree, the task is what was
+meant.";
 
 /// Claude Code's own subagents, redefined to run a cheaper model: a subagent does one
 /// contained job and writes one short report, which is work a smaller model does well,
@@ -169,8 +176,14 @@ disagree, the task is what was meant.";
 /// prompt and a 29-byte one hit the same cache entry, byte for byte), so a view that changes
 /// every turn cannot disturb the marked prefix. It is only sent when a subagent is actually
 /// spawned, into that subagent's fresh context.
+///
+/// Both definitions also name the engine's own MCP tools, so a subagent can open a line of
+/// that view as the master does (§7.1). Nothing is compacted on its behalf — no node is
+/// built from its reading, and its own steps leave no line to summarize — but every node
+/// the master's compactor has built is there to be read.
 pub fn agents(name: &str, model: &str, view: &str) -> String {
-    let read = ["Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch"];
+    let read = ["Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch",
+                "mcp__optchat__zoom", "mcp__optchat__date"];
     let prompt = format!("{}\n\n{}", named(AGENT, name), view);
     let def = |about: &str, tools: Vec<&str>| serde_json::json!({
         "description": about, "prompt": prompt, "model": model, "tools": tools,

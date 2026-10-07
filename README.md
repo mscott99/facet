@@ -94,7 +94,7 @@ Telegram and every `facet chat` use it):
     watch               then a stream of events: msg, delta, thought, accepted, phase, notice, limits
 
 The MCP server for `zoom` and `date` listens on a random loopback port with a random
-secret path, for the engine's own `claude` calls only.
+secret path, for the engine's own `claude` calls and the subagents they spawn only.
 
 ## chat
 
@@ -176,7 +176,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     costs one miss.
 11. *Tools* are Claude Code's own (Bash, Read, Edit, Write, Glob, Grep, WebFetch,
     WebSearch, Task) plus zoom and date served over MCP from the engine (§9 suggests MCP
-    over HTTP).
+    over HTTP). A subagent gets zoom and date too, named in its definition (see 19).
 
 **Choices the gist leaves open, and safety additions**
 
@@ -238,10 +238,19 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 
     A spawn carries the view, as the gist's does: the view as it stands at the call is
     appended to each agent definition's prompt, which is the only channel a Task subagent
-    has for context, since the master writes its task but not its system prompt. So the
-    subagent knows the chat in summary, cannot open a line of it (no zoom; the MCP tools go
-    to the master's call only) and cannot be told more once sent, which is what AGENT says to
-    it and what MASTER tells the master to expect. The master's own prefix is untouched by
+    has for context, since the master writes its task but not its system prompt. It can also
+    open a line of that view: both definitions name `mcp__optchat__zoom` and
+    `mcp__optchat__date`, so a subagent reads the chat by the same two tools the master has
+    (§7.1). Nothing is compacted for it — no node is built from its reading, and its dropped
+    steps leave no line to summarize — but every node the compactor has already built is
+    there, so the depth of the chat is open to it while only the summary is pushed on it.
+    Measured against the CLI: a subagent given those names in its definition called
+    `mcp__optchat__zoom` with `{id: 0, n: 1}` and got `0+0|user: Can you put on my alarm?`
+    back from the live engine, with no permission prompt. The MCP tool names need not be in
+    the top-level `--tools` at all — a connected `--mcp-config` server is exposed to the
+    session, and the definition's `tools` array is what grants it. What the subagent still
+    cannot do is ask: it cannot be told more once sent, which is what AGENT says to it and
+    what MASTER tells the master to expect. The master's own prefix is untouched by
     this: an agent definition's prompt never enters the master's request at all — the same
     call with a 60k-character agent prompt and with a 29-byte one hit one cache entry, byte
     for byte, 10468 tokens written then read — so a view that changes every turn cannot move

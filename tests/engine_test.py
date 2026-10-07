@@ -264,6 +264,9 @@ try:
     grew = len(p) > len(defs[0]["general-purpose"]["prompt"]) if len(defs) > 1 else False
     check(p.rstrip().endswith("</chat>") and re.search(r"\n\d+\+\d+\|", p) and grew,
           "the view in a definition is the whole current one, lines and all")
+    check(defs and all({"mcp__optchat__zoom", "mcp__optchat__date"} <= set(a["tools"])
+                       for d in defs for a in d.values()),
+          "a subagent may open a line of the view, as the master may")
 
     u = [json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))]
     check({"compact", "prime", "turn", "agent"} <= {x["kind"] for x in u}, "usage logged per request for compact, prime, turn and agent")
