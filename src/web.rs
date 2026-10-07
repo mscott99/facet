@@ -52,6 +52,13 @@ a:hover{border-bottom-color:var(--acc)}
 a.wl{color:inherit;border-bottom:1px solid #4d4f57}
 a.wl:hover{color:var(--acc);border-bottom-color:currentColor}
 .cite{color:var(--dim);cursor:help}
+/* An inlined lemma, proof or definition reads as its own block, not a run of paragraphs
+   lost in the surrounding prose: a hairline rule and a little inset, nothing boxed in.
+   Nesting is just more of the same rule, indented inside the parent's by the same amount. */
+.embed{margin:1.3rem 0;padding-left:1rem;border-left:1px solid var(--line)}
+.embed .envlabel{margin:0 0 .3rem;font:11px var(--mono);letter-spacing:.08em;
+ text-transform:uppercase;color:var(--dim)}
+.envclose{color:var(--dim)}
 table{border-collapse:collapse;width:100%;font-size:.9em;margin:1.2em 0}
 th,td{text-align:left;padding:.3rem 1.2rem .3rem 0;vertical-align:top}
 th{color:var(--dim);font-weight:600;border-bottom:1px solid var(--line)}
@@ -82,6 +89,9 @@ textarea:focus{outline:1px solid var(--line)}
  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .say textarea{width:100%;display:block;flex:none;max-height:30vh}
 .say .st{font:11px var(--mono);text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin-top:.3rem}
+/* The answer sits under the comment, in the same card, so the two read together. */
+.say .msg.talk{margin:.7rem 0 0;font-size:.95em}
+.say .msg.talk p:last-child{margin-bottom:0}
 /* A sent card keeps its coloured edge: it is waiting its turn, not cancelled. What was typed
    stays as plain text, since a greyed-out textarea reads as discarded. */
 .say.done textarea{display:none}
@@ -167,6 +177,10 @@ function say(b,where){
   d.querySelector('.q').textContent=where;
   b.parentNode.insertBefore(d,b.nextSibling);
   var t=d.querySelector('textarea');
+  // An empty box leaves no trace: Escape, or simply looking elsewhere, takes it away again.
+  t.addEventListener('blur',function(){
+    if(!d.classList.contains('done')&&!t.value.trim())d.remove();
+  });
   t.addEventListener('keydown',function(ev){
     if(ev.key=='Escape'){ev.preventDefault();d.remove();return}
     if(ev.key!='Enter'||ev.shiftKey||ev.altKey)return;
@@ -179,11 +193,34 @@ function say(b,where){
     var body='text='+encodeURIComponent(where+'\n'+said)+'&later=1';
     fetch(TOK+'/x/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
       .then(function(r){return r.ok?r.text():Promise.reject(r.status)})
-      .then(function(){mark('queued')},
+      .then(function(){mark('queued');listen(d)},
             function(err){kept.remove();d.classList.remove('done');t.readOnly=false;
                           mark('not sent ('+err+')')});
   });
   t.focus();
+}
+// A reply belongs where the comment was made, not only in the chat: once a card is queued it
+// watches the conversation and puts what comes back underneath what was said. The newest card
+// is the one being answered, so it takes the replies; the cursor comes from the server.
+var RCARD=null,RHI=null,RT=null;
+function listen(d){
+  RCARD=d;
+  if(RHI===null)fetch(TOK+'/x/mark').then(function(r){return r.text()})
+    .then(function(s){RHI=parseInt(s,10);wait()});
+  else wait();
+}
+function wait(){if(!RT&&RCARD)RT=setTimeout(poll,2500)}
+function poll(){
+  RT=null;if(!RCARD)return;
+  fetch(TOK+'/f/reply?since='+RHI).then(function(r){return r.text()}).then(function(h){
+    var w=document.createElement('div');w.innerHTML=h;
+    var rp=w.firstElementChild;
+    if(rp){
+      RHI=parseInt(rp.dataset.high,10);
+      while(rp.firstChild){var n=rp.firstChild;RCARD.appendChild(n);mathify(n)}
+    }
+    wait();
+  },wait);
 }
 // iOS Safari does not fire `dblclick` reliably on a touch, so a coarse (touch) pointer gets
 // its own double-tap detector instead, ported from vault-phone's `pick()`.
@@ -269,6 +306,18 @@ fn log_fragment(cfg: &Cfg, since: i64) -> String {
         "<div id=tail hx-get=\"{}/f/log?since={}\" hx-trigger=\"load delay:2s\" hx-swap=outerHTML></div>",
         cfg.token_path(), high));
     out
+}
+
+/// The answer to a comment, where the comment was made: what has been said since the card
+/// went off, so a reply reads next to the line it is about instead of alone in the chat. The
+/// cursor rides back on the wrapper, so the page keeps no count of its own.
+fn reply_fragment(cfg: &Cfg, since: i64) -> String {
+    let msgs = log::since(cfg, since);
+    let high = msgs.last().map(|m| m.i).unwrap_or(since);
+    let said: String = msgs.iter().filter(|m| m.kind == "talk")
+        .map(|m| format!("<div class=\"msg talk\">{}</div>", md::render(&m.text, &note_base(cfg))))
+        .collect();
+    format!("<div class=rp data-high=\"{}\">{}</div>", high, said)
 }
 
 fn chat_page(cfg: &Cfg) -> String {
@@ -491,6 +540,10 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         ["chat"] => html(chat_page(cfg), 200),
 
         ["f", "log"] => html(log_fragment(cfg, qnum("since")), 200),
+
+        // what has been said since a comment card was sent, for the card to show it in place
+        ["f", "reply"] => html(reply_fragment(cfg, qnum("since")), 200),
+        ["x", "mark"] => html(log::since(cfg, -1).last().map(|m| m.i).unwrap_or(-1).to_string(), 200),
 
         // the memory tree (folded from the files: the engine's view is the same fold)
         ["tree"] => {
