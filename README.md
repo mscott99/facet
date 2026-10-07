@@ -13,7 +13,8 @@ Unix socket.
     tui.rs    the terminal route: `facet chat`
 
     log.rs    the memory, read-only: a fold over ~/.optchat/chat/main/*.jsonl
-    doc.rs    output addressed by a slug — a vault note, published via its own frontmatter
+    doc.rs    output addressed by a slug — a vault note, published via its own frontmatter,
+              and the vault read by name: its notes, their sections, their embeds
     diag.rs   output addressed by a code, anchored to a live line — a comment, triaged
     tell.rs   input: one funnel, from any route, into the engine socket
     md.rs     one markdown renderer (comrak: math and wikilinks are parsed, never regexed)
@@ -57,7 +58,9 @@ tailnet with `tailscale serve` (real TLS certificates, tailnet devices only), fo
 One secret token in the path gates the web pages and the terminal (`token` in facet.json; the
 terminal script reads the same value from `~/.config/optchat-web/token`). Set `base_url`,
 `terminal_url` and `vault_phone` in facet.json to the published addresses, so pages and
-messages link to them.
+messages link to them. `vault_phone` is a link in the nav and on the home page only:
+wikilinks resolve on `/n/`, against the vault in `vault` — the vault-phone script is pointed
+at a vault of its own, and a link out of a doc answered 404 whenever the two differed.
 
 Web pages (`facet serve`, all under `/<token>`):
 
@@ -66,6 +69,8 @@ Web pages (`facet serve`, all under `/<token>`):
     /chat              the conversation: live log (HTMX), and a box to send a message
     /tree              the memory tree: one root down to every message, searchable
     /m/                published notes; /m/<slug> one note
+    /n/<note>          any note of the vault by its own name, read-only; `?h=<section>` one
+                       section of it. Where every `[[wikilink]]` goes
     /d/                open comments on notes
     POST /x/send       a message into the conversation (form field `text`; `later=1`: a turn of
                        its own; in the box, Enter sends, Shift-Enter sends later, Alt-Enter is
@@ -449,6 +454,7 @@ cache claim above from request usage; with `ANTHROPIC_BASE_URL` at a logging pro
 ## use
 
     facet post <file> [slug]   publish a note (writes `facet: <slug>` into its frontmatter)
+                                 a longform is assembled on the way out: see below
     facet review <note>        write a batch of comments from a spec on stdin:
                                  @ verbatim anchor (unique; may wrap across lines)
                                  ! [severity] message
@@ -458,6 +464,17 @@ cache claim above from request usage; with `ANTHROPIC_BASE_URL` at a logging pro
     facet send [--later] <text>  put a message into the conversation (--later: a turn of its own)
     facet push <text>          push to Telegram
     facet status               where everything stands
+
+A longform keeps its prose in one note and every statement and proof in a note of its own,
+embedded on a line of the vault's own form, `proposition::![[Range cover#Statement]]`. Markdown
+renders such a line as literal text — the `!` stops even the wikilink extension — so the page
+assembles it instead: the line is replaced by the section it names, under a bold run-in label
+("Proposition."), three levels deep at most, and an embed that resolves to nothing says so
+where it stands rather than vanishing. Which header forms count and where a section ends
+(the next header of the same or a higher level, the header line itself left out) are the
+vault's own rules, from its `Scripts/read_section_rust`. A line's text is expanded only as it
+is rendered, never before the blocks are cut, so a comment anchored to an embed line still
+lands beside it.
 
 ## state
 

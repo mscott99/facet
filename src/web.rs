@@ -110,9 +110,16 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
 
 // ---- rendering the three views ----------------------------------------------------------
 
-fn note_base(cfg: &Cfg) -> String {
-    let vp = cfg.vault_phone();
-    if vp.is_empty() { String::new() } else { format!("{}/n/", vp) }
+/// Where a `[[wikilink]]` goes: facet's own `/n/` route, against the vault facet is
+/// configured for. It used to go to the vault-phone service, which serves whatever vault its
+/// own script was pointed at, so a link out of a doc answered 404 whenever the two differed.
+fn note_base(cfg: &Cfg) -> String { format!("{}/n/", cfg.token_path()) }
+
+/// A note's lines with their vault embeds expanded. Mapped line by line, and as late as it
+/// can be: `note_html` cuts blocks and anchors comment cards by source line number, so the
+/// text of a line may change on the way out but its number never does.
+fn expanded(cfg: &Cfg, lines: &[&str]) -> String {
+    lines.iter().map(|l| doc::expand(cfg, l)).collect::<Vec<_>>().join("\n")
 }
 
 fn msg_html(cfg: &Cfg, m: &log::Msg) -> String {
@@ -182,12 +189,12 @@ fn note_html(cfg: &Cfg, d: &doc::Doc) -> String {
     let base = note_base(cfg);
     let lines: Vec<&str> = d.text.split('\n').collect();
     let skip = doc::front_len(&d.text);     // frontmatter is metadata, not prose
-    if ds.is_empty() { return md::render(&lines[skip.min(lines.len())..].join("\n"), &base) }
+    if ds.is_empty() { return md::render(&expanded(cfg, &lines[skip.min(lines.len())..]), &base) }
     let mut out = String::new();
     let (mut start, mut fence, mut math) = (skip, false, false);
     let mut emit = |out: &mut String, a: usize, b: usize| {
         if a >= b { return }
-        out.push_str(&md::render(&lines[a..b].join("\n"), &base));
+        out.push_str(&md::render(&expanded(cfg, &lines[a..b]), &base));
         for g in ds.iter().filter(|g| g.line - 1 >= a as i64 && g.line - 1 < b as i64) {
             out.push_str(&diag_card(cfg, g, false, false));
         }
@@ -213,6 +220,27 @@ fn note_html(cfg: &Cfg, d: &doc::Doc) -> String {
         out.push_str(&diag_card(cfg, g, false, true));
     }
     out
+}
+
+/// One `#`-section of a note: what `[[Note#Section]]` asks for, as `?h=`. No comment cards
+/// here — their line numbers are the whole file's, and a section does not start where it does.
+fn section_html(cfg: &Cfg, d: &doc::Doc, h: &str) -> String {
+    let Some(s) = doc::section(&d.text, h) else { return note_html(cfg, d) };
+    let lines: Vec<&str> = s.split('\n').collect();
+    format!("<h2>{}</h2>{}", md::esc(h), md::render(&expanded(cfg, &lines), &note_base(cfg)))
+}
+
+/// Any note of the vault, read-only, on the same page as a published one. Wikilinks in docs,
+/// notes and messages all land here, so a name that is not in the vault must say so plainly.
+fn note_page(cfg: &Cfg, name: &str, h: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let Some(d) = doc::note(cfg, name) else {
+        return html(page(cfg, "no such note", "notes",
+            &format!("<h1>no such note</h1><p class=at>{} is not in {}</p>",
+                md::esc(name), md::esc(&cfg.vault().to_string_lossy())), true), 404);
+    };
+    let body = if h.is_empty() { note_html(cfg, &d) } else { section_html(cfg, &d, h) };
+    html(page(cfg, &d.title, "notes",
+        &format!("<h1>{}</h1>{}", md::esc(&d.title), body), true), 200)
 }
 
 fn doc_version(cfg: &Cfg, d: &doc::Doc) -> u64 { d.mtime.max(doc::mtime(&diag::file(cfg))) }
@@ -316,6 +344,10 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         query.split('&').find_map(|p| p.strip_prefix(&format!("{}=", k)))
             .and_then(|v| v.parse().ok()).unwrap_or(-1)
     };
+    let qstr = |k: &str| -> String {
+        query.split('&').find_map(|p| p.strip_prefix(&format!("{}=", k)))
+            .map(md::urldec).unwrap_or_default()
+    };
     let post = rq.method() == &tiny_http::Method::Post;
     let mut body = String::new();
     if post { let _ = rq.as_reader().read_to_string(&mut body); }
@@ -343,6 +375,9 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
                          html(page(cfg, &t, "notes", &doc_fragment(cfg, &d), true), 200) }
             None => html("<h1>no such note</h1>".into(), 404),
         },
+
+        // a vault note by its own name, which is what a wikilink carries; `?h=` is one section
+        ["n", name] => note_page(cfg, name, &qstr("h")),
 
         ["f", "doc", slug] => match doc::get(cfg, slug) {
             // unchanged -> 204, and HTMX leaves the DOM and your scroll position alone
