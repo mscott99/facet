@@ -6,10 +6,12 @@
 //   log   the memory: everything that happened, input and output, in order
 //   doc   output addressed by a slug: a note of the vault, published
 //   diag  output addressed by a code and anchored to a live line: a comment to be triaged
+//   cards a line-comment's id, and the deliberate answer addressed to it
 //   tell  input: one funnel, from any route, into the memory
 //   web   the route with a screen            tg   the route with push
 //
 // Anything that is not one of those is an adapter.
+mod cards;
 mod cfg;
 mod diag;
 mod doc;
@@ -124,6 +126,28 @@ fn main() {
             }
         }
 
+        // a deliberate reply to a line-comment card (§ the viewer's cards), never a talk
+        // reply the card's poll happens to catch: the id comes from the card's own message
+        "answer" => {
+            if rest.len() < 2 { die("facet answer <id> <text> [--apply <replacement>]") }
+            let id = rest[0].clone();
+            let (mut apply, mut words, mut i) = (String::new(), Vec::new(), 1);
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--apply" => { apply = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                    w => { words.push(w.to_string()); i += 1; }
+                }
+            }
+            let mut req = serde_json::json!({"op": "answer", "id": id, "text": words.join(" ")});
+            if !apply.trim().is_empty() { req["apply"] = apply.into(); }
+            match optchat::engine::request(&optchat::engine::dir(), req) {
+                Ok(v) if v["ok"].as_bool() == Some(true) => println!("{}", match v["code"].as_str() {
+                    Some(c) => format!("answered; fix {} ready to apply", c), None => "answered".into() }),
+                Ok(v) => die(v["error"].as_str().unwrap_or("refused")),
+                Err(e) => die(&e),
+            }
+        }
+
         "diag" => print!("{}", diag::brief(&cfg)),
         // one call, N comments: anchors are verbatim text, the binary finds the lines
         "review" => {
@@ -188,6 +212,10 @@ facet review <note> [--replace] < spec
                               + replacement for the anchored line (optional, multi-line)
 facet diag                  open comments
 facet apply|dismiss <code>  triage one
+facet answer <id> <text> [--apply <replacement>]
+                            answer a line-comment card by id (from its message, shaped
+                            `[[Note]] L<n> #<id>: \"quote\"`); --apply only when you mean the
+                            line itself replaced, which the card can then apply
 facet status                where everything stands";
 
 fn die(m: &str) -> ! { eprintln!("{}", m); std::process::exit(1) }

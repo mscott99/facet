@@ -54,7 +54,12 @@ For work that should outlive this turn, use `facet spawn [--model M]
 it is not a Task call, so your turn ending does not touch it, and its
 report reaches you later the same way a backgrounded one would, had it
 lived — a message of its own, starting \"[id] \", that begins a fresh
-turn whenever it is ready.";
+turn whenever it is ready.
+
+A line-comment from the viewer carries its own id, shaped `[[Note]]
+L<n> #<id>: \"quote\"`; answer it with `facet answer <id> <text>`
+rather than only in chat, and give `--apply <replacement>` only when
+you mean to replace the line itself.";
 
 pub const VIEW_DOC: &str = "\
 The view: the whole chat between {NAME} and the user, oldest first, inside

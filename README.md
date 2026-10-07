@@ -16,6 +16,7 @@ Unix socket.
     doc.rs    output addressed by a slug — a vault note, published via its own frontmatter,
               and the vault read by name: its notes, their sections, their embeds
     diag.rs   output addressed by a code, anchored to a live line — a comment, triaged
+    cards.rs  a line-comment card's id, and the deliberate answer addressed to it
     tell.rs   input: one funnel, from any route, into the engine socket
     md.rs     one markdown renderer (comrak: math and wikilinks are parsed, never regexed)
     web.rs    the route with a screen (server-rendered HTML + HTMX)
@@ -68,10 +69,19 @@ its own Python server on 127.0.0.1:8765/tailnet :9443 — is retired (archived a
   - Every block of a rendered note carries where it came from — `data-line`, and `data-note`
     for the note itself, which through an embed is not the page's own note but the one the
     embed quotes (see **a longform**, below). A double-click (double-tap; a touch-screen gets
-    its own detector, since iOS Safari does not fire `dblclick` reliably) on one asks what to
-    say about it and sends it through the ordinary `POST /x/send`, shaped
-    `[[Note]] L<line>: "quoted line text"` followed by what was typed, so it reads the same as
-    a reply typed by hand.
+    its own detector, since iOS Safari does not fire `dblclick` reliably) on one opens a card
+    under the line, given a short id of its own there and then, and sends through the ordinary
+    `POST /x/send`, shaped `[[Note]] L<line> #<id>: "quoted line text"` followed by what was
+    typed, so it reads the same as a reply typed by hand. The id is what lets an answer find
+    its way back to the right card instead of to every card at once: `facet answer <id>
+    <text>` (`cards.rs`, engine op `answer`) is the only thing that can put a reply inside one,
+    logged as an ordinary `talk` message besides, so the main chat keeps the whole exchange
+    too. Every card keeps a quiet `remove`, sent or not; once answered, a further line opens
+    inside it to reply back, carrying the same id, so the thread stays attached to where it
+    started. `--apply <replacement>` on the answer, given only when there truly is one to
+    offer (never guessed from prose), becomes a diagnostic fix (`diag::propose`) the card can
+    then apply, through the same `/x/diag` route and the same stale-text guard a review's fix
+    gets.
   - A labelled embed is closed where it ends (a tombstone `∎` on a proof, a plainer `□` on
     anything else) rather than left for the reader to guess at a page boundary that is not
     there.
@@ -104,9 +114,11 @@ Web pages (`facet serve`, all under `/<token>`):
     /d/                open comments on notes
     POST /x/send       a message into the conversation (form field `text`; `later=1`: a turn of
                        its own; in the box, Enter sends, Shift-Enter sends later, Alt-Enter is
-                       a new line)
+                       a new line; `id`/`note`/`line` from a line-comment card register it,
+                       see **one viewer**, above)
     POST /x/diag       apply | dismiss | discuss a comment (`code`, `note`, `do`)
-    /f/log, /f/doc/<slug>, /static/htmx.js     fragments and assets the pages poll
+    /f/log, /f/doc/<slug>, /f/reply, /static/htmx.js     fragments and assets the pages poll
+                       (`/f/reply?id=&since=`: a card's own answers past what it has shown)
 
 Telegram (bot `telegram.username`, polled by `facet serve`; only the paired chat is heard):
 plain text is a message into the conversation; replies come back as they are written, and
@@ -130,6 +142,9 @@ Telegram and every `facet chat` use it):
                         a cancel logs the waiting ones unanswered
     note {text, date}   an imported note (during a turn, queued until it is done; the same text twice
                         is added once)
+    answer {id, text, apply?}   a deliberate reply to a line-comment card, never a talk reply
+                        its poll might otherwise catch; `apply`, given only when there is a
+                        concrete replacement to offer, becomes a fix the card can apply
     cancel / resume     stop the turn or the wait / lift a compactor pause
     view / status       the rendered view / engine state, usage left
     zoom {id, n}        a line of the view opened, as the agent's zoom
@@ -463,12 +478,15 @@ Cost in this README is in "eq", input-token equivalents at API price ratios:
 `facet stats` tabulates it per day and kind).
 
 **Engine state** (`~/.local/share/facet/engine-<hash>/`): not memory, safe to delete when the
-engine is stopped, except `queue.json`, `later.json` and `notes.json` (accepted but not yet logged).
+engine is stopped, except `queue.json`, `later.json`, `notes.json` (accepted but not yet
+logged) and `cards.json` (open cards would lose where they point and what they have heard).
 
     events.jsonl   introspection, below
     queue.json     accepted messages not yet in the log; queued again at start
     later.json     the same, for messages waiting for turns of their own
     notes.json     notes imported during a turn, not yet in the log; added at start
+    cards.json     line-comment cards, by id: note, line, and the answers each has had
+                   (`cards.rs`) — a card's only record of what it is about and what came back
     limits.json    the last rate_limit_info Claude Code reported
     model          the /model choice, if any (wins over chat.model)
     system.txt     the master system prompt as last sent; compact.txt the compactor's
@@ -542,6 +560,9 @@ cache claim above from request usage; with `ANTHROPIC_BASE_URL` at a logging pro
                                  ? long explanation, markdown + math
                                  + replacement for the anchored line(s)
     facet diag                 open comments; apply/dismiss by code
+    facet answer <id> <text> [--apply <replacement>]
+                                a deliberate reply to a line-comment card by id; --apply only
+                                  when there is a concrete replacement to offer
     facet send [--later] <text>  put a message into the conversation (--later: a turn of its own)
     facet push <text>          push to Telegram
     facet spawn [--model M] [--kind general-purpose|explore] [--desc D] <task>

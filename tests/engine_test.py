@@ -48,6 +48,18 @@ def events():
             break  # some other engine's log
     return []
 
+def state_dir():
+    """Same lookup as `events()`, but the directory itself — for files beside events.jsonl
+    (cards.json, limits.json, ...) that nothing else exposes a path to."""
+    import glob
+    for p in glob.glob(os.path.join(os.environ["HOME"], ".local/share/facet/engine-*/events.jsonl")):
+        for line in open(p):
+            v = json.loads(line)
+            if v.get("ev") != "engine": continue
+            if v.get("dir") == D: return os.path.dirname(p)
+            break
+    return None
+
 def wait(pred, secs, what):
     t = time.time()
     while time.time() - t < secs:
@@ -329,6 +341,26 @@ try:
           "the detached agent's own cost is recorded, kind agent, status done: %r" % (asp[0] if asp else None))
     u1 = sum(1 for x in (json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))) if x["kind"] == "agent")
     check(u1 > u0, "its own requests are priced as kind agent too (%d -> %d)" % (u0, u1))
+
+    # J: a deliberate answer to a line-comment card (§ the viewer's cards) — never a talk
+    # reply its poll merely happens to catch. The card itself is registered the way web.rs's
+    # `/x/send` does it (a file beside events.jsonl, not through the socket): this engine
+    # never learns of the vault, so `--apply` is exercised as a unit test in diag.rs instead.
+    sd = state_dir()
+    check(sd is not None, "the engine's state directory is found")
+    cards_f = os.path.join(sd, "cards.json")
+    json.dump({"c1": {"note": "Some Note", "line": 3, "answers": []}}, open(cards_f, "w"))
+    n0 = len(log())
+    r = req({"op": "answer", "id": "c1", "text": "looks right to me"})
+    check(r["ok"] is True and r.get("code") is None, "answering with no --apply attaches no fix: %r" % r)
+    wait(lambda: any(m["kind"] == "talk" and m["text"] == "looks right to me" for m in log()[n0:]), 10, "the answer joins the chat as talk")
+    card = json.load(open(cards_f))["c1"]
+    check(len(card["answers"]) == 1 and card["answers"][0]["text"] == "looks right to me" and card["answers"][0]["code"] is None,
+          "the answer is recorded against its card, not just the chat: %r" % card)
+    r2 = req({"op": "answer", "id": "no-such-card", "text": "hi"})
+    check(r2["ok"] is False and "no card" in r2["error"], "an unregistered id is refused, not silently dropped")
+    r3 = req({"op": "answer", "id": "c1", "text": ""})
+    check(r3["ok"] is False, "an empty answer is refused")
 
     check(os.path.isdir(os.path.join(D, ".git")), "chat directory committed after turns")
 finally:

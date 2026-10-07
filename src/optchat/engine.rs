@@ -7,6 +7,9 @@
 //                                     with later, a turn of its own after the running one)
 //   -> {"op":"cancel"}                stop the wait or the running call
 //   -> {"op":"note","text":..,"date":..}  import a note (queued during a turn; duplicates skipped)
+//   -> {"op":"answer","id":..,"text":..,"apply":..}  a deliberate reply to a line-comment card
+//                                     (never a talk reply its poll happens to catch); "apply",
+//                                     if given, becomes a fix the card can apply (diag::propose)
 //   -> {"op":"resume"}                lift a compactor pause
 //   -> {"op":"view"} / {"op":"status"} / {"op":"zoom","id":..,"n":..}
 //   -> {"op":"model","name":..}       the master model for the next turns
@@ -21,6 +24,7 @@ use super::store::Store;
 use super::view::View;
 use super::{compact, mcp, prompts, turn, usage, VIEW, JOBS};
 use crate::cfg::{self, Cfg};
+use crate::{cards, diag};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
@@ -344,6 +348,38 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
             // (during a turn it is queued until the turn is done); the same text twice is added once
             "note" => turn::note(e, v["text"].as_str().unwrap_or("").to_string(),
                 v["date"].as_str().map(String::from).unwrap_or_else(super::store::now_iso)),
+            // a deliberate reply to a line-comment card: the id is how a card is told apart
+            // from an ordinary talk reply, which is why one is never mistaken for the other
+            // any more (a card's poll only ever sees what landed here, by its own id)
+            "answer" => {
+                let id = v["id"].as_str().unwrap_or("").trim().to_string();
+                let text = v["text"].as_str().unwrap_or("").trim().to_string();
+                if id.is_empty() || text.is_empty() { json!({"ok": false, "error": "id and text required"}) }
+                else {
+                    let sd = state_dir(&e.dir);
+                    match cards::get(&sd, &id) {
+                        None => json!({"ok": false, "error": format!("no card {}", id)}),
+                        Some(card) => {
+                            // a replacement is only ever what this call attaches on purpose,
+                            // never guessed from the answer's own prose
+                            let code = match v["apply"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                                Some(rep) => {
+                                    let note = card["note"].as_str().unwrap_or("");
+                                    let line = card["line"].as_i64().unwrap_or(0);
+                                    match diag::propose(&Cfg::load(), note, line, rep) {
+                                        Ok(c) => Some(c),
+                                        Err(x) => { e.notice(&format!("answer {}: fix not attached: {}", id, x)); None }
+                                    }
+                                }
+                                None => None,
+                            };
+                            let _ = cards::answer(&sd, &id, &text, code.as_deref());
+                            e.log("talk", &text);
+                            json!({"ok": true, "code": code})
+                        }
+                    }
+                }
+            }
             "resume" => {
                 let mut m = e.mem.lock().unwrap();
                 m.pause = None;

@@ -139,6 +139,28 @@ pub fn apply(cfg: &Cfg, code: &str) -> Result<String, String> {
     Ok(format!("applied {} in {}", code, note))
 }
 
+/// A reply that offers a concrete replacement for the line a card was about becomes a fix —
+/// the same `fix` a review writes, so applying it gets the stale-text guard and the line-shift
+/// bookkeeping `apply` already does, and the same `/x/diag` button triages it. `name` is a
+/// note by its own name (what a card's `data-note` carries), resolved the way a wikilink is.
+pub fn propose(cfg: &Cfg, name: &str, line: i64, replacement: &str) -> Result<String, String> {
+    let d = crate::doc::note(cfg, name).ok_or_else(|| format!("no note '{}'", name))?;
+    let note = rel(cfg, &d.path);
+    let lines: Vec<&str> = d.text.split('\n').collect();
+    if line < 1 || line as usize > lines.len() { return Err(format!("L{} is outside {}", line, note)) }
+    let old = lines[(line - 1) as usize].to_string();
+    let mut data = load(cfg);
+    let taken: Vec<String> = all(cfg).into_iter().map(|x| x.code).collect();
+    let code = code_for(&taken, 0);
+    let mut list: Vec<Value> = data.get(&note).and_then(|l| l.as_array()).cloned().unwrap_or_default();
+    list.push(serde_json::json!({
+        "code": code, "line": line, "col": 1, "severity": "info", "message": "a proposed replacement",
+        "fix": [{"start_line": line, "end_line": line, "old_text": old, "new_text": replacement}],
+    }));
+    put(cfg, &mut data, &note, list);
+    Ok(code)
+}
+
 /// Dismiss: the objection is logged where the next review will read it, so it stops coming back.
 pub fn dismiss(cfg: &Cfg, code: &str, reason: &str) -> Result<String, String> {
     let mut data = load(cfg);
@@ -343,4 +365,31 @@ pub fn review(cfg: &Cfg, name: &str, spec: &str, replace: bool) -> Result<String
     let n = list.len();
     put(cfg, &mut data, &note, list);
     Ok(format!("{} comment(s) on {}", n, note))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vault(name: &str, text: &str) -> Cfg {
+        let d = std::env::temp_dir().join(format!("facet-diag-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".claude")).unwrap();
+        std::fs::write(d.join("Note.md"), text).unwrap();
+        Cfg(serde_json::json!({"vault": d.to_string_lossy()}))
+    }
+
+    #[test]
+    fn a_proposed_replacement_is_a_fix_apply_can_take() {
+        let cfg = vault("propose", "one\ntwo\nthree\n");
+        let code = propose(&cfg, "Note", 2, "replaced").unwrap();
+        let d = for_note(&cfg, &cfg.vault().join("Note.md"));
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].code, code);
+        assert_eq!(d[0].severity, "info");
+        assert_eq!(apply(&cfg, &code).unwrap(), format!("applied {} in Note.md", code));
+        assert_eq!(std::fs::read_to_string(cfg.vault().join("Note.md")).unwrap(), "one\nreplaced\nthree\n");
+        assert!(propose(&cfg, "Note", 99, "x").is_err());
+        assert!(propose(&cfg, "No such note", 1, "x").is_err());
+    }
 }

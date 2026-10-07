@@ -3,7 +3,7 @@
 // and the Enter key. All markdown goes through one renderer; math is extracted by the parser,
 // never by a regex.
 use crate::cfg::Cfg;
-use crate::{diag, doc, log, md, tell};
+use crate::{cards, diag, doc, log, md, tell};
 use std::io::Read;
 use tiny_http::{Header, Request, Response, Server};
 
@@ -83,18 +83,25 @@ textarea{flex:1;resize:none;background:#101115;color:var(--fg);border:0;border-r
  padding:.6rem .8rem;font:15px/1.5 var(--serif);max-height:40vh}
 textarea:focus{outline:1px solid var(--line)}
 /* Saying something about a line reads like the comments do: a coloured edge under the line,
-   the quote dim above the box, no frame around either. */
+   the quote dim above the box, no frame around either. A card is always removable, even
+   unsent — the `x` sits beside the quote rather than floating free of it. */
 .say{margin:.5rem 0 1.2rem;padding-left:1.1rem;border-left:2px solid #8fa8c880}
-.say .q{font:11.5px/1.5 var(--mono);color:var(--dim);margin-bottom:.35rem;
+.say .hd{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.35rem}
+.say .hd .q{flex:1;font:11.5px/1.5 var(--mono);color:var(--dim);
  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.say .hd .x{flex:none;font:11px var(--mono);color:var(--dim)}
+.say .hd .x:hover{color:var(--err)}
 .say textarea{width:100%;display:block;flex:none;max-height:30vh}
+.say textarea.r{margin-top:.6rem}
 .say .st{font:11px var(--mono);text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin-top:.3rem}
-/* The answer sits under the comment, in the same card, so the two read together. */
+/* The answer sits under the comment, in the same card, so the two read together; a fix it
+   offered gets the same quiet apply button a diagnostic card's does. */
 .say .msg.talk{margin:.7rem 0 0;font-size:.95em}
 .say .msg.talk p:last-child{margin-bottom:0}
+.say form{margin:.3rem 0 0}
 /* A sent card keeps its coloured edge: it is waiting its turn, not cancelled. What was typed
    stays as plain text, since a greyed-out textarea reads as discarded. */
-.say.done textarea{display:none}
+.say.done textarea.say{display:none}
 .say.done .t{white-space:pre-wrap}
 #toast{max-width:var(--measure);margin:.3rem auto 0;font:12px var(--mono);color:var(--dim);min-height:1em}
 .katex{font-size:1.03em}.katex-display{overflow-x:auto;overflow-y:hidden;margin:1.3em 0}
@@ -164,20 +171,26 @@ function comment(e){
   if(e.target.closest('a,form,button,textarea,.diag'))return;
   var b=e.target.closest('[data-line]');if(!b||!b.dataset.note)return;
   var quote=quoted(b);
-  var where='[['+b.dataset.note+']] L'+b.dataset.line+(quote?': "'+quote+'"':'');
-  say(b,where);
+  // A short id of its own, right here in the quote, is what lets a deliberate `facet answer`
+  // find its way back to this card — never a talk reply its poll merely happens to catch.
+  var id='c'+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
+  var where='[['+b.dataset.note+']] L'+b.dataset.line+' #'+id+(quote?': "'+quote+'"':'');
+  say(b,where,id,b.dataset.note,b.dataset.line);
 }
 // Nothing pops up: the box opens in the page, under the line it is about, already focused, with
 // a dim echo of what is being quoted above it. Enter sends, Shift-Enter is a new line, Escape
-// leaves no trace. Only one box is open at a time.
-function say(b,where){
+// leaves no trace when the box is still empty. Only one unsent box is open at a time, but every
+// card, sent or not, keeps its own `x` to take it away.
+function say(b,where,id,note,line){
   var old=document.querySelector('.say:not(.done)');if(old)old.remove();
   var d=document.createElement('div');d.className='say';
-  d.innerHTML='<div class=q></div><textarea class=say rows=2 placeholder="say what to change"></textarea><div class=st></div>';
+  d.dataset.id=id;d.dataset.note=note;d.dataset.line=line;d.dataset.where=where;
+  d.innerHTML='<div class=hd><div class=q></div><button class=x type=button>remove</button></div>\
+    <textarea class=say rows=2 placeholder="say what to change"></textarea><div class=st></div>';
   d.querySelector('.q').textContent=where;
+  d.querySelector('.x').addEventListener('click',function(){del(d)});
   b.parentNode.insertBefore(d,b.nextSibling);
-  var t=d.querySelector('textarea');
-  // An empty box leaves no trace: Escape, or simply looking elsewhere, takes it away again.
+  var t=d.querySelector('textarea.say');
   t.addEventListener('blur',function(){
     if(!d.classList.contains('done')&&!t.value.trim())d.remove();
   });
@@ -186,41 +199,66 @@ function say(b,where){
     if(ev.key!='Enter'||ev.shiftKey||ev.altKey)return;
     ev.preventDefault();ev.stopPropagation();
     var said=t.value.trim();if(!said){d.remove();return}
-    var mark=function(s){d.classList.add('done');var m=d.querySelector('.st');m.textContent=s};
-    var kept=document.createElement('div');kept.className='t';kept.textContent=said;
-    d.insertBefore(kept,d.querySelector('.st'));
-    t.readOnly=true;mark('sending');
-    var body='text='+encodeURIComponent(where+'\n'+said)+'&later=1';
-    fetch(TOK+'/x/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
-      .then(function(r){return r.ok?r.text():Promise.reject(r.status)})
-      .then(function(){mark('queued');listen(d)},
-            function(err){kept.remove();d.classList.remove('done');t.readOnly=false;
-                          mark('not sent ('+err+')')});
+    t.readOnly=true;
+    send(d,where,said,function(ok){if(!ok)t.readOnly=false});
   });
   t.focus();
 }
-// A reply belongs where the comment was made, not only in the chat: once a card is queued it
-// watches the conversation and puts what comes back underneath what was said. The newest card
-// is the one being answered, so it takes the replies; the cursor comes from the server.
-var RCARD=null,RHI=null,RT=null;
-function listen(d){
-  RCARD=d;
-  if(RHI===null)fetch(TOK+'/x/mark').then(function(r){return r.text()})
-    .then(function(s){RHI=parseInt(s,10);wait()});
-  else wait();
+// A card's own remove: a sent one only has to leave the page, not be unsent — the answer it
+// may already carry stays exactly where `facet answer` put it.
+function del(d){if(d===RCARD)RCARD=null;if(RT){clearTimeout(RT);RT=null}d.remove()}
+// The one POST every card's textarea sends through, first message or a later reply alike: the
+// id travels with it every time, so the whole thread stays one card no matter how it grows.
+function send(d,where,said,after){
+  var st=d.querySelector('.st');
+  var mark=function(s){d.classList.add('done');st.textContent=s};
+  var kept=document.createElement('div');kept.className='t';kept.textContent=said;
+  d.insertBefore(kept,st);
+  mark('sending');
+  var body='id='+d.dataset.id+'&note='+encodeURIComponent(d.dataset.note)+'&line='+d.dataset.line+
+    '&text='+encodeURIComponent(where+'\n'+said)+'&later=1';
+  fetch(TOK+'/x/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
+    .then(function(r){return r.ok?r.text():Promise.reject(r.status)})
+    .then(function(){mark('queued');listen(d);if(after)after(true)},
+          function(err){kept.remove();mark('not sent ('+err+')');if(after)after(false)});
 }
+// An answer belongs where the comment was made, not only in the chat: once a card is sent it
+// watches for the reply addressed to it (by id, never a generic one) and puts it underneath
+// what was said; a reply box then opens so answering back stays inside the same card. The
+// newest card is the one being watched — an older one keeps what it already has.
+var RCARD=null,RCOUNT=0,RT=null;
+function listen(d){RCARD=d;RCOUNT=0;wait()}
 function wait(){if(!RT&&RCARD)RT=setTimeout(poll,2500)}
 function poll(){
   RT=null;if(!RCARD)return;
-  fetch(TOK+'/f/reply?since='+RHI).then(function(r){return r.text()}).then(function(h){
+  var d=RCARD;
+  fetch(TOK+'/f/reply?id='+d.dataset.id+'&since='+RCOUNT).then(function(r){return r.text()}).then(function(h){
     var w=document.createElement('div');w.innerHTML=h;
     var rp=w.firstElementChild;
-    if(rp){
-      RHI=parseInt(rp.dataset.high,10);
-      while(rp.firstChild){var n=rp.firstChild;RCARD.appendChild(n);mathify(n)}
+    if(rp&&rp.children.length){
+      RCOUNT=parseInt(rp.dataset.high,10);
+      var st=d.querySelector('.st');
+      // htmx's own swap would wire up an answer's `apply` form; inserted by hand, it needs
+      // telling the same way mathify is: once, right after it lands.
+      while(rp.firstChild){var n=rp.firstChild;d.insertBefore(n,st);mathify(n);htmx.process(n)}
+      reply(d);
     }
     wait();
   },wait);
+}
+// Once a card has an answer in it, a further reply goes out the same way the comment did,
+// still carrying the same id, so the thread stays attached to it.
+function reply(d){
+  if(d.querySelector('.r'))return;
+  var t=document.createElement('textarea');t.className='r';t.rows=1;t.placeholder='reply';
+  d.insertBefore(t,d.querySelector('.st'));
+  t.addEventListener('keydown',function(ev){
+    if(ev.key!='Enter'||ev.shiftKey||ev.altKey)return;
+    ev.preventDefault();
+    var said=t.value.trim();if(!said)return;
+    t.readOnly=true;
+    send(d,d.dataset.where,said,function(ok){t.readOnly=false;if(ok)t.value=''});
+  });
 }
 // iOS Safari does not fire `dblclick` reliably on a touch, so a coarse (touch) pointer gets
 // its own double-tap detector instead, ported from vault-phone's `pick()`.
@@ -308,16 +346,26 @@ fn log_fragment(cfg: &Cfg, since: i64) -> String {
     out
 }
 
-/// The answer to a comment, where the comment was made: what has been said since the card
-/// went off, so a reply reads next to the line it is about instead of alone in the chat. The
-/// cursor rides back on the wrapper, so the page keeps no count of its own.
-fn reply_fragment(cfg: &Cfg, since: i64) -> String {
-    let msgs = log::since(cfg, since);
-    let high = msgs.last().map(|m| m.i).unwrap_or(since);
-    let said: String = msgs.iter().filter(|m| m.kind == "talk")
-        .map(|m| format!("<div class=\"msg talk\">{}</div>", md::render(&m.text, &note_base(cfg))))
-        .collect();
-    format!("<div class=rp data-high=\"{}\">{}</div>", high, said)
+/// The answers addressed to one card, by its id — never a talk reply the poll merely happened
+/// to catch (the bug this and `facet answer` replace). `since` is how many of them the page
+/// has already shown; an answer with a fix attached gets the same apply button a diagnostic
+/// card does, through the same `/x/diag` route.
+fn reply_fragment(cfg: &Cfg, id: &str, since: usize) -> String {
+    let sd = crate::optchat::engine::state_dir(&crate::optchat::engine::dir());
+    let card = cards::get(&sd, id).unwrap_or(serde_json::Value::Null);
+    let answers = card["answers"].as_array().cloned().unwrap_or_default();
+    let base = note_base(cfg);
+    let said: String = answers.iter().skip(since).map(|a| {
+        let mut s = format!("<div class=\"msg talk\">{}</div>",
+            md::render(a["text"].as_str().unwrap_or(""), &base));
+        if let Some(code) = a["code"].as_str() {
+            s.push_str(&format!("<form hx-post=\"{}/x/diag\" hx-target=\"#toast\" hx-swap=innerHTML>\
+                <input type=hidden name=code value=\"{}\"><button name=do value=apply>apply</button></form>",
+                cfg.token_path(), md::esc(code)));
+        }
+        s
+    }).collect();
+    format!("<div class=rp data-high=\"{}\">{}</div>", answers.len(), said)
 }
 
 fn chat_page(cfg: &Cfg) -> String {
@@ -541,9 +589,8 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
 
         ["f", "log"] => html(log_fragment(cfg, qnum("since")), 200),
 
-        // what has been said since a comment card was sent, for the card to show it in place
-        ["f", "reply"] => html(reply_fragment(cfg, qnum("since")), 200),
-        ["x", "mark"] => html(log::since(cfg, -1).last().map(|m| m.i).unwrap_or(-1).to_string(), 200),
+        // the answers addressed to one card, for it to show them where it was sent
+        ["f", "reply"] => html(reply_fragment(cfg, &qstr("id"), qnum("since").max(0) as usize), 200),
 
         // the memory tree (folded from the files: the engine's view is the same fold)
         ["tree"] => {
@@ -573,10 +620,19 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
 
         ["d"] => html(diag_page(cfg), 200),
 
-        ["x", "send"] if post => match tell::tell(cfg, &field(&f, "text"), "reader", field(&f, "later") == "1") {
-            Ok(_) => html("sent".into(), 200),
-            Err(e) => html(format!("not sent: {}", md::esc(&e)), 200),
-        },
+        ["x", "send"] if post => {
+            // a card's first send registers it: who it is about, so a later `facet answer`
+            // (and a fix it attaches) knows where to land, without the id having to carry that
+            let id = field(&f, "id");
+            if !id.is_empty() {
+                let sd = crate::optchat::engine::state_dir(&crate::optchat::engine::dir());
+                cards::register(&sd, &id, &field(&f, "note"), field(&f, "line").parse().unwrap_or(0));
+            }
+            match tell::tell(cfg, &field(&f, "text"), "reader", field(&f, "later") == "1") {
+                Ok(_) => html("sent".into(), 200),
+                Err(e) => html(format!("not sent: {}", md::esc(&e)), 200),
+            }
+        }
 
         ["x", "diag"] if post => {
             let (code, note) = (field(&f, "code"), field(&f, "note"));
