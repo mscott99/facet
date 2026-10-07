@@ -1,7 +1,7 @@
 // Configuration: one JSON file, read fresh when asked. No derive macros, no schema —
 // a Value plus typed accessors, so adding a key is a one-line change here and nowhere else.
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub fn home() -> PathBuf { PathBuf::from(std::env::var("HOME").expect("HOME")) }
 pub fn dir() -> PathBuf { home().join(".config/facet") }
@@ -79,7 +79,6 @@ pub fn put_state(v: &Value) {
     let _ = std::fs::write(dir().join("state.json"), serde_json::to_string_pretty(v).unwrap());
 }
 pub fn data_dir() -> PathBuf { home().join(".local/share/facet") }
-pub fn exists(p: &Path) -> bool { p.exists() }
 
 impl Cfg {
     /// The token as a path prefix: every URL in every page starts with this.

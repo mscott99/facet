@@ -9,7 +9,6 @@ pub struct Msg {
     pub i: i64,
     pub kind: String,
     pub text: String,
-    pub date: String,
 }
 
 impl Msg {
@@ -41,7 +40,6 @@ pub fn since(cfg: &Cfg, since: i64) -> Vec<Msg> {
                 i,
                 kind: v.get("kind").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
                 text: v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                date: v.get("date").and_then(|x| x.as_str()).unwrap_or("").to_string(),
             });
         }
     }
@@ -50,9 +48,3 @@ pub fn since(cfg: &Cfg, since: i64) -> Vec<Msg> {
 }
 
 pub fn last(cfg: &Cfg) -> i64 { since(cfg, -1).last().map(|m| m.i).unwrap_or(-1) }
-
-/// The last `n` messages (any kind).
-pub fn tail(cfg: &Cfg, n: usize) -> Vec<Msg> {
-    let all = since(cfg, -1);
-    all[all.len().saturating_sub(n)..].to_vec()
-}

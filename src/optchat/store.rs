@@ -111,6 +111,8 @@ impl Store {
     }
 
     /// Append message `i = T`. Returns its id.
+    /// (test-only: production always goes through `Engine::log`, which calls `log_at`.)
+    #[cfg(test)]
     pub fn log(&mut self, kind: &str, text: &str) -> std::io::Result<usize> { self.log_at(kind, text, &now_iso()) }
 
     /// Append with a given date (an imported note keeps the date it was written).

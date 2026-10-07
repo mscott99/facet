@@ -4,7 +4,6 @@
 // (the compactor's input is never cut, §4.2); the date is the file's modification time.
 use super::engine;
 use serde_json::json;
-use std::path::Path;
 
 /// Larger than this is refused: one message this big would be a single compactor call
 /// with the whole file in it, and a poor fit for one 512-byte line anyway.

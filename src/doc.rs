@@ -257,6 +257,8 @@ fn header(line: &str) -> Option<(usize, &str)> {
 
 /// The body under the header of that name, the header line itself excluded, ending at the
 /// next header of the same or a higher level. The name is matched without case, as there.
+/// (test-only: nothing in production calls this directly, only `section_at`.)
+#[cfg(test)]
 pub fn section(text: &str, want: &str) -> Option<String> { section_at(text, want).map(|(b, _)| b) }
 
 /// The same, with the line the body starts on (1-based, blank lines at its head skipped as the
@@ -305,6 +307,8 @@ const DEPTH: usize = 3;
 
 /// An embed line expanded into the text it stands for. Any other line comes back unchanged,
 /// so this can be mapped over a whole note without reading the note's structure.
+/// (test-only: nothing in production calls this directly, only `assemble`.)
+#[cfg(test)]
 pub fn expand(cfg: &Cfg, line: &str) -> String {
     assemble(cfg, "", &[line], 0).0
 }
@@ -329,7 +333,7 @@ fn inline(cfg: &Cfg, line: &str, at: &Src, depth: usize, seen: &mut Vec<String>,
           out: &mut Vec<(String, Src)>) {
     let Some(e) = embed(line) else { return out.push((line.to_string(), at.clone())) };
     // A missing embed is a hole in a paper: say so where it is, rather than drop the line.
-    let mut miss = |out: &mut Vec<(String, Src)>, why: &str| {
+    let miss = |out: &mut Vec<(String, Src)>, why: &str| {
         out.push((String::new(), at.clone()));
         out.push((format!("`{}` — {}", line.trim(), why), at.clone()));
         out.push((String::new(), at.clone()));
