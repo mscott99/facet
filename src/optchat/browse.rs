@@ -100,27 +100,32 @@ pub fn html(s: &Store, v: &View, budget: usize, back: Option<&str>) -> String {
 ", vl = v.parts.len(), vb = v.size(s), tree = b.out)
 }
 
-const CSS: &str = ":root{color-scheme:light dark}
-body{font:14px/1.5 -apple-system,system-ui,ui-sans-serif,sans-serif;margin:0 auto;max-width:1000px;padding:1rem;background:Canvas;color:CanvasText}
-h1{font-size:1.05rem;margin:0}a.back{font-weight:normal;font-size:.9rem;color:#79a7d3;text-decoration:none}
-p.s{margin:.15rem 0;color:#888;font:12px/1.45 ui-monospace,monospace}
-.bar{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin:.8rem 0 .4rem;position:sticky;top:0;background:Canvas;padding:.45rem 0;border-bottom:1px solid #8884;z-index:1}
-input{flex:1;min-width:10rem;padding:.3rem .5rem;font:inherit;color:inherit;background:Canvas;border:1px solid #8886;border-radius:5px}
-button{font:inherit;padding:.3rem .55rem;color:inherit;background:transparent;border:1px solid #8886;border-radius:5px;cursor:pointer}
-button:hover{background:#8881}
-#h{font:12px ui-monospace,monospace;color:#888;white-space:nowrap}
+// Dark and quiet, like the rest of the pages. This one is a dense data view, so it keeps a
+// sans face and its monospace addresses: the `id+n` of a line is what a zoom is written from,
+// and is the only thing here carrying the accent.
+const CSS: &str = ":root{color-scheme:dark;--bg:#15161a;--fg:#bdbcb8;--dim:#75767a;--line:#272930;--acc:#8fa8c8;
+ --mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+body{font:14px/1.6 -apple-system,system-ui,ui-sans-serif,sans-serif;margin:0 auto;max-width:62rem;padding:1.1rem;background:var(--bg);color:var(--fg)}
+h1{font-size:1.05rem;font-weight:600;margin:0}
+a.back{font-weight:normal;font-size:.9rem;color:var(--acc);text-decoration:none}
+p.s{margin:.15rem 0;color:var(--dim);font:12px/1.5 var(--mono)}
+.bar{display:flex;flex-wrap:wrap;gap:.9rem;align-items:center;margin:.9rem 0 .5rem;position:sticky;top:0;background:var(--bg);padding:.5rem 0;z-index:1}
+input{flex:1;min-width:10rem;padding:.25rem 0;font:12.5px var(--mono);color:var(--fg);background:none;border:0;border-bottom:1px solid var(--line)}
+input:focus{outline:0;border-bottom-color:var(--acc)}
+button{font:12.5px var(--mono);padding:0;color:var(--dim);background:none;border:0;cursor:pointer}
+button:hover{color:var(--acc)}
+#h{font:12px var(--mono);color:var(--dim);white-space:nowrap}
 details.n{margin:.1rem 0}
-details.n>details.n{margin-left:.5rem;border-left:1px solid #8883;padding-left:.5rem}
-details.n>details.n:hover{border-left-color:#8886}
-summary{cursor:pointer;padding:.1rem .2rem;border-radius:4px;overflow-wrap:anywhere}
-summary:hover{background:#8881}
-summary>code{font-size:11px;color:#79a7d3}
-.m{font-size:11px;color:#888;white-space:nowrap}
-.sc>summary>.t{color:#888;font-style:italic}
-.b{white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,monospace;margin:.25rem 0 .5rem;padding:.4rem .6rem;background:#8881;border-left:2px solid #8886;border-radius:0 4px 4px 0}
-.hit>summary{background:#f9c74f40;outline:1px solid #f9c74f80}
-details.user>summary b{color:#4ea1ff}details.talk>summary b{color:#5cb87a}
-details.tool>summary b{color:#c9a227}details.echo>summary b{color:#999}details.note>summary b{color:#c678dd}";
+details.n>details.n{margin-left:.5rem;border-left:1px solid var(--line);padding-left:.6rem}
+summary{cursor:pointer;padding:.1rem .2rem;border-radius:3px;overflow-wrap:anywhere}
+summary:hover{background:#ffffff08}
+summary>code{font:11px var(--mono);color:var(--acc)}
+.m{font:11px var(--mono);color:var(--dim);white-space:nowrap}
+.sc>summary>.t{color:var(--dim);font-style:italic}
+.b{white-space:pre-wrap;word-break:break-word;font:12px/1.6 var(--mono);margin:.25rem 0 .6rem;padding:.1rem 0 .1rem .7rem;border-left:1px solid var(--line)}
+.hit>summary{background:#b5956626}
+details.user>summary b{color:var(--acc)}details.talk>summary b{color:#8fab8f}
+details.tool>summary b{color:#b59566}details.echo>summary b{color:var(--dim)}details.note>summary b{color:#a692b5}";
 
 const JS: &str = "const $=s=>document.querySelectorAll(s),T='#tree details';
 const all=o=>$(T).forEach(d=>d.open=o);

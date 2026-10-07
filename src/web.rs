@@ -14,45 +14,75 @@ const SHELL: &str = r#"<!DOCTYPE html><html><head><meta charset=utf-8>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <script src="{{TOK}}/static/htmx.js"></script>
 <style>
-:root{--bg:#14161a;--fg:#dfe3e8;--dim:#8b949e;--line:#262b31;--acc:#7aa2f7;--warn:#e0af68;--err:#f7768e}
+/* Dark, low contrast, one accent. Typography does the work: a serif at a reading measure,
+   room between the lines, a shallow heading scale. Rules and panels are the exception —
+   where a border or a background could be whitespace instead, it is. */
+:root{--bg:#15161a;--fg:#bdbcb8;--dim:#75767a;--line:#272930;--acc:#8fa8c8;--warn:#b59566;--err:#c08276;
+ --measure:37rem;--serif:ui-serif,"New York",Charter,"Iowan Old Style",Palatino,Georgia,serif;
+ --mono:ui-monospace,SFMono-Regular,Menlo,monospace;color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-header{position:sticky;top:0;z-index:5;display:flex;gap:14px;align-items:center;
- padding:10px 14px;background:#11131799;backdrop-filter:blur(8px);border-bottom:1px solid var(--line);font-size:14px}
-header a{color:var(--dim);text-decoration:none}header a:hover,header a.on{color:var(--acc)}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.7 var(--serif)}
+header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:.3rem 1.1rem;align-items:baseline;
+ padding:.7rem 1.1rem;background:var(--bg);font:12.5px/1.4 var(--mono)}
+header a{color:var(--dim);text-decoration:none;border:0}
+header a:hover{color:var(--fg)}header a.on{color:var(--acc)}
 header .sp{flex:1}
-main{max-width:46rem;margin:0 auto;padding:12px 14px 7rem}
-.msg{margin:14px 0}
-.who{font-size:12px;color:var(--dim);letter-spacing:.04em}
-.user{background:#1b2230;border-left:2px solid var(--acc);padding:8px 12px;border-radius:6px}
-.talk{padding:0 2px}
-details.step{margin:6px 0;font-size:14px;color:var(--dim)}
+main{max-width:var(--measure);margin:0 auto;padding:.6rem 1.1rem 8rem}
+h1,h2,h3,h4{font-weight:600;line-height:1.3}
+h1{font-size:1.35rem;margin:2rem 0 .7rem}
+h2{font-size:1.1rem;margin:1.8rem 0 .5rem}
+h3{font-size:1rem;margin:1.5rem 0 .4rem}
+h4{font-size:.95rem;margin:1.3rem 0 .3rem;color:var(--dim)}
+main>h1:first-child,#docwrap>h1:first-child{margin-top:.2rem}
+p{margin:0 0 1.05em}
+hr{border:0;border-top:1px solid var(--line);margin:2.2rem 0}
+.at{color:var(--dim);font:12.5px/1.6 var(--mono)}
+.msg{margin:1.5rem 0}
+.user{border-left:2px solid #8fa8c84d;padding-left:1.1rem}
+details.step{margin:.5rem 0;font:12.5px/1.6 var(--mono);color:var(--dim)}
 details.step summary{cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-details.step pre{white-space:pre-wrap;background:#0f1115;padding:8px;border-radius:6px;font-size:12.5px}
-pre{overflow-x:auto;background:#0f1115;padding:10px;border-radius:6px}
-code{background:#0f1115;padding:1px 4px;border-radius:4px;font-size:.92em}
-pre code{background:none;padding:0}
-a{color:var(--acc)}a.wl{border-bottom:1px dotted var(--acc);text-decoration:none}
+details.step pre{white-space:pre-wrap;margin:.4rem 0}
+pre{overflow-x:auto;background:#101115;padding:.75rem .9rem;border-radius:3px;
+ font:12.5px/1.6 var(--mono);color:var(--dim)}
+code{font:.85em/1.5 var(--mono)}
+pre code{font-size:inherit;color:inherit}
+a{color:var(--acc);text-decoration:none;border-bottom:1px solid #8fa8c840}
+a:hover{border-bottom-color:var(--acc)}
+a.wl{color:inherit;border-bottom:1px solid #4d4f57}
+a.wl:hover{color:var(--acc);border-bottom-color:currentColor}
 .cite{color:var(--dim);cursor:help}
-table{border-collapse:collapse;width:100%;font-size:14px}th,td{border:1px solid var(--line);padding:4px 7px}
-blockquote{border-left:2px solid var(--line);margin:0;padding-left:12px;color:var(--dim)}
-.diag{margin:12px 0;border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:6px;padding:8px 10px;background:#171a1f}
-.diag.error{border-left-color:var(--err)}.diag.info,.diag.hint{border-left-color:var(--dim)}
-.diag .sev{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--warn)}
-.diag.error .sev{color:var(--err)}.diag .at{color:var(--dim);font-size:12px}
-.diag form{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
-.diag input[type=text]{flex:1;min-width:8rem;background:#0f1115;border:1px solid var(--line);
- color:var(--fg);border-radius:6px;padding:5px 8px;font-size:13px}
-button{background:#232a35;color:var(--fg);border:1px solid var(--line);border-radius:6px;
- padding:5px 10px;font-size:13px}button:hover{border-color:var(--acc)}
-footer{position:fixed;bottom:0;left:0;right:0;background:#111317f2;border-top:1px solid var(--line);
- padding:8px 10px env(safe-area-inset-bottom)}
-footer form{max-width:46rem;margin:0 auto;display:flex;gap:8px;align-items:flex-end}
-textarea{flex:1;resize:none;background:#0f1115;color:var(--fg);border:1px solid var(--line);
- border-radius:8px;padding:9px 11px;font:15px/1.4 inherit;max-height:40vh}
-#toast{max-width:46rem;margin:4px auto 0;font-size:12.5px;color:var(--dim);min-height:1em}
-.katex{font-size:1.02em}.katex-display{overflow-x:auto;overflow-y:hidden}
-[data-line]:hover{outline:1px dashed var(--line);outline-offset:2px;cursor:text}
+table{border-collapse:collapse;width:100%;font-size:.9em;margin:1.2em 0}
+th,td{text-align:left;padding:.3rem 1.2rem .3rem 0;vertical-align:top}
+th{color:var(--dim);font-weight:600;border-bottom:1px solid var(--line)}
+blockquote{border-left:1px solid var(--line);margin:1.2em 0;padding-left:1.1rem;color:var(--dim)}
+/* A comment is an aside, not a dialog: a coloured edge where it belongs, and controls that
+   read as text until you want them. */
+.diag{margin:1.2rem 0 1.5rem;padding-left:1.1rem;border-left:2px solid var(--warn);font-size:.92em}
+.diag.error{border-left-color:var(--err)}.diag.info,.diag.hint{border-left-color:var(--line)}
+.diag .sev{font:11px var(--mono);text-transform:uppercase;letter-spacing:.1em;color:var(--warn)}
+.diag.error .sev{color:var(--err)}.diag.info .sev,.diag.hint .sev{color:var(--dim)}
+.diag p:last-child{margin-bottom:0}
+.diag form{display:flex;gap:1rem;margin-top:.6rem;flex-wrap:wrap;align-items:baseline}
+.diag input[type=text]{flex:1;min-width:9rem;background:none;border:0;border-bottom:1px solid var(--line);
+ color:var(--fg);padding:.2rem 0;font:12.5px var(--mono)}
+.diag input[type=text]:focus{outline:0;border-bottom-color:var(--acc)}
+button{background:none;color:var(--dim);border:0;padding:0;cursor:pointer;font:12.5px var(--mono)}
+button:hover{color:var(--acc)}
+footer{position:fixed;bottom:0;left:0;right:0;background:var(--bg);
+ padding:.6rem 1.1rem env(safe-area-inset-bottom)}
+footer form{max-width:var(--measure);margin:0 auto;display:flex;gap:.8rem;align-items:center}
+textarea{flex:1;resize:none;background:#101115;color:var(--fg);border:0;border-radius:4px;
+ padding:.6rem .8rem;font:15px/1.5 var(--serif);max-height:40vh}
+textarea:focus{outline:1px solid var(--line)}
+#toast{max-width:var(--measure);margin:.3rem auto 0;font:12px var(--mono);color:var(--dim);min-height:1em}
+.katex{font-size:1.03em}.katex-display{overflow-x:auto;overflow-y:hidden;margin:1.3em 0}
+/* The line you can comment on says so only under the pointer, and only on the block a click
+   would land on — never on touch, where there is no hover and every tap would light up. */
+@media (hover:hover){p[data-line]:hover,li[data-line]:hover,blockquote[data-line]:hover,
+ h1[data-line]:hover,h2[data-line]:hover,h3[data-line]:hover,h4[data-line]:hover{background:#ffffff08}}
+@media (max-width:30rem){body{font-size:16px}main{padding:.6rem .9rem 8rem}
+ header{gap:.3rem .85rem;padding:.6rem .9rem}footer{padding:.6rem .9rem env(safe-area-inset-bottom)}}
 </style></head><body>
 <header>{{NAV}}<span class=sp></span><span class=at>{{STATUS}}</span></header>
 <main>{{BODY}}</main>
@@ -333,9 +363,11 @@ fn home(cfg: &Cfg) -> String {
     if !cfg.terminal().is_empty() { rows.push((cfg.terminal(), "Terminal", "the chat in a terminal (facet chat)".into())); }
     if !cfg.vault_phone().is_empty() { rows.push((cfg.vault_phone(), "Vault", "notes viewer and editor".into())); }
     if let Some(u) = cfg.opt("telegram.username") { rows.push((format!("https://t.me/{}", u), "Telegram", format!("@{} · /ping, /last, /help", u))); }
-    let mut b = String::from("<style>.home a.card{display:block;margin:10px 0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;text-decoration:none;color:var(--fg)}\
-        .home a.card:hover{border-color:var(--acc)}.home .n{font-weight:600;color:var(--acc)}.home .d{font-size:14px;color:var(--dim)}\
-        .home .u{font-size:13px;color:var(--dim);margin:14px 0}</style><div class=home>");
+    // No cards, despite the class name: a list of names, each with its line of state under it.
+    let mut b = String::from("<style>.home a.card{display:block;padding:.8rem 0;border:0;color:inherit}\
+        .home .n{font-size:1.05rem}.home a.card:hover .n{color:var(--acc)}\
+        .home .d{font:12.5px/1.6 var(--mono);color:var(--dim)}\
+        .home .u{font:12.5px/1.6 var(--mono);color:var(--dim);margin:0 0 1.4rem}</style><div class=home>");
     if !usage.is_empty() { b.push_str(&format!("<div class=u>{}</div>", md::esc(&usage))); }
     for (href, name, desc) in rows {
         b.push_str(&format!("<a class=card href=\"{}\"><div class=n>{}</div><div class=d>{}</div></a>", md::esc(&href), name, md::esc(&desc)));
