@@ -428,7 +428,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                     Some(a) => { a.reqs += 1; a.eq += eq; (a.kind.clone(), a.reqs) }
                     None => (String::new(), 0), // a subagent's own subagent: counted, not traced
                 };
-                super::events::req(&e.dir, "agent", &r, &cc, 0, json!({"turn": tr.first, "agent": id, "agent_kind": kind, "step": step}));
+                super::events::req(&e.dir, "agent", &r, &cc, 0, json!({"turn": tr.first, "tool_use_id": id, "agent_kind": kind, "step": step}));
             }
             continue;
         }

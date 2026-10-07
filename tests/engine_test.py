@@ -250,7 +250,7 @@ try:
           and a[0]["report_bytes"] == len(work[0]["text"]) and a[0]["ask_bytes"] > 0 and a[0]["task"] == "task_fake_1",
           "the agent record keeps what it was asked, what it cost and what it left behind")
     ar = [x for x in ev if x["ev"] == "req" and x["kind"] == "agent"]
-    check(len(ar) == 2 and all(x["agent"].startswith("toolu_agent") for x in ar),
+    check(len(ar) == 2 and all(x["tool_use_id"].startswith("toolu_agent") for x in ar),
           "each subagent request is logged on its own, under the agent that made it (%d)" % len(ar))
     t = [x for x in ev if x["ev"] == "turn"][-1]
     check(t["agents"] == 1 and t["agent_reqs"] == 2 and t["agent_eq"] > 0 and t["agent_bytes"] == len(work[0]["text"]),
