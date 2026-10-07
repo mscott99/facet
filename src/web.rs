@@ -82,8 +82,10 @@ textarea:focus{outline:1px solid var(--line)}
  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .say textarea{width:100%;display:block;flex:none;max-height:30vh}
 .say .st{font:11px var(--mono);text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin-top:.3rem}
-.say.done{border-left-color:var(--line)}
-.say.done textarea{background:none;padding-left:0;color:var(--dim)}
+/* A sent card keeps its coloured edge: it is waiting its turn, not cancelled. What was typed
+   stays as plain text, since a greyed-out textarea reads as discarded. */
+.say.done textarea{display:none}
+.say.done .t{white-space:pre-wrap}
 #toast{max-width:var(--measure);margin:.3rem auto 0;font:12px var(--mono);color:var(--dim);min-height:1em}
 .katex{font-size:1.03em}.katex-display{overflow-x:auto;overflow-y:hidden;margin:1.3em 0}
 /* The line you can comment on says so only under the pointer, and only on the block a click
@@ -171,11 +173,15 @@ function say(b,where){
     ev.preventDefault();ev.stopPropagation();
     var said=t.value.trim();if(!said){d.remove();return}
     var mark=function(s){d.classList.add('done');var m=d.querySelector('.st');m.textContent=s};
+    var kept=document.createElement('div');kept.className='t';kept.textContent=said;
+    d.insertBefore(kept,d.querySelector('.st'));
     t.readOnly=true;mark('sending');
     var body='text='+encodeURIComponent(where+'\n'+said)+'&later=1';
     fetch(TOK+'/x/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
       .then(function(r){return r.ok?r.text():Promise.reject(r.status)})
-      .then(function(s){mark(s||'sent')},function(err){t.readOnly=false;mark('not sent ('+err+')')});
+      .then(function(){mark('queued')},
+            function(err){kept.remove();d.classList.remove('done');t.readOnly=false;
+                          mark('not sent ('+err+')')});
   });
   t.focus();
 }
