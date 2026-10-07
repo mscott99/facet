@@ -153,7 +153,11 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
    So a message is written only while a tool runs (it rides on that tool's result, in the
    same call), else held for the next tool call. A call that ends with a message written but
    not consumed (`--replay-user-messages` tells) is killed at its result; that message, and
-   held ones, go to a fresh call with a new view, as the gist says.
+   held ones, go to a fresh call with a new view, as the gist says. A follow-up turn that
+   starts before that result reaches us — Claude Code hands a backgrounded subagent's report
+   over that way (see 19) — announces itself with a second `init`, and the call is killed
+   there instead; nothing it says is logged, since the view it is working from is this
+   call's.
 6. *A clean environment for every `claude` process.* The environment is cleared and only
    HOME, USER, PATH, SHELL, LANG, TMPDIR passed: variables from a parent Claude Code session
    put a line with a random session id before the view, which made every call a cache miss.
@@ -188,7 +192,10 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     of the two: delegating is cheaper than it is elsewhere — the paragraph says so
     and tells the agent to lean towards it a little, naming contained programming as well as
     looking, but leaves the choice to its judgement rather than making a rule of it. Added:
-    each turn is a fresh process, so anything started in the background dies with it.
+    each turn is a fresh process, so anything started in the background dies with it — except
+    a backgrounded subagent, which the call waits for whether or not the master does, so the
+    paragraph tells it to spawn in the foreground when it needs what the subagent finds
+    (see 19).
 13. *Free nodes are built at once*, without waiting for rule 3 (§4.1): they need no model call,
     so the compactor never sees them; the result is the same.
 14. *Failures do not retry forever at 10 s (§4.1).* A usage-limit error pauses the compactor
@@ -212,7 +219,8 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     does not start them and cannot talk to one while it runs. Every event carrying a
     `parent_tool_use_id` is dropped, so a subagent's own calls, results and prose never enter
     the log: what is remembered is the report it hands back, logged as one message of kind
-    `work` (the gist's own kind for it).
+    `work` (the gist's own kind for it) when it comes back inside the turn, and as the gist's
+    own `[id] ` user message when it comes back after the turn is over (below).
     Exploration that would have been twenty tool/echo pairs in the log costs one line.
     MASTER therefore keeps the gist's free hand but leans towards delegating (see 12): the
     work worth sending out is work whose steps need not be kept, contained programming as
@@ -222,6 +230,23 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     four tool calls is eight messages, so delegating it saves about a dollar of compaction and
     pays the subagent's own reads once, out of a fresh context instead of the turn's growing
     one. The report is a message too: a transcript handed back buys nothing.
+
+    A backgrounded subagent reports on its own, and that report starts a turn. Claude Code
+    (2.1.268) backgrounds a spawn unless the call passes `run_in_background: false`, and then
+    its tool result is not a report at all but a receipt: an internal agent id with a warning
+    never to quote it, so it is not logged. The report comes later, in the `task_notification`
+    for the task, whose `summary` is the subagent's own last words, word for word (measured:
+    202 bytes, byte-identical to its last `assistant` text). It arrives after the reply that
+    sent it, so it cannot be that turn's: it goes in as the gist has it, one message of kind
+    `user` whose text starts `[id] `, queued the way a message sent for a turn of its own is
+    (so it is durable too, see 15) and answered by a fresh call whose view already has it.
+    Backgrounding buys the turn nothing, which is why MASTER steers away from it: Claude Code
+    withholds the call's `result` until every background task has ended (measured: the reply
+    at 9 s, the notification at 49 s, `result` and exit at 51 s), so the call waits for the
+    subagent whether the master does or not. All it adds is the follow-up turn Claude Code
+    opens to deliver the notification, which is killed (see 5). Nothing of the subagent's own
+    account is lost: its record and its requests are closed from the notification instead of
+    from a tool result.
 
     A subagent runs on the cheap model by default (`agent_model`, sonnet): doing one stated
     job and writing one short report is work a smaller model does well, and paying the big
@@ -372,7 +397,8 @@ the engine's work, never read back by it; a write that fails is dropped silently
              node ("id+n") + try | agent (tool_use_id) + agent_kind + step (subagent)
     turn     one fresh call: first, last (message ids), messages_in, settle_ms (waiting for
              summaries), ms, steps, primed, prime_read, prime_write, midrun_delivered,
-             queue_after, outcome (done | cancelled | error), model, effort, view_bytes,
+             queue_after, outcome (done | cancelled | error | followup, the call killed at a
+             second init), model, effort, view_bytes,
              view_lines, view_marks, shared_bytes (prefix shared with the previous turn's
              view), shared_to_mark (the last cache mark inside that prefix), and what its
              subagents cost: agents, agent_reqs, agent_eq, agent_bytes (reports logged)
@@ -386,7 +412,7 @@ the engine's work, never read back by it; a write that fails is dropped silently
              context_bytes, step_bytes, blocks, marks
     limits   info: Claude Code's rate_limit_info (status, five_hour / seven_day utilization
              and resetsAt), each time it changes
-    input    how (starting | queued | held | delivered), bytes; never the text
+    input    how (starting | queued | held | delivered | later), bytes; never the text
     model    model: a /model switch
     system   name (master | compact), hash, bytes: a new system prompt version
     notice   text: every notice shown to the user

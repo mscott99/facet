@@ -10,6 +10,11 @@
 #   "AGENT"    -> one subagent: the Agent tool call, the task events, two of the subagent's
 #                 own requests (assistant messages carrying parent_tool_use_id, never
 #                 streamed, as measured on the real CLI), then its report as a tool result
+#   "BGAGENT"  -> the same subagent, backgrounded: the tool result is only the launch
+#                 receipt, the reply comes before the subagent is done, the report arrives
+#                 in the task notification's `summary`, and Claude Code then opens a
+#                 follow-up turn of this conversation (a second `init`) to hand it over —
+#                 all as measured on the real CLI (2.1.268)
 #   otherwise  -> one reply "ok"
 # Compactor (no --tools): replies 600 bytes first, then 300 bytes after the size feedback,
 # unless the step contains "STUBBORN" (always 600). "REFUSE" makes it fail.
@@ -111,10 +116,43 @@ def run_agent():
     out({"type": "user", "message": {"content": [{"tool_use_id": tid, "type": "tool_result",
          "content": [{"type": "text", "text": "REPORT: the thing is in three files"}]}]}})
 
+ACK = ("Async agent launched successfully. (This tool result is internal metadata — never quote"
+       " or paste any part of it, including the agentId below, into a user-facing reply.)\n"
+       "agentId: task_fake_bg (internal ID - do not mention to user.)")
+
+def run_bg_agent():
+    tid = "toolu_agent_bg_%f" % time.time()
+    step([{"type": "tool_use", "id": tid, "name": "Agent",
+           "input": {"description": "look it up", "prompt": "find the thing" + "." * 50,
+                     "subagent_type": "general-purpose", "run_in_background": True}}], stop="tool_use")
+    out({"type": "system", "subtype": "task_started", "task_id": "task_fake_bg", "tool_use_id": tid,
+         "description": "look it up", "subagent_type": "general-purpose", "is_backgrounded": True,
+         "spawn_depth": 1, "task_type": "local_agent", "prompt": "find the thing"})
+    out({"type": "user", "message": {"content": [{"tool_use_id": tid, "type": "tool_result",
+         "content": [{"type": "text", "text": ACK}]}]}})
+    step([{"type": "text", "text": "launched, I will hear back"}])  # the reply, agent still out
+    out({"type": "assistant", "parent_tool_use_id": tid,
+         "message": {"model": "fake-model", "usage": usage(0, 4000),
+                     "content": [{"type": "tool_use", "id": "sub1", "name": "Bash", "input": {"command": "grep -r thing"}}]}})
+    out({"type": "user", "parent_tool_use_id": tid,
+         "message": {"content": [{"type": "tool_result", "tool_use_id": "sub1", "content": "found in three files"}]}})
+    out({"type": "assistant", "parent_tool_use_id": tid,
+         "message": {"model": "fake-model", "usage": usage(4000, 20),
+                     "content": [{"type": "text", "text": "BG REPORT: the thing is in three files"}]}})
+    out({"type": "system", "subtype": "task_notification", "task_id": "task_fake_bg", "tool_use_id": tid,
+         "status": "completed", "summary": "BG REPORT: the thing is in three files",
+         "output_file": "/tmp/nowhere.output",
+         "usage": {"total_tokens": 4321, "tool_uses": 1, "duration_ms": 1234}})
+    # the follow-up turn, with this call's own stale view: the engine must end the call here
+    out({"type": "system", "subtype": "init", "tools": ["Bash"]})
+    step([{"type": "text", "text": "STALE FOLLOW-UP, not the chat's business"}])
+    result("launched, I will hear back")
+
 def run_turn(msg):
     if replay: out({"type": "user", "isReplay": True, "message": msg["message"]})
     t = text_of(msg)
     n = int(t.split("TOOLS ")[1].split()[0]) if "TOOLS " in t else 0
+    if "BGAGENT" in t: return run_bg_agent()
     if "AGENT" in t: run_agent()
     for k in range(n):
         tid = "tool%d_%f" % (k, time.time())

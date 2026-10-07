@@ -9,6 +9,7 @@ D = tempfile.mkdtemp(prefix="facet-e2e-")
 FAKE_LOG = os.path.join(D, "fake.jsonl")
 env = dict(os.environ, OPTCHAT_DIR=D, FACET_CLAUDE=os.path.join(HERE, "fake_claude.py"), FAKE_LOG=FAKE_LOG)
 fails = []
+REPORT = "BG REPORT: the thing is in three files"  # what the fake's backgrounded subagent says
 
 def check(cond, what):
     print(("ok   " if cond else "FAIL ") + what)
@@ -271,6 +272,33 @@ try:
     u = [json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))]
     check({"compact", "prime", "turn", "agent"} <= {x["kind"] for x in u}, "usage logged per request for compact, prime, turn and agent")
     check(sum(1 for x in u if x["kind"] == "agent") == 2, "a subagent's own requests are priced apart from the turn's")
+    # H: a backgrounded subagent reports after the reply, so its report cannot be that
+    # turn's: it comes in as a message of its own and starts another turn (§9)
+    n0 = len(log())
+    req({"op": "send", "text": "BGAGENT please"})
+    wait(lambda: any(m["kind"] == "user" and m["text"].startswith("[task_fake_bg]") for m in log()[n0:]),
+         30, "the background report joins the chat")
+    wait(idle, 60, "idle after the background report's turn")
+    L = log()[n0:]
+    rep = [m for m in L if m["kind"] == "user" and m["text"].startswith("[task_fake_bg]")]
+    check(len(rep) == 1 and REPORT in rep[0]["text"],
+          "a backgrounded subagent's report joins the chat as one message starting \"[id] \"")
+    check(not any("Async agent launched" in m["text"] for m in L),
+          "the launch receipt is not logged as a report")
+    check(not any("STALE FOLLOW-UP" in m["text"] for m in L),
+          "nothing the follow-up turn says is logged")
+    check(any(m["kind"] == "talk" and m["i"] > rep[0]["i"] for m in L), "the report starts a turn")
+    turns = [v for v in fake() if v.get("kind") == "turn"]
+    said = turns[-1]["content"][-1]["text"] if turns else ""
+    check(said.startswith("[task_fake_bg]"), "that turn is a fresh call, with the report as its message")
+    check(not any(v.get("kind") == "followup" for v in fake()), "no message was answered by a follow-up turn")
+    ab = [x for x in events() if x["ev"] == "agent" and x["task"] == "task_fake_bg"]
+    check(len(ab) == 1 and ab[0]["status"] == "completed" and ab[0]["reqs"] == 2
+          and ab[0]["report_bytes"] == len(REPORT) and ab[0]["tokens"] == 4321,
+          "the backgrounded agent's record is finished, with what it cost and left: %r" % (ab[0] if ab else None))
+    u = [json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))]
+    check(sum(1 for x in u if x["kind"] == "agent") == 4, "its own two requests are priced apart too")
+
     check(os.path.isdir(os.path.join(D, ".git")), "chat directory committed after turns")
 finally:
     eng.kill()

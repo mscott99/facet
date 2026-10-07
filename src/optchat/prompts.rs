@@ -35,7 +35,10 @@ A subagent is sent the view as it stands and can zoom it as you can,
 but it cannot ask you anything: put in the task what the view would not
 tell it, and ask for what it found and where that came from. Keep the
 work when you must see one result to choose the next, or the user waits
-on each step.";
+on each step. Send it in the foreground (run_in_background false) when
+you need what it finds to finish what you are doing: a backgrounded one
+cannot reach you in this turn, and its report comes back on its own, as
+a message that starts another turn.";
 
 pub const VIEW_DOC: &str = "\
 The view: the whole chat between {NAME} and the user, oldest first, inside

@@ -11,6 +11,9 @@
 // ends with messages written but not consumed (`--replay-user-messages` tells us which were),
 // the process is killed at its `result`, before the follow-up turn can run, and those
 // messages go back to the queue for a fresh call. Messages held and never written go back too.
+// A follow-up turn that starts before that `result` reaches us (Claude Code hands a
+// backgrounded subagent's report over that way) announces itself with a second `init`: it is
+// killed there, and nothing it says is logged, since its view is this call's.
 use super::claude::{self, Meter, Proc, Tick};
 use super::engine::{state_dir, Engine};
 use super::{prompts, view, CAP};
@@ -141,6 +144,11 @@ struct Trace {
 struct Agent {
     kind: String, desc: String, task: String, ask: usize,
     at: Instant, reqs: usize, eq: f64, tokens: u64, tools: u64, ms: u64, status: String,
+    /// Claude Code backgrounded it: no report comes back with the tool result, the
+    /// notification of its end carries it instead (§9)
+    bg: bool,
+    /// its last words, the report should that notification come without a summary
+    last: String,
 }
 
 impl Agent {
@@ -150,7 +158,7 @@ impl Agent {
             desc: input["description"].as_str().unwrap_or("").into(),
             task: String::new(), ask: input["prompt"].as_str().unwrap_or("").len(),
             at: Instant::now(), reqs: 0, eq: 0.0, tokens: 0, tools: 0, ms: 0,
-            status: "unfinished".into(),
+            status: "unfinished".into(), bg: false, last: String::new(),
         }
     }
 }
@@ -393,6 +401,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     let mut agents: HashMap<String, Agent> = HashMap::new(); // live subagents, by tool id
     let mut checked_tools = false;
     let mut killed = false;
+    let mut stale = false; // a follow-up turn of this conversation has started (see `init`)
     let (mut cc, mut tq) = (String::new(), Instant::now());
     loop {
         if cancelled(e) { p.kill(); killed = true; tr.outcome = "cancelled"; break }
@@ -427,13 +436,23 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                 tr.agent_reqs += 1;
                 tr.agent_eq += eq;
                 let (kind, step) = match agents.get_mut(id) {
-                    Some(a) => { a.reqs += 1; a.eq += eq; (a.kind.clone(), a.reqs) }
+                    Some(a) => {
+                        a.reqs += 1;
+                        a.eq += eq;
+                        for b in m["content"].as_array().into_iter().flatten() {
+                            if let Some(s) = b["text"].as_str() { a.last = s.into(); }
+                        }
+                        (a.kind.clone(), a.reqs)
+                    }
                     None => (String::new(), 0), // a subagent's own subagent: counted, not traced
                 };
                 super::events::req(&e.dir, "agent", &r, &cc, 0, json!({"turn": tr.first, "tool_use_id": id, "agent_kind": kind, "step": step}));
             }
             continue;
         }
+        // nothing a follow-up turn says is the chat's: only the task notifications that
+        // arrive beside it, and the result that lets this call go, are read from here on
+        if stale && !matches!(ev["type"].as_str().unwrap_or(""), "system" | "result") { continue }
         match ev["type"].as_str().unwrap_or("") {
             "system" if ev["subtype"] == "init" && !checked_tools => {
                 checked_tools = true;
@@ -442,19 +461,46 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                     e.notice("WARNING: the zoom tool is not available to the model (MCP not connected)");
                 }
             }
+            // A second init: Claude Code is starting a follow-up turn of the same
+            // conversation, to hand the master a background report (or a message that came
+            // in during the reply). Its view is the one this call started with, stale, which
+            // §7 forbids — so nothing it says is logged, and the call ends as soon as no
+            // subagent is still out. What caused it comes back as a message of its own.
+            "system" if ev["subtype"] == "init" => {
+                stale = true;
+                if agents.is_empty() { p.kill(); killed = true; tr.outcome = "followup"; break }
+            }
             // Claude Code's own account of a subagent: its id and type when it starts, and
             // its tokens, tool calls and duration when it ends. Kept beside our own count.
             "system" if ev["subtype"] == "task_started" || ev["subtype"] == "task_notification" => {
-                let id = ev["tool_use_id"].as_str().unwrap_or("");
-                if let Some(a) = agents.get_mut(id) {
+                let id = ev["tool_use_id"].as_str().unwrap_or("").to_string();
+                if let Some(a) = agents.get_mut(&id) {
                     if let Some(t) = ev["task_id"].as_str() { a.task = t.into(); }
                     if let Some(k) = ev["subagent_type"].as_str() { a.kind = k.into(); }
                     if let Some(d) = ev["description"].as_str() { if a.desc.is_empty() { a.desc = d.into(); } }
                     if let Some(s) = ev["status"].as_str() { a.status = s.into(); }
+                    if ev["is_backgrounded"].as_bool().unwrap_or(false) { a.bg = true; }
                     let u = &ev["usage"];
                     a.tokens = u["total_tokens"].as_u64().unwrap_or(a.tokens);
                     a.tools = u["tool_uses"].as_u64().unwrap_or(a.tools);
                     a.ms = u["duration_ms"].as_u64().unwrap_or(a.ms);
+                }
+                // A backgrounded subagent's report has no tool result to ride on: this
+                // notification carries it, in `summary` (its own last words, word for word,
+                // measured). It comes after the reply that sent it, so it cannot belong to
+                // that turn: it goes in as the gist has it (§9), a message of its own
+                // starting "[id] ", which starts a turn with a view that has it.
+                if ev["subtype"] == "task_notification" && agents.get(&id).is_some_and(|a| a.bg) {
+                    let a = agents.remove(&id).unwrap();
+                    let said = ev["summary"].as_str().unwrap_or("");
+                    let said = if said.trim().is_empty() { a.last.as_str() } else { said };
+                    let report = if said.trim().is_empty() {
+                        format!("(no report; the subagent ended {})", a.status)
+                    } else { cap(said) };
+                    let name = if a.task.is_empty() { id.clone() } else { a.task.clone() };
+                    done(e, &a, &id, &report, tr);
+                    e.notice(&format!("subagent {} reported after the reply: it starts a turn of its own", name));
+                    input(e, format!("[{}] {}", name, report), true);
                 }
             }
             "stream_event" => {
@@ -511,12 +557,21 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                 for b in ev["message"]["content"].as_array().cloned().unwrap_or_default() {
                     if b["type"] != "tool_result" { continue }
                     let id = b["tool_use_id"].as_str().unwrap_or("");
-                    // a subagent's report is the one thing it leaves behind: its own kind (§9)
-                    let sent = agents.remove(id);
-                    let kind = if sent.is_some() { "work" } else { "echo" };
                     let text = cap(&result_text(&b["content"]));
-                    if let Some(a) = sent { done(e, &a, id, &text, tr); }
-                    e.log(kind, &text);
+                    // A backgrounded spawn's result is only Claude Code's receipt for it: an
+                    // internal id and a warning never to quote it. It is not a report and
+                    // does not end the agent, which stays out until its notification.
+                    let bg = match agents.get_mut(id) {
+                        Some(a) => { if text.starts_with("Async agent launched") { a.bg = true; } a.bg }
+                        None => false,
+                    };
+                    if !bg {
+                        // a subagent's report is the one thing it leaves behind: its own kind (§9)
+                        let sent = agents.remove(id);
+                        let kind = if sent.is_some() { "work" } else { "echo" };
+                        if let Some(a) = sent { done(e, &a, id, &text, tr); }
+                        e.log(kind, &text);
+                    }
                     if !id.is_empty() { e.turn.lock().unwrap().pending.remove(id); }
                 }
                 if e.turn.lock().unwrap().pending.is_empty() {
@@ -549,7 +604,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     t.queue = back;
     save(e, &t);
     drop(t);
-    if killed && !cancel { e.notice("messages that arrived after the last tool call go to a fresh call"); }
+    if killed && !cancel && tr.requeued > 0 { e.notice("messages that arrived after the last tool call go to a fresh call"); }
     if !killed { p.finish(); }
     if let Some(r) = meter.take() { e.spend("turn", &r); }
 }
