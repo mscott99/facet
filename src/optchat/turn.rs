@@ -37,6 +37,11 @@ pub struct State {
     pending: HashSet<String>,
     pub cancel: bool,
     pub phase: String,
+    /// notes imported while a turn runs (text, date): logged when it is done (§10)
+    pub notes: Vec<(String, String)>,
+    /// sent for a turn of their own: each starts one fresh call, in order, once the running
+    /// turn and anything queued for it are done; never delivered mid-run
+    pub later: VecDeque<String>,
 }
 
 fn user_line(text: &str) -> String {
@@ -45,22 +50,69 @@ fn user_line(text: &str) -> String {
 
 /// Messages accepted but not yet in the log (queued, held, or written but not consumed) are
 /// kept in a file too, so a crash or restart of the engine loses none of them (§2).
+/// Messages for their own turns go in `later.json`, so a restart keeps them apart.
 fn save(e: &Engine, t: &State) {
     let all: Vec<&String> = t.sent.iter().chain(t.held.iter()).chain(t.queue.iter()).collect();
-    let f = state_dir(&e.dir).join("queue.json");
-    if all.is_empty() { let _ = std::fs::remove_file(&f); return }
+    let later: Vec<&String> = t.later.iter().collect();
+    for (name, all) in [("queue.json", all), ("later.json", later)] {
+        let f = state_dir(&e.dir).join(name);
+        if all.is_empty() { let _ = std::fs::remove_file(&f); continue }
+        let tmp = f.with_extension("tmp");
+        if std::fs::write(&tmp, serde_json::to_string(&all).unwrap()).is_ok() { let _ = std::fs::rename(&tmp, &f); }
+    }
+}
+
+fn save_notes(e: &Engine, t: &State) {
+    let f = state_dir(&e.dir).join("notes.json");
+    if t.notes.is_empty() { let _ = std::fs::remove_file(&f); return }
     let tmp = f.with_extension("tmp");
-    if std::fs::write(&tmp, serde_json::to_string(&all).unwrap()).is_ok() { let _ = std::fs::rename(&tmp, &f); }
+    if std::fs::write(&tmp, serde_json::to_string(&t.notes).unwrap()).is_ok() { let _ = std::fs::rename(&tmp, &f); }
+}
+
+/// An imported note (§10). Between turns it goes straight into the log; during a turn (the
+/// agent importing a file itself, say) it waits for the turn to end, so the turn's own
+/// messages stay together. The same text twice is added once.
+pub fn note(e: &Arc<Engine>, text: String, date: String) -> Value {
+    if text.trim().is_empty() { return json!({"ok": false, "error": "empty"}) }
+    if e.mem.lock().unwrap().store.msgs.iter().any(|m| m.kind == "note" && m.text == text) {
+        return json!({"ok": true, "skipped": "already in the memory"})
+    }
+    let mut t = e.turn.lock().unwrap();
+    if t.notes.iter().any(|n| n.0 == text) { return json!({"ok": true, "skipped": "already queued"}) }
+    if t.running {
+        t.notes.push((text, date));
+        save_notes(e, &t);
+        return json!({"ok": true, "queued": true})
+    }
+    drop(t);
+    e.log_at("note", &text, &date);
+    json!({"ok": true, "i": e.mem.lock().unwrap().store.t() - 1})
+}
+
+/// Log the notes that waited for a turn to end, and forget them.
+fn log_notes(e: &Arc<Engine>, notes: Vec<(String, String)>) {
+    if notes.is_empty() { return }
+    for (text, date) in &notes { e.log_at("note", text, date); }
+    save_notes(e, &e.turn.lock().unwrap());
+    e.notice(&format!("{} imported note{} added", notes.len(), if notes.len() == 1 { "" } else { "s" }));
 }
 
 /// At start: whatever a previous engine accepted and never logged goes in again, in order.
 pub fn restore(e: &Arc<Engine>) {
-    let f = state_dir(&e.dir).join("queue.json");
-    let Ok(body) = std::fs::read_to_string(&f) else { return };
-    let texts: Vec<String> = serde_json::from_str(&body).unwrap_or_default();
-    if texts.is_empty() { return }
-    e.notice(&format!("{} message(s) from before the restart, queued again", texts.len()));
-    for t in texts { input(e, t); }
+    let f = state_dir(&e.dir).join("notes.json");
+    if let Ok(body) = std::fs::read_to_string(&f) {
+        let _ = std::fs::remove_file(&f);
+        for (text, date) in serde_json::from_str::<Vec<(String, String)>>(&body).unwrap_or_default() { note(e, text, date); }
+    }
+    let read = |name: &str| -> Vec<String> {
+        std::fs::read_to_string(state_dir(&e.dir).join(name)).ok()
+            .and_then(|b| serde_json::from_str(&b).ok()).unwrap_or_default()
+    };
+    let (texts, later) = (read("queue.json"), read("later.json"));
+    if texts.is_empty() && later.is_empty() { return }
+    e.notice(&format!("{} message(s) from before the restart, queued again", texts.len() + later.len()));
+    for t in texts { input(e, t, false); }
+    for t in later { input(e, t, true); }
 }
 
 impl State {
@@ -83,10 +135,14 @@ struct Trace {
 /// A user message from any route (§7: "on user input text").
 /// Every route gets told at once what happened to its message: `how` is
 /// starting | queued (a turn is getting ready) | held (the call is replying; next tool call
-/// or next turn) | delivered (a tool is running; the call sees it after the tool).
-pub fn input(e: &Arc<Engine>, text: String) {
+/// or next turn) | delivered (a tool is running; the call sees it after the tool) |
+/// later (`later` was asked and a turn is running: it gets a turn of its own after it).
+pub fn input(e: &Arc<Engine>, text: String, later: bool) {
     let mut t = e.turn.lock().unwrap();
-    let how = if t.stdin.is_some() {
+    let how = if later && t.running {
+        t.later.push_back(text.clone());
+        "later"
+    } else if t.stdin.is_some() {
         if t.pending.is_empty() { t.held.push(text.clone()); "held" } else { t.write(text.clone()); "delivered" }
     } else {
         t.queue.push(text.clone());
@@ -101,8 +157,9 @@ pub fn input(e: &Arc<Engine>, text: String) {
     save(e, &t);
     drop(t);
     super::events::log(&e.dir, "input", json!({"how": how, "bytes": text.len()}));
-    e.emit(json!({"ev": "accepted", "how": how, "text": text}));
+    e.emit(json!({"ev": "accepted", "how": how, "text": text, "waiting": t_later(e)}));
 }
+fn t_later(e: &Engine) -> usize { e.turn.lock().unwrap().later.len() }
 
 pub fn cancel(e: &Arc<Engine>) {
     let mut t = e.turn.lock().unwrap();
@@ -121,10 +178,18 @@ fn cancelled(e: &Engine) -> bool { e.turn.lock().unwrap().cancel }
 
 fn run(e: &Arc<Engine>) {
     loop {
-        // nothing queued: done now, not after the compactor has caught up
+        // notes imported during the last turn go in first; then what is queued, or else the
+        // next message sent for a turn of its own; nothing: done now, not after the compactor
+        // has caught up
         {
             let mut t = e.turn.lock().unwrap();
-            if t.queue.is_empty() { t.running = false; t.phase = "idle".into(); break }
+            let notes = std::mem::take(&mut t.notes);
+            if t.queue.is_empty() {
+                if let Some(x) = t.later.pop_front() { t.queue.push(x); save(e, &t); }
+            }
+            if notes.is_empty() && t.queue.is_empty() { t.running = false; t.phase = "idle".into(); break }
+            drop(t);
+            log_notes(e, notes);
         }
         let ts = Instant::now();
         let settled = settle(e);
@@ -133,10 +198,14 @@ fn run(e: &Arc<Engine>) {
         let texts = std::mem::take(&mut t.queue);
         if texts.is_empty() { t.running = false; t.phase = "idle".into(); break }
         if !settled || t.cancel {
-            // §6: the user cancelled the wait; their messages stay in the log, unanswered
+            // §6: the user cancelled the wait; their messages stay in the log, unanswered,
+            // and so do those waiting for turns of their own
             t.running = false; t.phase = "idle".into();
+            let notes = std::mem::take(&mut t.notes);
+            let later: Vec<String> = t.later.drain(..).collect();
             drop(t);
-            for x in &texts { e.log("user", x); }
+            for x in texts.iter().chain(&later) { e.log("user", x); }
+            log_notes(e, notes);
             { let t = e.turn.lock().unwrap(); save(e, &t); }
             e.notice("cancelled");
             break;
@@ -160,11 +229,15 @@ fn run(e: &Arc<Engine>) {
         super::events::log(&e.dir, "turn", rec);
         let mut t = e.turn.lock().unwrap();
         if t.cancel {
-            // §7: a stopped turn leaves the messages it never took in the log, unanswered
-            let left: Vec<String> = t.queue.drain(..).collect();
+            // §7: a stopped turn leaves the messages it never took in the log, unanswered,
+            // and those waiting for turns of their own
+            let mut left: Vec<String> = t.queue.drain(..).collect();
+            left.extend(t.later.drain(..));
             t.running = false; t.phase = "idle".into();
+            let notes = std::mem::take(&mut t.notes);
             drop(t);
             for x in &left { e.log("user", x); }
+            log_notes(e, notes);
             { let t = e.turn.lock().unwrap(); save(e, &t); }
             e.notice("cancelled");
             break;
@@ -268,7 +341,9 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     if cancelled(e) { tr.outcome = "cancelled"; return }
     phase(e, "calling");
     let ttl = e.conf.ttl.clone();
-    let mut p = match Proc::spawn(&a, &[("CLAUDE_CODE_PROMPT_CACHE_TTL", ttl.as_str())], &e.conf.cwd) {
+    // OPTCHAT_DIR: so `facet import` run by the agent reaches this engine, not the default one
+    let dir = e.dir.to_string_lossy().to_string();
+    let mut p = match Proc::spawn(&a, &[("CLAUDE_CODE_PROMPT_CACHE_TTL", ttl.as_str()), ("OPTCHAT_DIR", dir.as_str())], &e.conf.cwd) {
         Ok(p) => p,
         Err(x) => { e.notice(&format!("cannot start claude: {}", x)); return }
     };
@@ -355,7 +430,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                     // a deferred one is in neither list for a moment: keep it in the file
                     let t = e.turn.lock().unwrap();
                     let mut keep = State::default();
-                    keep.sent = t.sent.clone(); keep.held = t.held.clone(); keep.queue = t.queue.clone();
+                    keep.sent = t.sent.clone(); keep.held = t.held.clone(); keep.queue = t.queue.clone(); keep.later = t.later.clone();
                     keep.queue.extend(deferred.iter().cloned());
                     save(e, &keep);
                 }

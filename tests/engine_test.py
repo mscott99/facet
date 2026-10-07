@@ -121,6 +121,29 @@ try:
     check(not any(x["kind"] == "followup" for x in F), "no follow-up turn in a stale conversation")
     check(any(x["kind"] == "midrun" and x["text"] == "MID during tool" for x in F), "mid-run message was delivered to the running call")
 
+    # B2: messages sent for turns of their own (`later`) wait, then start one call each, in
+    # order; a plain message sent meanwhile joins whichever turn is running
+    n0, f0 = len(log()), len(fake())
+    req({"op": "send", "text": "TOOLS 3"})
+    wait(lambda: any(m["kind"] == "tool" for m in log()[n0:]), 30, "first tool (later)")
+    req({"op": "send", "text": "TOOLS 2 own turn A", "later": True})
+    req({"op": "send", "text": "own turn B", "later": True})
+    check(req({"op": "status"})["later"] == 2, "later messages wait apart from the running turn")
+    time.sleep(0.2)
+    req({"op": "send", "text": "MID one"})
+    wait(lambda: any(m["text"] == "TOOLS 2 own turn A" for m in log()[n0:]), 30, "turn A starts")
+    wait(lambda: any(m["kind"] == "tool" for m in log()[[m["text"] for m in log()].index("TOOLS 2 own turn A"):]), 30, "turn A's first tool")
+    time.sleep(0.2)
+    req({"op": "send", "text": "MID two"})
+    wait(lambda: any(m["text"] == "own turn B" for m in log()[n0:]), 30, "turn B starts")
+    wait(idle, 30, "idle after later")
+    T = [x["content"][-1]["text"] for x in fake()[f0:] if x["kind"] == "turn"]
+    check(T == ["TOOLS 3", "TOOLS 2 own turn A", "own turn B"], "each later message starts a call of its own, in order: %r" % T)
+    M = [x["text"] for x in fake()[f0:] if x["kind"] == "midrun"]
+    check(M == ["MID one", "MID two"], "plain messages between them go into the running turn: %r" % M)
+    U = [m["text"] for m in log()[n0:] if m["kind"] == "user"]
+    check(U == ["TOOLS 3", "MID one", "TOOLS 2 own turn A", "MID two", "own turn B"], "logged in that order: %r" % U)
+
     # C: cancel during a tool
     n0 = len(log())
     req({"op": "send", "text": "TOOLS 6"})
@@ -184,11 +207,18 @@ try:
     bf = os.path.join(D, "bin.dat"); open(bf, "wb").write(b"\xff\xfe\x00\x01")
     out3 = subprocess.run([BIN, "import", bf], env=env, capture_output=True, text=True, timeout=30).stdout
     check("NOT imported: not a text file" in out3, "a binary file is refused")
+    n0 = len(log())
     req({"op": "send", "text": "TOOLS 3"})
-    wait(lambda: req({"op": "status"})["busy"], 10, "turn for import refusal")
+    wait(lambda: req({"op": "status"})["busy"], 10, "turn for queued import")
     r = req({"op": "note", "text": "during a turn"})
-    check(r["ok"] is False and "turn is running" in r["error"], "no import while a turn runs")
+    check(r["ok"] is True and r.get("queued") is True, "an import during a turn is queued")
+    r2 = req({"op": "note", "text": "during a turn"})
+    check(r2.get("skipped") == "already queued", "the same import twice during a turn is queued once")
     wait(idle, 60, "idle after import tests")
+    new = log()[n0:]
+    notes = [x for x in new if x["kind"] == "note"]
+    check(len(notes) == 1 and notes[0]["text"] == "during a turn" and new[-1]["kind"] == "note",
+          "a queued import is logged once, after the turn's messages")
 
     u = [json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))]
     check({"compact", "prime", "turn"} <= {x["kind"] for x in u}, "usage logged per request for compact, prime and turn")

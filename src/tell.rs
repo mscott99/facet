@@ -8,7 +8,8 @@
 //      next real message. That is a mechanism of the Telegram path, hooked in once, here.
 use crate::cfg::Cfg;
 
-pub fn tell(cfg: &Cfg, text: &str, origin: &str) -> Result<String, String> {
+/// `later`: a turn of its own, after the running one, rather than into it at its next tool call.
+pub fn tell(cfg: &Cfg, text: &str, origin: &str, later: bool) -> Result<String, String> {
     let text = text.trim();
     if text.is_empty() { return Err("empty".into()) }
     let prelude = crate::tg::take_prelude();
@@ -17,13 +18,13 @@ pub fn tell(cfg: &Cfg, text: &str, origin: &str) -> Result<String, String> {
         None => text.to_string(),
     };
     let _ = origin;
-    send(cfg, &body)?;
+    send(cfg, &body, later)?;
     Ok(body)
 }
 
 /// The one adapter: the engine's socket. A message goes whole, newlines and all.
-fn send(_cfg: &Cfg, line: &str) -> Result<(), String> {
-    let v = crate::optchat::engine::request(&crate::optchat::engine::dir(), serde_json::json!({"op": "send", "text": line}))?;
+fn send(_cfg: &Cfg, line: &str, later: bool) -> Result<(), String> {
+    let v = crate::optchat::engine::request(&crate::optchat::engine::dir(), serde_json::json!({"op": "send", "text": line, "later": later}))?;
     if v["ok"].as_bool() == Some(true) { Ok(()) } else { Err(v["error"].as_str().unwrap_or("refused").to_string()) }
 }
 

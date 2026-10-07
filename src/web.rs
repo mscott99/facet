@@ -65,9 +65,15 @@ var stick=true;
 addEventListener('scroll',function(){stick=atEnd()});
 document.addEventListener('htmx:afterSwap',function(e){mathify(e.target);if(stick)scrollTo(0,1e7)});
 addEventListener('load',function(){mathify(document);if(location.hash=='')scrollTo(0,1e7)});
+// Enter sends (into the running turn, at its next tool call); Shift-Enter sends for a turn
+// of its own, after the running one; Alt-Enter is a new line
 document.addEventListener('keydown',function(e){
-  if(e.key=='Enter'&&!e.shiftKey&&e.target.tagName=='TEXTAREA'){e.preventDefault();
-    htmx.trigger(e.target.form,'submit');}});
+  if(e.key!='Enter'||e.target.tagName!='TEXTAREA')return;
+  e.preventDefault();
+  if(e.altKey){e.target.setRangeText('\n',e.target.selectionStart,e.target.selectionEnd,'end');return}
+  var f=e.target.form;f.elements.later.value=e.shiftKey?'1':'0';
+  htmx.trigger(f,'submit');});
+document.addEventListener('htmx:afterRequest',function(e){var l=e.target.elements&&e.target.elements.later;if(l)l.value='0'});
 </script></body></html>"#;
 
 fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> String {
@@ -91,7 +97,7 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
     let foot = if compose {
         format!("<footer><form hx-post=\"{}/x/send\" hx-target=\"#toast\" hx-swap=innerHTML \
             hx-on::after-request=\"if(event.detail.successful)this.querySelector('textarea').value=''\">\
-            <textarea name=text rows=1 placeholder=\"message\"></textarea>\
+            <textarea name=text rows=1 placeholder=\"message\"></textarea><input type=hidden name=later value=0>\
             <button>send</button></form><div id=toast></div></footer>", t)
     } else { String::new() };
     SHELL.replace("{{TITLE}}", &md::esc(title))
@@ -347,7 +353,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
 
         ["d"] => html(diag_page(cfg), 200),
 
-        ["x", "send"] if post => match tell::tell(cfg, &field(&f, "text"), "reader") {
+        ["x", "send"] if post => match tell::tell(cfg, &field(&f, "text"), "reader", field(&f, "later") == "1") {
             Ok(_) => html("sent".into(), 200),
             Err(e) => html(format!("not sent: {}", md::esc(&e)), 200),
         },
@@ -362,7 +368,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
                         let text = format!("About my comment on [[{}]] L{} ({}): {}\n\nThe text there now:\n\n{}\n\n{}",
                             d.note.trim_end_matches(".md"), d.line, d.code, d.message,
                             diag::context(cfg, &d, 2), note);
-                        tell::tell(cfg, &text, "comment").map(|_| "sent to the conversation".into())
+                        tell::tell(cfg, &text, "comment", false).map(|_| "sent to the conversation".into())
                     }
                     None => Err("that diagnostic is gone".into()),
                 },

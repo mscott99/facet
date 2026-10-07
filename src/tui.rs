@@ -2,14 +2,28 @@
 // so the terminal's own scrollback works, §10) with an editable prompt line underneath.
 // Closing it does not stop the engine; the chat goes on and other routes still reach it.
 //
-//   Enter sends · Alt-Enter or Ctrl-J: new line · Ctrl-C or Ctrl-D: leave (the engine and any
+//   Enter sends (into a running turn, at its next tool call) · Alt-Enter sends for a turn of its
+//   own, after the running one · Ctrl-J: new line · Ctrl-C or Ctrl-D: leave (the engine and any
 //   running turn carry on) · /cancel stops the turn · /help /usage /tree /view /status /stats /resume
 use crate::optchat::engine;
 use rustyline::error::ReadlineError;
-use rustyline::{Cmd, DefaultEditor, ExternalPrinter, KeyCode, KeyEvent, Modifiers};
+use rustyline::{Cmd, ConditionalEventHandler, DefaultEditor, Event, EventContext, EventHandler, ExternalPrinter,
+    KeyCode, KeyEvent, Modifiers, RepeatCount};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set by Alt-Enter for the line it accepts: that line is sent for a turn of its own.
+/// (Terminals send Shift-Enter as a plain Enter; Claude Code's /terminal-setup makes it Alt-Enter.)
+static LATER: AtomicBool = AtomicBool::new(false);
+struct Later;
+impl ConditionalEventHandler for Later {
+    fn handle(&self, _: &Event, _: RepeatCount, _: bool, _: &EventContext) -> Option<Cmd> {
+        LATER.store(true, Ordering::SeqCst);
+        Some(Cmd::AcceptLine)
+    }
+}
 
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
@@ -32,7 +46,7 @@ pub fn run() {
     if !std::io::stdin().is_terminal() { return piped(&dir) }
     let mut rl = DefaultEditor::new().expect("terminal");
     rl.bind_sequence(KeyEvent(KeyCode::Char('j'), Modifiers::CTRL), Cmd::Newline);
-    rl.bind_sequence(KeyEvent(KeyCode::Enter, Modifiers::ALT), Cmd::Newline);
+    rl.bind_sequence(KeyEvent(KeyCode::Enter, Modifiers::ALT), EventHandler::Conditional(Box::new(Later)));
     let mut printer = rl.create_external_printer().expect("printer");
     watch(&dir, move |o| printer.print(o).is_ok());
     editor(&dir, rl);
@@ -43,7 +57,7 @@ fn piped(dir: &std::path::Path) {
     watch(dir, |o| { print!("{}", o); std::io::stdout().flush().is_ok() });
     for line in std::io::stdin().lines().map_while(Result::ok) {
         if line.trim().is_empty() { continue }
-        if let Err(e) = send(dir, &line) { eprintln!("{}", e); return }
+        if let Err(e) = send(dir, &line, false) { eprintln!("{}", e); return }
     }
     std::thread::sleep(std::time::Duration::from_millis(500));
     while engine::request(dir, json!({"op": "status"})).map(|v| v["busy"] == true).unwrap_or(false) {
@@ -59,9 +73,9 @@ fn mine(text: &str) -> bool {
     let mut m = MINE.lock().unwrap();
     match m.iter().position(|x| x == text) { Some(k) => { m.remove(k); true } None => false }
 }
-fn send(dir: &std::path::Path, text: &str) -> Result<Value, String> {
+fn send(dir: &std::path::Path, text: &str, later: bool) -> Result<Value, String> {
     MINE.lock().unwrap().push(text.trim().to_string());
-    engine::request(dir, json!({"op": "send", "text": text}))
+    engine::request(dir, json!({"op": "send", "text": text, "later": later}))
 }
 
 /// Print the engine's events through `out_fn`; if the engine goes away (a restart), keep
@@ -106,6 +120,7 @@ fn watch(dir: &std::path::Path, mut out_fn: impl FnMut(String) -> bool + Send + 
                     "queued" => Some(format!("{}· queued: it joins the turn that is starting{}", DIM, OFF)),
                     "held" => Some(format!("{}· the agent is replying: this goes in at its next tool call, or starts the next turn{}", DIM, OFF)),
                     "delivered" => Some(format!("{}· delivered: the agent sees it when the running tool finishes{}", DIM, OFF)),
+                    "later" => Some(format!("{}· next turn: starts when the running turn is done ({} waiting){}", DIM, v["waiting"], OFF)),
                     _ => None,
                 },
                 "phase" => match s("phase").as_str() {
@@ -145,8 +160,10 @@ fn watch(dir: &std::path::Path, mut out_fn: impl FnMut(String) -> bool + Send + 
 fn editor(dir: &std::path::Path, mut rl: DefaultEditor) {
     let dir = dir.to_path_buf();
     loop {
+        LATER.store(false, Ordering::SeqCst);
         match rl.readline("› ") {
             Ok(line) => {
+                let later = LATER.load(Ordering::SeqCst);
                 let text = line.trim();
                 if text.is_empty() { continue }
                 let _ = rl.add_history_entry(text);
@@ -182,7 +199,7 @@ fn editor(dir: &std::path::Path, mut rl: DefaultEditor) {
                     // a mistyped command must not become a paid turn; a path still goes through
                     t if t.starts_with('/') && !t.contains(' ') && !t[1..].contains('/') =>
                         Ok(format!("{}· unknown command {} · /help lists them{}", DIM, t, OFF)),
-                    _ => send(&dir, &line).map(|_| String::new()),
+                    _ => send(&dir, &line, later).map(|_| String::new()),
                 };
                 match reply {
                     Ok(s) if !s.is_empty() => println!("{}", s),
@@ -208,7 +225,9 @@ const HELP: &str = "\
 /stats    cost per day and kind
 /status   engine state (raw)
 /quit     leave (also Ctrl-C, Ctrl-D); the engine keeps working
-Enter sends · Alt-Enter or Ctrl-J: new line";
+Enter sends: during a turn, the agent sees it at its next tool call
+Alt-Enter (Shift-Enter after Claude Code's /terminal-setup) sends for a turn of its own,
+  after the running one; several wait in order, one turn each · Ctrl-J: new line";
 
 /// The memory tree as a page (optchat/browse.rs), opened in the browser here; the same page is
 /// live at /tree on the web route, which is the way in from the phone.

@@ -67,7 +67,9 @@ Web pages (`facet serve`, all under `/<token>`):
     /tree              the memory tree: one root down to every message, searchable
     /m/                published notes; /m/<slug> one note
     /d/                open comments on notes
-    POST /x/send       a message into the conversation (form field `text`)
+    POST /x/send       a message into the conversation (form field `text`; `later=1`: a turn of
+                       its own; in the box, Enter sends, Shift-Enter sends later, Alt-Enter is
+                       a new line)
     POST /x/diag       apply | dismiss | discuss a comment (`code`, `note`, `do`)
     /f/log, /f/doc/<slug>, /static/htmx.js     fragments and assets the pages poll
 
@@ -80,8 +82,11 @@ the next message: `/help`, `/ping` (= `/usage`: engine state and usage left), `/
 The engine socket, `~/.optchat/lock` (one JSON object per line; `facet send`, the web,
 Telegram and every `facet chat` use it):
 
-    send {text}         a user message: queued, or delivered between tool calls
-    note {text, date}   an imported note (refused during a turn; the same text twice is added once)
+    send {text, later}  a user message: queued, or delivered between tool calls; with `later`,
+                        it waits for a turn of its own (several: one turn each, in order), and
+                        a cancel logs the waiting ones unanswered
+    note {text, date}   an imported note (during a turn, queued until it is done; the same text twice
+                        is added once)
     cancel / resume     stop the turn or the wait / lift a compactor pause
     view / status       the rendered view / engine state, usage left
     zoom {id, n}        a line of the view opened, as the agent's zoom
@@ -98,10 +103,13 @@ secret path, for the engine's own `claude` calls only.
     facet view          the view the model sees
     facet stats         usage per day and kind, from ~/.optchat/usage.jsonl
     facet browse [f]    the memory tree as one page (also /tree on the web)
-    facet import <f>... add files to the memory, one note each (between turns)
+    facet import <f>... add files to the memory, one note each (during a turn, when it is done;
+                        so the agent can import files itself)
 
-In `facet chat`: Enter sends; Alt-Enter or Ctrl-J is a new line; Ctrl-C or Ctrl-D leaves
-(the engine and a running turn carry on). `/help` lists the commands: `/usage`, `/tree`,
+In `facet chat`: Enter sends (during a turn, the agent sees it at its next tool call);
+Alt-Enter sends for a turn of its own, after the running one (terminals send Shift-Enter as
+a plain Enter, unless set up to send Alt-Enter, as Claude Code's `/terminal-setup` does);
+Ctrl-J is a new line; Ctrl-C or Ctrl-D leaves (the engine and a running turn carry on). `/help` lists the commands: `/usage`, `/tree`,
 `/view`, `/zoom <id+n>`, `/model [opus|sonnet]`, `/import <file>...`, `/cancel`,
 `/resume`, `/stats`, `/status`, `/quit`. A mistyped `/command` is refused, never sent.
 
@@ -216,10 +224,12 @@ Cost in this README is in "eq", input-token equivalents at API price ratios:
 `facet stats` tabulates it per day and kind).
 
 **Engine state** (`~/.local/share/facet/engine-<hash>/`): not memory, safe to delete when the
-engine is stopped, except `queue.json` (messages accepted but not yet logged).
+engine is stopped, except `queue.json`, `later.json` and `notes.json` (accepted but not yet logged).
 
     events.jsonl   introspection, below
     queue.json     accepted messages not yet in the log; queued again at start
+    later.json     the same, for messages waiting for turns of their own
+    notes.json     notes imported during a turn, not yet in the log; added at start
     limits.json    the last rate_limit_info Claude Code reported
     model          the /model choice, if any (wins over chat.model)
     system.txt     the master system prompt as last sent; compact.txt the compactor's
@@ -283,7 +293,7 @@ cache claim above from request usage; with `ANTHROPIC_BASE_URL` at a logging pro
                                  ? long explanation, markdown + math
                                  + replacement for the anchored line(s)
     facet diag                 open comments; apply/dismiss by code
-    facet send <text>          put a message into the conversation
+    facet send [--later] <text>  put a message into the conversation (--later: a turn of its own)
     facet push <text>          push to Telegram
     facet status               where everything stands
 

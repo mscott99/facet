@@ -122,7 +122,7 @@ pub fn command(cfg: &Cfg, text: &str) -> (String, bool) {
         "ping" | "usage" => (engine_line(cfg), false),
         "buffer" => (peek_prelude(), false),
         "flush" => (match take_prelude() {
-            Some(p) => match crate::tell::tell(cfg, &p, "telegram") { Ok(_) => "sent".into(), Err(e) => e },
+            Some(p) => match crate::tell::tell(cfg, &p, "telegram", false) { Ok(_) => "sent".into(), Err(e) => e },
             None => "nothing queued".into(),
         }, false),
         "diag" => (diag::brief(cfg), true),
@@ -202,7 +202,7 @@ fn inbound(cfg: Cfg) {
                 if keep { remember(&text, &reply); }
                 let _ = push(&c, if reply.is_empty() { "(nothing)" } else { &reply });
             } else {
-                match crate::tell::tell(&c, &text, "telegram") {
+                match crate::tell::tell(&c, &text, "telegram", false) {
                     Ok(_) => {}
                     Err(e) => { let _ = push(&c, &format!("could not deliver: {}", e)); }
                 }

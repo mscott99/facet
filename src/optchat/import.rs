@@ -1,5 +1,6 @@
 // Importing notes (§10): files the user picks, each one message of kind `note`, appended
-// through the engine (the one writer). The text is the file's path, then its whole content
+// through the engine (the one writer); during a turn (the agent importing a file itself) the
+// engine holds it until the turn is done. The text is the file's path, then its whole content
 // (the compactor's input is never cut, §4.2); the date is the file's modification time.
 use super::engine;
 use serde_json::json;
@@ -27,7 +28,11 @@ pub fn files(paths: &[String]) -> Vec<String> {
                 .map(|t| chrono::DateTime::<chrono::Utc>::from(t).format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
             let v = engine::request(&dir, json!({"op": "note", "text": format!("{}\n\n{}", shown, body.trim_end()), "date": date}))?;
             if v["ok"] != true { return Err(v["error"].as_str().unwrap_or("refused").into()) }
-            Ok(match v["skipped"].as_str() { Some(s) => format!("skipped: {}", s), None => format!("message {}", v["i"]) })
+            Ok(match v["skipped"].as_str() {
+                Some(s) => format!("skipped: {}", s),
+                None if v["queued"] == true => "queued: added to the memory when the running turn is done".into(),
+                None => format!("message {}", v["i"]),
+            })
         })();
         out.push(match r { Ok(m) => format!("{}: {}", p, m), Err(e) => format!("{}: NOT imported: {}", p, e) });
     }

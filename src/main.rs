@@ -91,7 +91,8 @@ fn main() {
             println!("{:<16} {:<60} {}", slug, cfg.url(&format!("/m/{}", slug)), path.display());
         },
 
-        "send" => match tell::tell(&cfg, &rest.join(" "), "cli") {
+        "send" => match tell::tell(&cfg, &rest.iter().filter(|a| *a != "--later").cloned().collect::<Vec<_>>().join(" "),
+                                   "cli", rest.iter().any(|a| a == "--later")) {
             Ok(line) => println!("{}", line),
             Err(e) => die(&e),
         },
@@ -142,7 +143,7 @@ facet chat                  the conversation in this terminal (starts the engine
 facet engine                run the engine in the foreground (LaunchAgent: launchd/com.facet.engine.plist)
 facet view                  print the view the model sees
 facet browse [out.html]     the whole memory tree as one page (also served at /tree)
-facet import <file>...      add files to the memory, one note each (between turns)
+facet import <file>...      add files to the memory, one note each (queued until a running turn is done)
 facet stats                 token usage per day and kind
 facet cancel                stop the running turn
 facet serve                 the web route, plus Telegram if configured
@@ -150,7 +151,8 @@ facet init                  write ~/.config/facet/facet.json from what is alread
 facet post <file> [slug]    publish a note (writes `facet: slug` into its frontmatter)
 facet unpost <slug>         unpublish
 facet docs                  what is published
-facet send <text>           put a message into the conversation
+facet send [--later] <text> put a message into the conversation (--later: a turn of its own,
+                            after the running one, instead of at its next tool call)
 facet push <text>           push a message to Telegram
 facet review <note> [--replace] < spec
                             write comments on a note; the spec is

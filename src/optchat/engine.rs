@@ -3,9 +3,10 @@
 // is stale and is taken over. The same socket is how everything else talks to the engine:
 // the terminal client, `facet send`, the web and Telegram routes. One JSON object per line.
 //
-//   -> {"op":"send","text":"..."}     a user message (queued, or delivered mid-run)
+//   -> {"op":"send","text":"...","later":bool}  a user message (queued, or delivered mid-run;
+//                                     with later, a turn of its own after the running one)
 //   -> {"op":"cancel"}                stop the wait or the running call
-//   -> {"op":"note","text":..,"date":..}  import a note (refused during a turn; duplicates skipped)
+//   -> {"op":"note","text":..,"date":..}  import a note (queued during a turn; duplicates skipped)
 //   -> {"op":"resume"}                lift a compactor pause
 //   -> {"op":"view"} / {"op":"status"} / {"op":"zoom","id":..,"n":..}
 //   -> {"op":"model","name":..}       the master model for the next turns
@@ -228,7 +229,7 @@ impl Engine {
         json!({
             "messages": m.store.t(), "view_parts": m.view.parts.len(), "view_bytes": m.view.size(&m.store),
             "unsummarized": unbuilt, "compacting": m.busy.len(), "failing": m.failed.len(),
-            "paused": m.pause_reason(), "busy": t.running, "queued": t.queue.len() + t.held.len(),
+            "paused": m.pause_reason(), "busy": t.running, "queued": t.queue.len() + t.held.len() + t.later.len(), "later": t.later.len(),
             "phase": t.phase, "hour_eq": self.hour_eq().round(),
             "model": self.model(), "compact_model": self.conf.compact_model,
             "mcp": self.mcp_url.get().is_some(),
@@ -323,20 +324,14 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
         let reply = match v["op"].as_str().unwrap_or("") {
             "send" => {
                 let text = v["text"].as_str().unwrap_or("").trim().to_string();
-                if text.is_empty() { json!({"ok": false, "error": "empty"}) } else { turn::input(e, text); json!({"ok": true}) }
+                let later = v["later"].as_bool().unwrap_or(false);
+                if text.is_empty() { json!({"ok": false, "error": "empty"}) } else { turn::input(e, text, later); json!({"ok": true}) }
             }
             "cancel" => { turn::cancel(e); json!({"ok": true}) }
-            // §10 importing: a note (kind `note`) with its own date, appended between turns;
-            // the same text twice is added once
-            "note" => {
-                let text = v["text"].as_str().unwrap_or("").to_string();
-                let date = v["date"].as_str().map(String::from).unwrap_or_else(super::store::now_iso);
-                let dup = e.mem.lock().unwrap().store.msgs.iter().any(|m| m.kind == "note" && m.text == text);
-                if text.trim().is_empty() { json!({"ok": false, "error": "empty"}) }
-                else if e.turn.lock().unwrap().running { json!({"ok": false, "error": "a turn is running; import when it is done"}) }
-                else if dup { json!({"ok": true, "skipped": "already in the memory"}) }
-                else { e.log_at("note", &text, &date); json!({"ok": true, "i": e.mem.lock().unwrap().store.t() - 1}) }
-            }
+            // §10 importing: a note (kind `note`) with its own date, appended between turns
+            // (during a turn it is queued until the turn is done); the same text twice is added once
+            "note" => turn::note(e, v["text"].as_str().unwrap_or("").to_string(),
+                v["date"].as_str().map(String::from).unwrap_or_else(super::store::now_iso)),
             "resume" => {
                 let mut m = e.mem.lock().unwrap();
                 m.pause = None;
