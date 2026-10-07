@@ -108,7 +108,8 @@ secret path, for the engine's own `claude` calls only.
 
 In `facet chat`: Enter sends (during a turn, the agent sees it at its next tool call);
 Alt-Enter sends for a turn of its own, after the running one (terminals send Shift-Enter as
-a plain Enter, unless set up to send Alt-Enter, as Claude Code's `/terminal-setup` does);
+a plain Enter, unless set up to send Alt-Enter, as Claude Code's `/terminal-setup` does), and
+such a message is printed again where it goes into the chat, since that is long after it was typed;
 Ctrl-J is a new line; Ctrl-C or Ctrl-D leaves (the engine and a running turn carry on). `/help` lists the commands: `/usage`, `/tree`,
 `/view`, `/zoom <id+n>`, `/model [opus|sonnet]`, `/import <file>...`, `/cancel`,
 `/resume`, `/stats`, `/status`, `/quit`. A mistyped `/command` is refused, never sent.

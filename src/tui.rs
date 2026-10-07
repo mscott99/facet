@@ -67,7 +67,10 @@ fn piped(dir: &std::path::Path) {
 }
 
 /// Print the engine's events through `out` until the connection ends.
-/// Texts this client sent and has not seen logged yet: their log echo is not printed again.
+/// Texts this client sent and has not seen logged yet: their log echo is not printed again,
+/// since the prompt line already shows them -- unless they are waiting for a turn of their own,
+/// which lands long after it was typed: those are dropped from here when the engine says
+/// `later`, so the log echo prints them again where they go into the chat.
 static MINE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 fn mine(text: &str) -> bool {
     let mut m = MINE.lock().unwrap();
@@ -120,7 +123,12 @@ fn watch(dir: &std::path::Path, mut out_fn: impl FnMut(String) -> bool + Send + 
                     "queued" => Some(format!("{}· queued: it joins the turn that is starting{}", DIM, OFF)),
                     "held" => Some(format!("{}· the agent is replying: this goes in at its next tool call, or starts the next turn{}", DIM, OFF)),
                     "delivered" => Some(format!("{}· delivered: the agent sees it when the running tool finishes{}", DIM, OFF)),
-                    "later" => Some(format!("{}· next turn: starts when the running turn is done ({} waiting){}", DIM, v["waiting"], OFF)),
+                    "later" => {
+                        // it goes in once the running turn is done: stop hiding its log echo, so
+                        // it is printed again at the point where it joins the chat
+                        mine(&s("text"));
+                        Some(format!("{}· next turn: starts when the running turn is done ({} waiting){}", DIM, v["waiting"], OFF))
+                    }
                     _ => None,
                 },
                 "phase" => match s("phase").as_str() {
