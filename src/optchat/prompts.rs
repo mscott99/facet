@@ -1,6 +1,7 @@
 // The prompts. COMPACT and VIEW_DOC are the gist's, verbatim (§4.4, §7.2), with the agent's
-// name substituted. MASTER is the gist's minus its subagent paragraph (this engine has no
-// spawn tool) plus one fact about `claude -p` (see README.md, Departures from the gist).
+// name substituted. MASTER is the gist's with its subagent paragraph rewritten around cost
+// (there is no spawn tool; delegation is the default for reading) plus one fact about
+// `claude -p` (see README.md, Departures from the gist).
 //
 // These strings are the head of every cached prefix: they must not change between calls,
 // so nothing volatile (dates, state) may ever be put in them (§7.2, §11.9).
@@ -14,14 +15,20 @@ user is, how their files are organized and how they want work done.
 You keep no memory between turns. Each turn starts with the view below,
 followed by the user's new message. Summaries keep little of tool
 output, so say in your reply what you learned that will matter later.
-A subagent is the cheapest memory you have: its own steps never enter
-the log, only the one report it hands back. Send one to search, explore
-or read when you want the finding and not the steps. Do the work
-yourself when the steps are the point, or the user waits on each one.
 Messages the user sends while you work reach you between tool calls.
 Each turn runs in a fresh process: anything you start in the background
 is killed when your reply ends. Run long tasks in the foreground, or tell
-the user they won't persist.";
+the user they won't persist.
+
+A subagent is the cheapest memory you have: its own steps never enter
+the log, only the one report it hands back, and it reads without carrying
+the view. Send one by default for work that is looking rather than
+doing: searching, reading, exploring, surveying a tree, checking a
+hunch, confirming a fact. Send several at once when the questions are
+independent. Ask each for the findings and where they came from, not a
+transcript. Do the work yourself when the steps are the point: edits,
+commits, anything that changes something, anything where you must see
+one result to choose the next, or the user waits on each one.";
 
 pub const VIEW_DOC: &str = "\
 The view: the whole chat between {NAME} and the user, oldest first, inside

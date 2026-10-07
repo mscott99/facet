@@ -181,8 +181,10 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 
 12. *MASTER's subagent paragraph is about cost, not about spawn (§7.2).* There is no spawn,
     tell or computer tool, so the gist's wording would describe tools that do not exist; the
-    paragraph instead tells the agent that a subagent is its cheapest memory (see 19). Added:
-    each turn is a fresh process, so anything started in the background dies with it.
+    paragraph instead tells the agent that a subagent is its cheapest memory and makes it the
+    default for work that is looking rather than doing, since the compaction of what the agent
+    does itself dominates the bill (see 19). Added: each turn is a fresh process, so anything
+    started in the background dies with it.
 13. *Free nodes are built at once*, without waiting for rule 3 (§4.1): they need no model call,
     so the compactor never sees them; the result is the same.
 14. *Failures do not retry forever at 10 s (§4.1).* A usage-limit error pauses the compactor
@@ -208,6 +210,13 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     the log: what is remembered is the report it hands back, logged as one message of kind
     `work` (the gist's own kind for it). Its tokens are metered into the turn that sent it.
     Exploration that would have been twenty tool/echo pairs in the log costs one line.
+    MASTER therefore prefers a subagent by default for reading, searching and surveying, and
+    keeps the agent's own hands on anything that changes something or whose next step depends
+    on the last. The price of a logged message, measured over this chat (1206 messages,
+    $270 at per-model rates): 11.9 cents of compaction, 22.4 cents all in. An average run of
+    four tool calls is eight messages, so delegating it saves about a dollar of compaction and
+    pays the subagent's own reads once, out of a fresh context instead of the turn's growing
+    one. The report is a message too: a transcript handed back buys nothing.
 
 Not implemented: computer use, and the gist's own spawn/tell protocol (§9).
 
