@@ -17,7 +17,26 @@ use crate::cfg::{self, Cfg};
 use crate::{diag, doc, log};
 use serde_json::{json, Value};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Duration;
+
+// `inbound` and `outbound` each read the whole of state.json, change the few fields they own,
+// and write the whole thing back; with no lock, a write from one can land between the other's
+// read and write and so overwrite with a stale copy of fields it never touched — Telegram
+// re-delivering `tg_offset`-acked updates, or a reply dropped off `tg_sent`. One mutex around
+// every read-modify-write below makes each of those atomic; the two threads touch disjoint
+// fields, so what it loses in concurrency is nothing either loop depends on.
+static STATE: Mutex<()> = Mutex::new(());
+
+/// Set `tg_offset` alone, against a state read fresh under the lock — never against a copy
+/// of the whole object taken before the lock, which could already be behind an `outbound`
+/// write of its own fields.
+fn bump_offset(id: i64) {
+    let _g = STATE.lock().unwrap();
+    let mut st = cfg::state();
+    st["tg_offset"] = Value::from(id);
+    cfg::put_state(&st);
+}
 
 const LIMIT: usize = 3500;
 const OUTCAP: usize = 700;      // per command, in the prelude
@@ -55,12 +74,54 @@ fn chunks(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     for line in s.split('\n') {
-        if cur.len() + line.len() + 1 > LIMIT && !cur.is_empty() { out.push(std::mem::take(&mut cur)); }
-        if !cur.is_empty() { cur.push('\n'); }
-        cur.push_str(&line.chars().take(LIMIT).collect::<String>());
+        let mut rest: &str = line;
+        loop {
+            let sep = if cur.is_empty() { 0 } else { 1 };
+            if cur.chars().count() + sep + rest.chars().count() <= LIMIT {
+                if sep == 1 { cur.push('\n'); }
+                cur.push_str(rest);
+                break;
+            }
+            if !cur.is_empty() { out.push(std::mem::take(&mut cur)); continue; }
+            // this line alone outgrows a whole chunk: split it rather than lose its tail
+            let at = rest.char_indices().nth(LIMIT).map(|(i, _)| i).unwrap_or(rest.len());
+            out.push(rest[..at].to_string());
+            rest = &rest[at..];
+        }
     }
     if !cur.is_empty() { out.push(cur) }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_short_message_is_one_chunk() {
+        assert_eq!(chunks("hello\nworld"), vec!["hello\nworld".to_string()]);
+    }
+
+    #[test]
+    fn a_long_message_splits_on_lines_without_losing_any_of_it() {
+        let line = "x".repeat(2000);
+        let s = format!("{}\n{}\n{}", line, line, line);   // 3 lines, 2000 chars each
+        let out = chunks(&s);
+        assert!(out.iter().all(|p| p.chars().count() <= LIMIT));
+        // every character sent somewhere, in order, nothing dropped
+        let joined: String = out.join("\n");
+        assert_eq!(joined.chars().filter(|&c| c != '\n').count(), s.chars().filter(|&c| c != '\n').count());
+    }
+
+    #[test]
+    fn a_single_line_over_the_limit_is_split_not_truncated() {
+        let line = "y".repeat(LIMIT + 500);
+        let out = chunks(&line);
+        assert!(out.len() >= 2);
+        assert!(out.iter().all(|p| p.chars().count() <= LIMIT));
+        let total: usize = out.iter().map(|p| p.chars().count()).sum();
+        assert_eq!(total, line.chars().count());   // the old bug dropped the tail past LIMIT
+    }
 }
 
 // ---- the prelude queue ------------------------------------------------------------------
@@ -206,18 +267,15 @@ fn inbound(cfg: Cfg) {
     // First run: start from the newest update rather than replaying a day of backlog into
     // the conversation.
     if cfg::state()["tg_offset"].as_i64().is_none() {
-        let mut st = cfg::state();
         let newest = api(&cfg, "getUpdates", json!({"offset": -1, "timeout": 0})).ok()
             .and_then(|v| v["result"].as_array().and_then(|a| a.last())
                 .and_then(|u| u["update_id"].as_i64()));
-        st["tg_offset"] = Value::from(newest.map(|i| i + 1).unwrap_or(0));
-        cfg::put_state(&st);
+        bump_offset(newest.map(|i| i + 1).unwrap_or(0));
     }
     // Silence was the bug: a stalled bridge must say so once, and say when it is back.
     let mut down = false;
     loop {
-        let mut st = cfg::state();
-        let offset = st["tg_offset"].as_i64().unwrap_or(0);
+        let offset = cfg::state()["tg_offset"].as_i64().unwrap_or(0);
         let r = api(&cfg, "getUpdates", json!({"offset": offset, "timeout": POLL}));
         let v = match r {
             Ok(v) => {
@@ -232,8 +290,7 @@ fn inbound(cfg: Cfg) {
         };
         for up in v["result"].as_array().into_iter().flatten() {
             let id = up["update_id"].as_i64().unwrap_or(0);
-            st["tg_offset"] = Value::from(id + 1);
-            cfg::put_state(&st);
+            bump_offset(id + 1);
             let Some(msg) = up.get("message") else { continue };
             let chat = msg["chat"]["id"].as_i64().unwrap_or(0);
             let text = msg["text"].as_str().unwrap_or("").to_string();
@@ -268,7 +325,7 @@ fn outbound(_cfg: Cfg) {
         std::thread::sleep(Duration::from_secs(3));
         let c = Cfg::load();
         if c.num("telegram.chat_id", 0) == 0 { continue }
-        let mut st = cfg::state();
+        let st = cfg::state();   // a read-only look at the fields only this loop ever writes
 
         // replies
         // never ahead of the log: a fresh log (ids from 0 again) would otherwise stay silent
@@ -278,8 +335,6 @@ fn outbound(_cfg: Cfg) {
             high = high.max(m.i);
             if m.kind == "talk" && !m.text.trim().is_empty() { let _ = push(&c, &m.text); }
         }
-        st["tg_sent"] = Value::from(high);   // always: otherwise the cursor resets to "now"
-                                            // each pass and anything in between is lost
 
         // new published notes: title and link, never the body
         let known: Vec<String> = st["tg_slugs"].as_array().map(|a|
@@ -291,7 +346,6 @@ fn outbound(_cfg: Cfg) {
                 let _ = push(&c, &format!("note: {}\n{}", title, c.url(&format!("/m/{}", s))));
             }
         }
-        st["tg_slugs"] = json!(now);
 
         // new comments on notes
         let before = st["tg_diag"].as_i64().unwrap_or(-1);
@@ -300,8 +354,17 @@ fn outbound(_cfg: Cfg) {
             let _ = push(&c, &format!("{} new comment(s), {} open\n{}",
                 count - before, count, c.url("/d/")));
         }
-        st["tg_diag"] = Value::from(count);
-        cfg::put_state(&st);
+
+        // write back what this loop owns (tg_sent/tg_slugs/tg_diag) always: otherwise a
+        // cursor resets to "now" each pass and anything in between is lost. Re-read fresh
+        // under the lock first, so a concurrent `bump_offset` from `inbound` is never the
+        // one that gets overwritten.
+        let _g = STATE.lock().unwrap();
+        let mut fresh = cfg::state();
+        fresh["tg_sent"] = Value::from(high);
+        fresh["tg_slugs"] = json!(now);
+        fresh["tg_diag"] = Value::from(count);
+        cfg::put_state(&fresh);
     }
 }
 
