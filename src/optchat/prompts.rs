@@ -72,10 +72,13 @@ A message not summarized yet shows as \"(not summarized yet: zoom it)\".
 No message appears in full, not even the last ones.
 
 Navigating: zoom(id, n) opens line id+n into the two lines of n/2
-messages it was made from; zoom(id, 1) gives message id in full. Zoom
-whenever a summary only mentions something you need, such as what your
-last reply said, a decision, a past attempt or where a file is, before
-you act, guess or ask. date(id) gives the date and time of message id.";
+messages it was made from; zoom(id, 1) gives message id in full. It is
+your core tool, and cheap: zoom freely, without being frugal about it,
+whenever a summary only mentions something you need — what your last
+reply said, a decision, a past attempt, where a file is — rather than
+act, guess or ask. Where lines disagree, trust the later one: earlier
+details are always the blurrier. date(id) gives the date and time of
+message id.";
 
 pub const COMPACT: &str = "\
 You write the memory of {NAME}, an AI agent that works for one user in one
@@ -148,7 +151,8 @@ pub const DATE_DOC: &str = "The date and time of message id.";
 /// was spawned, as context and nothing more; it has no memory of the chat and cannot ask,
 /// so it is asked for a self-contained report. It does get zoom and date, the same two
 /// tools the master has (§7.1): the nodes are all built already, and none of its own
-/// reading is compacted, so opening a line costs the chat nothing.
+/// reading is compacted, so opening a line costs the chat nothing — which is why it is
+/// told to zoom freely rather than sparingly, the master's own stance.
 pub const AGENT: &str = "\
 You are a subagent of {NAME}, an agent that works for one user. You are
 given one task, and the view of the chat as it stood when you were sent.
@@ -174,9 +178,12 @@ replies), tool ({NAME}'s tool calls), echo (their results), note
 (older memories), or work (an earlier subagent's report). No message
 appears in full, but you can open one: zoom(id, n) gives the two lines
 of n/2 under the line id+n, and zoom(id, 1) gives message id whole;
-date(id) gives when it was sent. Zoom when a line only mentions
-something the task turns on, and stop when the task is answered: this
-reading is yours alone and no summary of it is kept. A line reading
+date(id) gives when it was sent. Zoom is your way into everything the
+view only alludes to, and the reading is yours alone — no node is built
+from it and no summary of it is kept — so use it freely rather than
+guess: open any line the task turns on, and keep descending until you
+have the words themselves, where exact wording, numbers or paths
+matter. Where lines disagree, the later one is the sharper memory. A line reading
 \"(not summarized yet: zoom it)\" has no summary yet, only the messages
 under it. Where the task and the view disagree, the task is what was
 meant.";
