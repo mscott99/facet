@@ -51,6 +51,23 @@ pub fn render_at(src: &str, note_base: &str, srcs: &[crate::doc::Src]) -> String
 /// and turned into the one piece of HTML on the page that markdown did not generate itself —
 /// a `<div>` with a hairline rule, a quiet label, and (nested embeds being just more of the
 /// same markers, correctly ordered by construction) a matching `</div>` wherever it closes.
+/// The start of the last real `<p>` opening tag in `head` — `<p>` or `<p ` with an attribute,
+/// never a same-prefixed tag that merely starts the same two bytes (`<pre`, `<param`,
+/// `<picture>`: a plain `rfind("<p")` catches any of those, and backs up past real content
+/// sitting between the lookalike and the marker, silently dropping it).
+fn rfind_p_open(head: &str) -> Option<usize> {
+    let mut end = head.len();
+    loop {
+        let at = head[..end].rfind("<p")?;
+        let after = head.as_bytes().get(at + 2).copied();
+        if after.is_none() || after == Some(b'>') || after.is_some_and(|b| b.is_ascii_whitespace()) {
+            return Some(at)
+        }
+        if at == 0 { return None }
+        end = at;
+    }
+}
+
 fn wrap_embeds(html: &str) -> String {
     use crate::doc::{MARK_OPEN, MARK_CLOSE, MARK_SEP};
     let mut out = String::with_capacity(html.len() + 512);
@@ -69,7 +86,7 @@ fn wrap_embeds(html: &str) -> String {
         };
         // back up to the start of the `<p>` this marker sits alone in
         let head = &rest[..at];
-        let p_at = head.rfind("<p").unwrap_or(head.len());
+        let p_at = rfind_p_open(head).unwrap_or(head.len());
         out.push_str(&head[..p_at]);
         let tail = &rest[at..];
         let Some(end) = tail.find("</code></p>") else { out.push_str(tail); break };
@@ -319,6 +336,21 @@ mod tests {
         assert!(open_a < open_b, "A opens before the embed nested inside it: {}", html);
         assert!(open_b < closes[0] && closes[0] < closes[1],
             "B's wrapper closes before A's own, which closes last: {}", html);
+    }
+
+    #[test]
+    fn backing_up_to_the_marker_s_p_tag_does_not_stop_at_a_lookalike() {
+        // A hand-built fragment, not comrak's: the marker's own code span sits in a `<div>`,
+        // not a `<p>` (comrak would always give it one, but the point is the backup must not
+        // mistake `<pre` for `<p` and cut into the real content before it regardless). The
+        // only "<p"-looking thing before the marker is inside `<pre>`; the fix must not stop
+        // there, so none of "keep me" is lost.
+        use crate::doc::{MARK_OPEN, MARK_SEP};
+        let html = format!("<div><pre>unrelated code</pre>keep me<code>{}Theorem{}A</code></p></div>",
+            MARK_OPEN, MARK_SEP);
+        let out = wrap_embeds(&html);
+        assert!(out.contains("keep me"), "real content before the marker survives: {}", out);
+        assert!(out.contains("<pre>unrelated code</pre>"), "and so does the code block: {}", out);
     }
 
     #[test]
