@@ -75,6 +75,12 @@ footer form{max-width:var(--measure);margin:0 auto;display:flex;gap:.8rem;align-
 textarea{flex:1;resize:none;background:#101115;color:var(--fg);border:0;border-radius:4px;
  padding:.6rem .8rem;font:15px/1.5 var(--serif);max-height:40vh}
 textarea:focus{outline:1px solid var(--line)}
+/* Saying something about a line reads like the comments do: a coloured edge under the line,
+   the quote dim above the box, no frame around either. */
+.say{margin:.5rem 0 1.2rem;padding-left:1.1rem;border-left:2px solid #8fa8c880}
+.say .q{font:11.5px/1.5 var(--mono);color:var(--dim);margin-bottom:.35rem;
+ overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.say textarea{width:100%;display:block;flex:none;max-height:30vh}
 #toast{max-width:var(--measure);margin:.3rem auto 0;font:12px var(--mono);color:var(--dim);min-height:1em}
 .katex{font-size:1.03em}.katex-display{overflow-x:auto;overflow-y:hidden;margin:1.3em 0}
 /* The line you can comment on says so only under the pointer, and only on the block a click
@@ -102,14 +108,15 @@ addEventListener('load',function(){mathify(document);if(location.hash=='')scroll
 // of its own, after the running one; Alt-Enter is a new line
 document.addEventListener('keydown',function(e){
   if(e.key!='Enter'||e.target.tagName!='TEXTAREA')return;
+  if(e.target.closest('.say'))return; // the line-comment box keeps its own keys
   e.preventDefault();
   if(e.altKey){e.target.setRangeText('\n',e.target.selectionStart,e.target.selectionEnd,'end');return}
   var f=e.target.form;f.elements.later.value=e.shiftKey?'1':'0';
   htmx.trigger(f,'submit');});
 document.addEventListener('htmx:afterRequest',function(e){var l=e.target.elements&&e.target.elements.later;if(l)l.value='0'});
 // A double-click (double-tap) on any rendered line of a note — comment cards, chat and the
-// compose box excluded — asks what to say about it, then sends through the same `/x/send`
-// a message typed by hand would, shaped the way a reply quoting a line always is.
+// compose box excluded — opens a box under that line, and what is typed there goes through the
+// same `/x/send` a message typed by hand would, shaped the way a reply quoting a line always is.
 // KaTeX leaves three copies of every formula in the DOM (the visual one, a MathML one and the
 // TeX annotation), so reading `textContent` off a line would repeat each formula three times.
 // A quote therefore comes off a clone whose rendered math is put back as its own TeX source.
@@ -126,11 +133,28 @@ function comment(e){
   var b=e.target.closest('[data-line]');if(!b||!b.dataset.note)return;
   var quote=quoted(b);
   var where='[['+b.dataset.note+']] L'+b.dataset.line+(quote?': "'+quote+'"':'');
-  var said=prompt(where+'\n\nSay what to change:');
-  if(!said)return;
-  var body='text='+encodeURIComponent(where+'\n'+said)+'&later=1';
-  fetch(TOK+'/x/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
-    .then(function(r){return r.text()}).then(function(t){var el=document.getElementById('toast');if(el)el.textContent=t});
+  say(b,where);
+}
+// Nothing pops up: the box opens in the page, under the line it is about, already focused, with
+// a dim echo of what is being quoted above it. Enter sends, Shift-Enter is a new line, Escape
+// leaves no trace. Only one box is open at a time.
+function say(b,where){
+  var old=document.querySelector('.say');if(old)old.remove();
+  var d=document.createElement('div');d.className='say';
+  d.innerHTML='<div class=q></div><textarea class=say rows=2 placeholder="say what to change"></textarea>';
+  d.querySelector('.q').textContent=where;
+  b.parentNode.insertBefore(d,b.nextSibling);
+  var t=d.querySelector('textarea');
+  t.addEventListener('keydown',function(ev){
+    if(ev.key=='Escape'){ev.preventDefault();d.remove();return}
+    if(ev.key!='Enter'||ev.shiftKey||ev.altKey)return;
+    ev.preventDefault();ev.stopPropagation();
+    var said=t.value.trim();d.remove();if(!said)return;
+    var body='text='+encodeURIComponent(where+'\n'+said)+'&later=1';
+    fetch(TOK+'/x/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
+      .then(function(r){return r.text()}).then(function(s){var el=document.getElementById('toast');if(el)el.textContent=s});
+  });
+  t.focus();
 }
 // iOS Safari does not fire `dblclick` reliably on a touch, so a coarse (touch) pointer gets
 // its own double-tap detector instead, ported from vault-phone's `pick()`.
