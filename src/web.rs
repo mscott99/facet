@@ -81,6 +81,9 @@ textarea:focus{outline:1px solid var(--line)}
 .say .q{font:11.5px/1.5 var(--mono);color:var(--dim);margin-bottom:.35rem;
  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .say textarea{width:100%;display:block;flex:none;max-height:30vh}
+.say .st{font:11px var(--mono);text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin-top:.3rem}
+.say.done{border-left-color:var(--line)}
+.say.done textarea{background:none;padding-left:0;color:var(--dim)}
 #toast{max-width:var(--measure);margin:.3rem auto 0;font:12px var(--mono);color:var(--dim);min-height:1em}
 .katex{font-size:1.03em}.katex-display{overflow-x:auto;overflow-y:hidden;margin:1.3em 0}
 /* The line you can comment on says so only under the pointer, and only on the block a click
@@ -114,6 +117,23 @@ document.addEventListener('keydown',function(e){
   var f=e.target.form;f.elements.later.value=e.shiftKey?'1':'0';
   htmx.trigger(f,'submit');});
 document.addEventListener('htmx:afterRequest',function(e){var l=e.target.elements&&e.target.elements.later;if(l)l.value='0'});
+// Vim keys for reading: d/u a half page, j/k a few lines, gg and G the ends. Every jump is
+// instant — no animation to sit through — and none of them fire while typing somewhere.
+var gg=0;
+document.addEventListener('keydown',function(e){
+  if(e.ctrlKey||e.metaKey||e.altKey)return;
+  var t=e.target;
+  if(t.tagName=='TEXTAREA'||t.tagName=='INPUT'||t.isContentEditable)return;
+  var h=innerHeight,by=0;
+  if(e.key=='d')by=h/2; else if(e.key=='u')by=-h/2;
+  else if(e.key=='j')by=h/10; else if(e.key=='k')by=-h/10;
+  else if(e.key=='G')by=document.body.scrollHeight;
+  else if(e.key=='g'){
+    if(gg){gg=0;e.preventDefault();scrollTo({top:0,behavior:'instant'});return}
+    gg=1;setTimeout(function(){gg=0},400);return;
+  } else return;
+  gg=0;e.preventDefault();
+  scrollBy({top:by,behavior:'instant'});});
 // A double-click (double-tap) on any rendered line of a note — comment cards, chat and the
 // compose box excluded — opens a box under that line, and what is typed there goes through the
 // same `/x/send` a message typed by hand would, shaped the way a reply quoting a line always is.
@@ -139,9 +159,9 @@ function comment(e){
 // a dim echo of what is being quoted above it. Enter sends, Shift-Enter is a new line, Escape
 // leaves no trace. Only one box is open at a time.
 function say(b,where){
-  var old=document.querySelector('.say');if(old)old.remove();
+  var old=document.querySelector('.say:not(.done)');if(old)old.remove();
   var d=document.createElement('div');d.className='say';
-  d.innerHTML='<div class=q></div><textarea class=say rows=2 placeholder="say what to change"></textarea>';
+  d.innerHTML='<div class=q></div><textarea class=say rows=2 placeholder="say what to change"></textarea><div class=st></div>';
   d.querySelector('.q').textContent=where;
   b.parentNode.insertBefore(d,b.nextSibling);
   var t=d.querySelector('textarea');
@@ -149,10 +169,13 @@ function say(b,where){
     if(ev.key=='Escape'){ev.preventDefault();d.remove();return}
     if(ev.key!='Enter'||ev.shiftKey||ev.altKey)return;
     ev.preventDefault();ev.stopPropagation();
-    var said=t.value.trim();d.remove();if(!said)return;
+    var said=t.value.trim();if(!said){d.remove();return}
+    var mark=function(s){d.classList.add('done');var m=d.querySelector('.st');m.textContent=s};
+    t.readOnly=true;mark('sending');
     var body='text='+encodeURIComponent(where+'\n'+said)+'&later=1';
     fetch(TOK+'/x/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
-      .then(function(r){return r.text()}).then(function(s){var el=document.getElementById('toast');if(el)el.textContent=s});
+      .then(function(r){return r.ok?r.text():Promise.reject(r.status)})
+      .then(function(s){mark(s||'sent')},function(err){t.readOnly=false;mark('not sent ('+err+')')});
   });
   t.focus();
 }
@@ -189,12 +212,15 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
     let status = format!("{}{}",
         if tell::healthy(cfg) { "" } else { "input down · " },
         if n > 0 { format!("{} comments", n) } else { String::new() });
-    let foot = if compose {
-        format!("<footer><form hx-post=\"{}/x/send\" hx-target=\"#toast\" hx-swap=innerHTML \
+    // Only the chat has a box standing ready at the bottom. Reading a note, what you want to say
+    // is always about a line of it, so the box comes to the line you double-click instead. The
+    // toast line stays either way — the comment cards post through it.
+    let foot = format!("<footer>{}<div id=toast></div></footer>", if compose {
+        format!("<form hx-post=\"{}/x/send\" hx-target=\"#toast\" hx-swap=innerHTML \
             hx-on::after-request=\"if(event.detail.successful)this.querySelector('textarea').value=''\">\
             <textarea name=text rows=1 placeholder=\"message\"></textarea><input type=hidden name=later value=0>\
-            <button>send</button></form><div id=toast></div></footer>", t)
-    } else { String::new() };
+            <button>send</button></form>", t)
+    } else { String::new() });
     SHELL.replace("{{TITLE}}", &md::esc(title))
         .replace("{{TOK}}", &t)
         .replace("{{NAV}}", &nav)
@@ -334,11 +360,11 @@ fn note_page(cfg: &Cfg, name: &str, h: &str) -> Response<std::io::Cursor<Vec<u8>
     let Some(d) = doc::note(cfg, name) else {
         return html(page(cfg, "no such note", "notes",
             &format!("<h1>no such note</h1><p class=at>{} is not in {}</p>",
-                md::esc(name), md::esc(&cfg.vault().to_string_lossy())), true), 404);
+                md::esc(name), md::esc(&cfg.vault().to_string_lossy())), false), 404);
     };
     let body = if h.is_empty() { note_html(cfg, &d) } else { section_html(cfg, &d, h) };
     html(page(cfg, &d.title, "notes",
-        &format!("<h1>{}</h1>{}", md::esc(&d.title), body), true), 200)
+        &format!("<h1>{}</h1>{}", md::esc(&d.title), body), false), 200)
 }
 
 fn doc_version(cfg: &Cfg, d: &doc::Doc) -> u64 { d.mtime.max(doc::mtime(&diag::file(cfg))) }
@@ -361,7 +387,7 @@ fn diag_page(cfg: &Cfg) -> String {
         }
         body.push_str(&diag_card(cfg, d, false, true));
     }
-    page(cfg, "Comments", "diag", &body, true)
+    page(cfg, "Comments", "diag", &body, false)
 }
 
 // ---- the server -------------------------------------------------------------------------
@@ -468,11 +494,11 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         }
 
         ["m"] => html(page(cfg, "Notes", "notes", &format!("<div id=docwrap>{}</div>",
-            md::render(&doc::index(cfg).text, &note_base(cfg))), true), 200),
+            md::render(&doc::index(cfg).text, &note_base(cfg))), false), 200),
 
         ["m", slug] => match doc::get(cfg, slug) {
             Some(d) => { let t = d.title.clone();
-                         html(page(cfg, &t, "notes", &doc_fragment(cfg, &d), true), 200) }
+                         html(page(cfg, &t, "notes", &doc_fragment(cfg, &d), false), 200) }
             None => html("<h1>no such note</h1>".into(), 404),
         },
 
