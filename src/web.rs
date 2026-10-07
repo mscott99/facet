@@ -80,10 +80,21 @@ document.addEventListener('htmx:afterRequest',function(e){var l=e.target.element
 // A double-click (double-tap) on any rendered line of a note — comment cards, chat and the
 // compose box excluded — asks what to say about it, then sends through the same `/x/send`
 // a message typed by hand would, shaped the way a reply quoting a line always is.
+// KaTeX leaves three copies of every formula in the DOM (the visual one, a MathML one and the
+// TeX annotation), so reading `textContent` off a line would repeat each formula three times.
+// A quote therefore comes off a clone whose rendered math is put back as its own TeX source.
+function quoted(b){
+  var c=b.cloneNode(true);
+  Array.prototype.forEach.call(c.querySelectorAll('.katex'),function(k){
+    var a=k.querySelector('annotation');
+    k.parentNode.replaceChild(document.createTextNode(a?'$'+a.textContent+'$':''),k);
+  });
+  return (c.textContent||'').trim().replace(/\s+/g,' ').slice(0,160);
+}
 function comment(e){
   if(e.target.closest('a,form,button,textarea,.diag'))return;
   var b=e.target.closest('[data-line]');if(!b||!b.dataset.note)return;
-  var quote=(b.textContent||'').trim().replace(/\s+/g,' ').slice(0,160);
+  var quote=quoted(b);
   var where='[['+b.dataset.note+']] L'+b.dataset.line+(quote?': "'+quote+'"':'');
   var said=prompt(where+'\n\nSay what to change:');
   if(!said)return;
