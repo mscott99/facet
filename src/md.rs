@@ -66,8 +66,33 @@ fn mark_lines(html: &str, srcs: &[crate::doc::Src]) -> String {
     out
 }
 
-/// comrak renders `[[A#B]]` as `<a href="A#B">`. Any scheme-less, non-anchor href is a vault note:
-/// turn it into `<base>/<note>?h=<section>` and mark it so the page can style it.
+/// `[[@bibkey]]` is a citation, not a note: comrak still renders it as `<a href="@bibkey">`
+/// (wikilinks do not know the vault), so without this it would both 404 against `/n/` and show
+/// the raw key as its text. Ported from vault-phone's `render_wikilink`, which formats the same
+/// key as `[Who Year]`; here it lands as an unlinked span, since neither viewer has anywhere to
+/// send such a click (no Zotero/BibTeX route exists), so a dead link is worse than no link.
+fn cite_label(key: &str) -> String {
+    let bytes = key.as_bytes();
+    // the year: a run of 4 ascii digits (a Zotero key ends `...Word2020` or `...Word2020a`);
+    // the last such run in the key is the one that matters.
+    let mut year_at = None;
+    for i in 0..bytes.len().saturating_sub(3) {
+        if bytes[i..i + 4].iter().all(|b| b.is_ascii_digit()) { year_at = Some(i); }
+    }
+    let Some(y) = year_at else { return format!("@{}", key) };
+    // the author: the key's leading run of lowercase letters only (a Zotero key runs the
+    // surname straight into the capitalized title words that follow it)
+    let who_end = key.find(|c: char| !c.is_ascii_lowercase()).unwrap_or(y.min(key.len()));
+    let who = &key[..who_end];
+    let year = &key[y..y + 4];
+    let mut c = who.chars();
+    let cap: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
+    format!("[{} {}]", if cap.is_empty() { key.to_string() } else { cap }, year)
+}
+
+/// comrak renders `[[A#B]]` as `<a href="A#B">`. Any scheme-less, non-anchor href is a vault note
+/// (or, starting with `@`, a citation — see `cite_label`): turn the former into
+/// `<base>/<note>?h=<section>` and mark it so the page can style it.
 ///
 /// `href` is not necessarily the tag's first attribute: `render_at`'s `data-line`/`data-note`
 /// come before it, and comrak's own `data-wikilink="true"` comes after, so this looks for
@@ -87,20 +112,33 @@ fn rewrite_links(html: &str, note_base: &str) -> String {
         let Some(q) = after.find('"') else {
             out.push_str(tag); out.push('>'); rest = &rest[end + 1..]; continue;
         };
-        let href = &after[..q];
+        let href = after[..q].to_string();
         let local = !href.contains("://") && !href.starts_with('/') && !href.starts_with('#')
             && !href.starts_with("mailto:");
+        if local && href.starts_with('@') {
+            // the anchor's own text, up to its close tag: comrak's wikilink text is the raw
+            // target unless a `|label` pipe overrode it, in which case the override stands.
+            let after_tag = &rest[end + 1..];
+            let Some(close) = after_tag.find("</a>") else {
+                out.push_str(tag); out.push('>'); rest = after_tag; continue;
+            };
+            let text = &after_tag[..close];
+            let shown = if text == href { cite_label(&href[1..]) } else { text.to_string() };
+            out.push_str(&format!("<span class=\"cite\" title=\"{}\">{}</span>", esc(&href), shown));
+            rest = &after_tag[close + 4..];
+            continue;
+        }
         out.push_str(&tag[..hp]);
         out.push_str(" href=\"");
         if local {
-            let (note, sec) = match href.split_once('#') { Some((n, s)) => (n, s), None => (href, "") };
+            let (note, sec) = match href.split_once('#') { Some((n, s)) => (n, s), None => (href.as_str(), "") };
             // comrak has already percent-encoded the target; encoding it again gives %2520
             out.push_str(note_base);
             out.push_str(note);
             if !sec.is_empty() { out.push_str("?h="); out.push_str(sec); }
             out.push_str("\" class=\"wl\"");
         } else {
-            out.push_str(href);
+            out.push_str(&href);
             out.push('"');
         }
         out.push_str(&after[q + 1..]);
@@ -173,5 +211,18 @@ mod tests {
         let html = render_at("a paragraph", "", &[]);
         assert!(!html.contains("data-line"));
         assert!(!html.contains("data-sourcepos"));
+    }
+
+    #[test]
+    fn a_citation_wikilink_gets_an_author_year_label_and_no_dead_link() {
+        // ported from vault-phone's `render_wikilink`: `[[@key]]` names a citation, not a
+        // note, so it must not 404 against `/n/`, and should read better than the raw key.
+        let html = render("[[@gajjarSubspaceEmbeddingsNonlinear2020]]", "/n/");
+        assert!(html.contains("class=\"cite\""), "{}", html);
+        assert!(html.contains(">[Gajjar 2020]<"), "{}", html);
+        assert!(!html.contains("href"), "a citation has nowhere to link to: {}", html);
+        // a pipe-given label is kept, not overridden
+        let html = render("[[@gajjarSubspaceEmbeddingsNonlinear2020|their Theorem 2]]", "/n/");
+        assert!(html.contains(">their Theorem 2<"), "{}", html);
     }
 }

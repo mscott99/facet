@@ -33,6 +33,7 @@ pre{overflow-x:auto;background:#0f1115;padding:10px;border-radius:6px}
 code{background:#0f1115;padding:1px 4px;border-radius:4px;font-size:.92em}
 pre code{background:none;padding:0}
 a{color:var(--acc)}a.wl{border-bottom:1px dotted var(--acc);text-decoration:none}
+.cite{color:var(--dim);cursor:help}
 table{border-collapse:collapse;width:100%;font-size:14px}th,td{border:1px solid var(--line);padding:4px 7px}
 blockquote{border-left:2px solid var(--line);margin:0;padding-left:12px;color:var(--dim)}
 .diag{margin:12px 0;border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:6px;padding:8px 10px;background:#171a1f}
@@ -79,7 +80,7 @@ document.addEventListener('htmx:afterRequest',function(e){var l=e.target.element
 // A double-click (double-tap) on any rendered line of a note — comment cards, chat and the
 // compose box excluded — asks what to say about it, then sends through the same `/x/send`
 // a message typed by hand would, shaped the way a reply quoting a line always is.
-document.addEventListener('dblclick',function(e){
+function comment(e){
   if(e.target.closest('a,form,button,textarea,.diag'))return;
   var b=e.target.closest('[data-line]');if(!b||!b.dataset.note)return;
   var quote=(b.textContent||'').trim().replace(/\s+/g,' ').slice(0,160);
@@ -89,7 +90,20 @@ document.addEventListener('dblclick',function(e){
   var body='text='+encodeURIComponent(where+'\n'+said)+'&later=1';
   fetch(TOK+'/x/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
     .then(function(r){return r.text()}).then(function(t){var el=document.getElementById('toast');if(el)el.textContent=t});
-});
+}
+// iOS Safari does not fire `dblclick` reliably on a touch, so a coarse (touch) pointer gets
+// its own double-tap detector instead, ported from vault-phone's `pick()`.
+if(matchMedia('(pointer: coarse)').matches){
+  var lastTap=null;
+  document.addEventListener('click',function(e){
+    var now={t:e.timeStamp,x:e.clientX,y:e.clientY};
+    var isDouble=lastTap&&now.t-lastTap.t<350&&Math.hypot(now.x-lastTap.x,now.y-lastTap.y)<30;
+    lastTap=isDouble?null:now;
+    if(isDouble)comment(e);
+  });
+}else{
+  document.addEventListener('dblclick',comment);
+}
 </script></body></html>"#;
 
 fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> String {

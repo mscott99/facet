@@ -33,10 +33,10 @@ them). They expect `facet` and the scripts in `bin/` on `~/.local/bin` (symlinks
     com.facet.engine   facet engine            the memory; owns ~/.optchat and its socket
     com.facet          facet serve             web pages + Telegram         127.0.0.1:8730
     com.facet.term     bin/facet-term          ttyd running `facet chat`    127.0.0.1:8731
-    com.facet.vault    bin/facet-vault-bridge  vault-phone (a separate note viewer, kept
-                                               running but no longer needed: `/n/` and
-                                               `/m/` do the same reading and the same
-                                               tap-to-comment now)             127.0.0.1:8765
+    (com.facet.vault was vault-phone, a separate note viewer; retired once `/n/` and `/m/`
+     did the same reading and tap-to-comment — see "one viewer" below. The job is stopped
+     and its plist disabled; the code is archived, not deleted, at
+     `~/Prog/archive/vault-phone`.)
 
     bin/life           mail / calendar / web (used by Telegram /cal and /mail)
     bin/facet-scrub    length-preserving secret redaction over the chat log
@@ -54,23 +54,41 @@ tailnet with `tailscale serve` (real TLS certificates, tailnet devices only), fo
 
     tailscale serve --bg --https=10443 127.0.0.1:8730    https://<host>.<tailnet>.ts.net:10443/<token>/   web
     tailscale serve --bg --https=8443  127.0.0.1:8731    https://<host>.<tailnet>.ts.net:8443/<token>/    terminal
-    tailscale serve --bg --https=9443  127.0.0.1:8765    https://<host>.<tailnet>.ts.net:9443/            vault-phone
 
 One secret token in the path gates the web pages and the terminal (`token` in facet.json; the
-terminal script reads the same value from `~/.config/optchat-web/token`). Set `base_url`,
-`terminal_url` and `vault_phone` in facet.json to the published addresses, so pages and
-messages link to them. `vault_phone` is a link in the nav and on the home page only:
-wikilinks resolve on `/n/`, against the vault in `vault` — the vault-phone script used to be
-pointed at a vault of its own, and a link out of a doc answered 404 whenever the two differed.
+terminal script reads the same value from `~/.config/optchat-web/token`). Set `base_url` and
+`terminal_url` in facet.json to the published addresses, so pages and messages link to them.
+Wikilinks resolve on `/n/`, against the vault in `vault`.
 
-There is one viewer, not two: vault-phone's own reading and tap-to-comment are still there (the
-job keeps running, and nothing stops it), but `/n/` and `/m/` now do both themselves, so facet
-no longer depends on it for either. Every block of a rendered note carries where it came from —
-`data-line`, and `data-note` for the note itself, which through an embed is not the page's own
-note but the one the embed quotes (see **a longform**, below). A double-click (double-tap) on
-one asks what to say about it and sends it through the ordinary `POST /x/send`, shaped
-`[[Note]] L<line>: "quoted line text"` followed by what was typed, so it reads the same as a
-reply typed by hand.
+There is one viewer, not two: vault-phone — a separate note reader and tap-to-comment page,
+its own Python server on 127.0.0.1:8765/tailnet :9443 — is retired (archived at
+`~/Prog/archive/vault-phone`, `com.facet.vault` stopped and its plist disabled); `/n/` and
+`/m/` now do everything it did. What came from it:
+
+  - Every block of a rendered note carries where it came from — `data-line`, and `data-note`
+    for the note itself, which through an embed is not the page's own note but the one the
+    embed quotes (see **a longform**, below). A double-click (double-tap; a touch-screen gets
+    its own detector, since iOS Safari does not fire `dblclick` reliably) on one asks what to
+    say about it and sends it through the ordinary `POST /x/send`, shaped
+    `[[Note]] L<line>: "quoted line text"` followed by what was typed, so it reads the same as
+    a reply typed by hand.
+  - A labelled embed is closed where it ends (a tombstone `∎` on a proof, a plainer `□` on
+    anything else) rather than left for the reader to guess at a page boundary that is not
+    there.
+  - `[[@bibkey]]` — a citation, not a note — no longer sends a wikilink click at `/n/@bibkey`
+    into a 404: it renders `[Author Year]` (ported from vault-phone's `render_wikilink`,
+    `md::cite_label`), as an unlinked span, since neither viewer had anywhere to send such a
+    click in the first place (no Zotero/BibTeX route exists in either).
+
+What vault-phone did that was judged not worth porting: live diff-patched re-render over
+server-sent events (facet's doc fragment instead polls every 4s and swaps the whole thing —
+coarser, but needs no new transport); a dot at the diagnostic's exact source line with a
+bottom sheet for Apply/Dismiss/Reply (facet's comment card already sits right after the block
+it anchors to and carries apply/dismiss/discuss, so the dot would be a second UI for the same
+triage, not a new capability); whole-tree-snapshot `/undo` of the last agent turn (needs the
+vault to be its own git repo — myVault is one — but recovering a bad edit by hand or through
+Obsidian's own history already covers it, and the stale-text guard on `apply` already stops
+the dangerous case, a fix landing on text that moved).
 
 Web pages (`facet serve`, all under `/<token>`):
 
@@ -496,7 +514,8 @@ Questions it answers, for example:
 **Service logs** (LaunchAgents; paths set in the plists): `facet serve` →
 `~/Library/Logs/facet.log`, the engine → `~/.local/share/facet/engine.{out,err}.log` (the
 rendered view at each start on stdout, notices on stderr), the terminal →
-`~/Library/Logs/facet-term.log`, vault-phone → `~/Library/Logs/vault-phone.log`.
+`~/Library/Logs/facet-term.log` (vault-phone's log, `~/Library/Logs/vault-phone.log`, is now
+only as current as the archived job's last run).
 
 **Surface state** (`~/.config/facet/`): `facet.json` (settings and the two secrets, chmod 600),
 `state.json` (Telegram cursors), `buffer.jsonl` (Telegram commands riding along).
