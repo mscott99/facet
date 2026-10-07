@@ -84,6 +84,14 @@ new notes and comments are announced. Commands are answered on the spot and ride
 the next message: `/help`, `/ping` (= `/usage`: engine state and usage left), `/last N`,
 `/link`, `/notes`, `/diag`, `/cal N`, `/mail [query]`, `/buffer`, `/flush`.
 
+A message typed on a phone is usually the next thing to deal with, not an interruption of the
+turn it lands in, so this route sends it with `later` by default (`telegram.queue`, default
+true): it waits for the running turn and then starts one of its own, instead of arriving
+mid-turn at the next tool call. Both ways stay one message away — `/now <text>` delivers into
+the running turn, `/later <text>` makes it wait, and `/queue on|off` moves the default (with
+`/queue` alone reporting it). With no turn running the flag changes nothing: the text starts a
+turn either way.
+
 The engine socket, `~/.optchat/lock` (one JSON object per line; `facet send`, the web,
 Telegram and every `facet chat` use it):
 

@@ -7,6 +7,12 @@
 // Their transcripts queue in the prelude and ride along with the next real message, so the
 // conversation still learns what was asked and when. That queue is this file's business only;
 // `tell` drains it through one call.
+//
+// A message typed on a phone is rarely an interruption of the turn it lands in: it is the next
+// thing to deal with. So this route queues by default (`telegram.queue`, default true) — the
+// text waits and starts a turn of its own rather than cutting into the running one at its next
+// tool call. Either choice stays one message away: `/now <text>` delivers into the running turn,
+// `/later <text>` queues whatever the default is, and `/queue on|off` moves the default.
 use crate::cfg::{self, Cfg};
 use crate::{diag, doc, log};
 use serde_json::{json, Value};
@@ -109,16 +115,42 @@ fn life(cfg: &Cfg, args: &[&str]) -> String {
     }
 }
 
+/// Does a plain message from here wait for the running turn to end, or cut into it?
+pub fn queueing(cfg: &Cfg) -> bool { cfg.get_bool("telegram.queue", true) }
+
 /// Returns (reply, remember_it). Meta commands are not worth replaying to the conversation.
 pub fn command(cfg: &Cfg, text: &str) -> (String, bool) {
     let mut it = text.trim_start_matches('/').split_whitespace();
     let cmd = it.next().unwrap_or("").to_lowercase();
     let rest: Vec<&str> = it.collect();
     let n = rest.first().and_then(|x| x.parse::<i64>().ok());
+    // whatever followed the command word, verbatim: `/now` and `/later` carry a real message
+    let tail = text.trim_start_matches('/').splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
     match cmd.as_str() {
+        // the two overrides of `telegram.queue`, per message
+        "now" | "later" => (if tail.is_empty() { "nothing to send".into() } else {
+            match crate::tell::tell(cfg, tail, "telegram", cmd == "later") {
+                Ok(_) => if cmd == "later" { "queued".into() } else { "sent".to_string() },
+                Err(e) => e,
+            }
+        }, false),
+        "queue" => (match rest.first().map(|s| s.to_lowercase()).as_deref() {
+            Some("on") | Some("off") => {
+                let on = rest[0].eq_ignore_ascii_case("on");
+                let mut c = Cfg::load();
+                c.set("telegram.queue", Value::from(on));
+                c.save();
+                if on { "queueing on: a message waits and starts a turn of its own".into() }
+                else { "queueing off: a message goes into the running turn".to_string() }
+            }
+            _ => format!("queueing is {} (/queue on|off; /now and /later override once)",
+                if queueing(cfg) { "on" } else { "off" }),
+        }, false),
         "start" | "help" => (format!(
             "Facet — your agent on this machine.\n\n\
-             Plain text goes into the running conversation.\n\
+             Plain text goes into the conversation, waiting for the running turn to end.\n\
+             /now <text>  into the running turn   /later <text>  make it wait\n\
+             /queue on|off  which of those is the default\n\n\
              These are answered here instead, and ride along with your next message:\n\
              /diag  open comments      /notes  published notes\n\
              /cal N days ahead         /mail [query]\n\
@@ -222,7 +254,7 @@ fn inbound(cfg: Cfg) {
                 if keep { remember(&text, &reply); }
                 let _ = push(&c, if reply.is_empty() { "(nothing)" } else { &reply });
             } else {
-                match crate::tell::tell(&c, &text, "telegram", false) {
+                match crate::tell::tell(&c, &text, "telegram", queueing(&c)) {
                     Ok(_) => {}
                     Err(e) => { let _ = push(&c, &format!("could not deliver: {}", e)); }
                 }
