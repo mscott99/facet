@@ -359,6 +359,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     let mut meter = Meter::default();
     let mut replays = 0usize;
     let mut deferred: Vec<String> = Vec::new();
+    let mut agents: HashSet<String> = HashSet::new(); // live subagent tool ids
     let mut checked_tools = false;
     let mut killed = false;
     let (mut cc, mut tq) = (String::new(), Instant::now());
@@ -381,6 +382,11 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
             super::events::req(&e.dir, "turn", &r, &cc, tq.elapsed().as_millis(), json!({"turn": tr.first, "step": tr.steps}));
             tq = Instant::now();
         }
+        // A subagent's own steps are not the chat: its calls, results and prose carry
+        // `parent_tool_use_id` and are dropped here, so the log keeps the one report it
+        // hands back (a top-level tool result) and nothing else. Its tokens are already
+        // metered above.
+        if ev["parent_tool_use_id"].is_string() { continue }
         match ev["type"].as_str().unwrap_or("") {
             "system" if ev["subtype"] == "init" && !checked_tools => {
                 checked_tools = true;
@@ -409,6 +415,10 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                         "tool_use" => {
                             let line = format!("{} {}", b["name"].as_str().unwrap_or("?"), b["input"]);
                             e.log("tool", &line);
+                            let name = b["name"].as_str().unwrap_or("");
+                            if name == "Task" || name == "Agent" {
+                                if let Some(id) = b["id"].as_str() { agents.insert(id.to_string()); }
+                            }
                             let mut t = e.turn.lock().unwrap();
                             if let Some(id) = b["id"].as_str() { t.pending.insert(id.into()); }
                             t.flush_held(); // a tool is about to run: its result is the boundary
@@ -438,8 +448,11 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
             "user" => {
                 for b in ev["message"]["content"].as_array().cloned().unwrap_or_default() {
                     if b["type"] != "tool_result" { continue }
-                    e.log("echo", &cap(&result_text(&b["content"])));
-                    if let Some(id) = b["tool_use_id"].as_str() { e.turn.lock().unwrap().pending.remove(id); }
+                    let id = b["tool_use_id"].as_str().unwrap_or("");
+                    // a subagent's report is the one thing it leaves behind: its own kind (§9)
+                    let kind = if agents.remove(id) { "work" } else { "echo" };
+                    e.log(kind, &cap(&result_text(&b["content"])));
+                    if !id.is_empty() { e.turn.lock().unwrap().pending.remove(id); }
                 }
                 if e.turn.lock().unwrap().pending.is_empty() {
                     for m in deferred.drain(..) { e.log("user", &m); }

@@ -63,7 +63,7 @@ impl Conf {
             name: s("name", "OptChat"),
             model: s("model", "opus"),
             effort: s("effort", "high"),
-            tools: s("tools", "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch"),
+            tools: s("tools", "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task"),
             permission: s("permission", "bypassPermissions"),
             compact_model: s("compact_model", "sonnet"),
             compact_effort: s("compact_effort", "medium"),

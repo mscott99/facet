@@ -173,12 +173,14 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     midnight, the whole view is a cache miss. A Claude Code update changes its blocks and
     costs one miss.
 11. *Tools* are Claude Code's own (Bash, Read, Edit, Write, Glob, Grep, WebFetch,
-    WebSearch) plus zoom and date served over MCP from the engine (§9 suggests MCP over HTTP).
+    WebSearch, Task) plus zoom and date served over MCP from the engine (§9 suggests MCP
+    over HTTP).
 
 **Choices the gist leaves open, and safety additions**
 
-12. *MASTER without its subagent paragraph (§7.2).* There are no spawn, tell or computer
-    tools (§9 is optional), so the paragraph would describe tools that do not exist. Added:
+12. *MASTER's subagent paragraph is about cost, not about spawn (§7.2).* There is no spawn,
+    tell or computer tool, so the gist's wording would describe tools that do not exist; the
+    paragraph instead tells the agent that a subagent is its cheapest memory (see 19). Added:
     each turn is a fresh process, so anything started in the background dies with it.
 13. *Free nodes are built at once*, without waiting for rule 3 (§4.1): they need no model call,
     so the compactor never sees them; the result is the same.
@@ -199,7 +201,47 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 18. *Model switching (§10)* costs one cold cache write of the view for the first turn on the
     new model (prompt caches are per model).
 
-Not implemented: subagents and computer use (§9).
+19. *Subagents are Claude Code's Task tool, not the gist's spawn and tell (§9).* The engine
+    does not start them and cannot talk to one while it runs. Every event carrying a
+    `parent_tool_use_id` is dropped, so a subagent's own calls, results and prose never enter
+    the log: what is remembered is the report it hands back, logged as one message of kind
+    `work` (the gist's own kind for it). Its tokens are metered into the turn that sent it.
+    Exploration that would have been twenty tool/echo pairs in the log costs one line.
+
+Not implemented: computer use, and the gist's own spawn/tell protocol (§9).
+
+## measured and rejected
+
+Three cheaper-looking ideas, each measured against this chat's own logs (1098 messages,
+$240 of model time at list prices) and each dropped. Kept here so they are not tried twice.
+
+1. *Freezing the view for the length of a turn.* The hope was that holding the view still
+   between turns would stop the compactor's prefix being reshaped under it. Replayed: the
+   current collapse-to-budget rule invalidates the cached prefix on 75.8% of appends and
+   costs $111 of compaction; freezing to the turn's start brings that to 38.2% and $81, but
+   the view overshoots its own budget (153 kB against VIEW = 128 kB) because nothing may
+   collapse while a turn runs. Collapsing in one batch to a floor below the budget does
+   better on both counts (31.1%, $52) and freezing on top of it adds nothing (31.1%, $54).
+   Worse than useless: nodes are built on top of nodes built in the same turn, so a parent
+   and its own children would both be written against the turn's starting view, and the
+   parent's line would summarize children it cannot see. Batching the collapse is the fix;
+   freezing is not.
+2. *Batching tool calls to shorten the log.* Merging every run of consecutive tool calls
+   into one message does cut compaction ($53 to $21 simulated, 1100 messages to 435), but
+   the saving is not batching: it is having fewer, larger messages, and a subagent buys the
+   same amount ($21 at runs of 3 or more) while keeping the steps out of the log instead of
+   inside it. Batching also costs what it saves twice over: the agent already bundles shell
+   commands itself (365 of 440 tool calls in this chat ran several), runs average 4 calls, so
+   the headroom is small, and any batching rule has to hold back a call whose result the next
+   call needs. Use subagents; leave the tool loop alone.
+3. *Describing the byte limit better in the compactor's prompt.* The prompt already carries
+   an exemplar line of exactly NODE bytes, which is the strongest form of "show, don't tell"
+   available: a model cannot count its own bytes, since bytes sit two layers below its
+   tokens. It calibrates and does not measure. First tries fit 30.7% of the time (median
+   625 bytes against a 512 limit); the retry, which shows the model its own draft cut at the
+   limit, fits 80.1%; a third try fits 45%. More words about the limit will not move the
+   first number, because the second is not counting either, only copying up to a visible
+   cut. Shortening without a new call is the only real fix.
 
 ## logs
 
