@@ -44,13 +44,16 @@ impl B<'_> {
             if open { " open" } else { "" }, cls, id, n, esc(&when), tail, esc(&flat(text)));
     }
     /// A node that has a summary (or is a view line): its line, then what it was made from.
-    fn thread(&mut self, l: usize, i: usize, open: bool) {
+    /// `top` marks a node with no summarized ancestor above it - the frontier a "collapse all"
+    /// should land on: closing exactly these nodes still covers the whole chat, maximally summarized.
+    fn thread(&mut self, l: usize, i: usize, open: bool, top: bool) {
+        let top_cls = if top { " top" } else { "" };
         if l == 0 {
             let m = &self.s.msgs[i];
             let (kind, text) = (m.kind.clone(), m.text.clone());
             let last = if i + 1 == self.t { " last" } else { "" };
             let tail = format!("{} · <b>{}</b>", size(kind.len() + 2 + text.len()), kind);
-            self.head(0, i, &format!("{}{}", kind, last), &text, &tail, open);
+            self.head(0, i, &format!("{}{}{}", kind, last, top_cls), &text, &tail, open);
             let _ = write!(self.out, "<div class=b>{}</div></details>", esc(&text));
             return;
         }
@@ -58,17 +61,20 @@ impl B<'_> {
         let (_, n) = self.reach(l, i);
         let text = node.clone().unwrap_or_else(|| PLACEHOLDER.into());
         let tail = format!("{} · {} messages", size(text.len()), n);
-        self.head(l, i, if node.is_some() { "sum" } else { "sum sc" }, &text, &tail, open || node.is_none());
-        for (a, b) in self.halves(l, i) { self.walk(a, b, false); }
+        self.head(l, i, &format!("{}{}", if node.is_some() { "sum" } else { "sum sc" }, top_cls), &text, &tail, open || node.is_none());
+        // Below a node that has its own summary, nothing further is top-level: its ancestor
+        // already covers it, so its halves (even if themselves built) are not the frontier.
+        for (a, b) in self.halves(l, i) { self.walk(a, b, false, false); }
         self.out.push_str("</details>");
     }
-    fn walk(&mut self, l: usize, i: usize, open: bool) {
-        if l == 0 || self.view.contains(&(l, i)) || self.s.built(l, i) { return self.thread(l, i, open) }
+    fn walk(&mut self, l: usize, i: usize, open: bool, top: bool) {
+        if l == 0 || self.view.contains(&(l, i)) || self.s.built(l, i) { return self.thread(l, i, open, top) }
         let kids = self.halves(l, i);
-        if kids.len() == 1 { return self.walk(kids[0].0, kids[0].1, open) }
+        if kids.len() == 1 { return self.walk(kids[0].0, kids[0].1, open, top) }
         let (_, n) = self.reach(l, i);
         self.head(l, i, "sc", "(not summarized: opens into its halves)", &format!("{} messages", n), true);
-        for (a, b) in kids { self.walk(a, b, false); }
+        // Pure scaffolding (no summary of its own): top-ness passes through unchanged.
+        for (a, b) in kids { self.walk(a, b, false, top); }
         self.out.push_str("</details>");
     }
 }
@@ -80,7 +86,7 @@ pub fn html(s: &Store, v: &View, budget: usize, back: Option<&str>) -> String {
     if t == 0 { b.out.push_str("<p class=s>empty</p>") } else {
         let mut top = 0;
         while (1usize << top) < t { top += 1; }
-        b.walk(top, 0, true);
+        b.walk(top, 0, true, true);
     }
     let nodes: usize = s.levels.iter().map(|l| l.iter().filter(|x| x.is_some()).count()).sum();
     let back = back.map(|h| format!("<a class=back href=\"{}\">← home</a> ", esc(h))).unwrap_or_default();
@@ -120,7 +126,7 @@ const JS: &str = "const $=s=>document.querySelectorAll(s),T='#tree details';
 const all=o=>$(T).forEach(d=>d.open=o);
 const up=d=>{for(let p=d;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;};
 document.getElementById('x').onclick=()=>all(true);
-document.getElementById('c').onclick=()=>{all(false);$('#tree details.sc').forEach(d=>d.open=true);const r=document.querySelector(T);if(r)r.open=true;};
+document.getElementById('c').onclick=()=>{all(false);$('.top').forEach(d=>up(d.parentElement));};
 document.getElementById('n').onclick=()=>{const l=document.querySelector('.last');if(l){up(l);l.scrollIntoView({block:'center'});}};
 const q=document.getElementById('q'),h=document.getElementById('h');
 const search=()=>{
@@ -155,7 +161,7 @@ mod tests {
         assert!(!h.contains("msg 0 <b>"));
         assert_eq!(h.matches("<details").count(), h.matches("</details>").count());
         assert!(h.contains("<code>0+8</code>") || h.contains("<code>0+5</code>"), "one root");
-        assert!(h.contains("class=\"n user last\""));
+        assert!(h.contains("class=\"n user last\"") || h.contains("class=\"n user last top\""));
         assert!(h.contains("pair one"));
     }
 }
