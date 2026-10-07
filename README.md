@@ -180,12 +180,14 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 
 **Choices the gist leaves open, and safety additions**
 
-12. *MASTER's subagent paragraph is about cost, not about spawn (§7.2).* There is no spawn,
-    tell or computer tool, so the gist's wording would describe tools that do not exist; the
-    paragraph instead tells the agent that a subagent is its cheapest memory and makes it the
-    default for work that is looking rather than doing, since the compaction of what the agent
-    does itself dominates the bill (see 19). Added: each turn is a fresh process, so anything
-    started in the background dies with it.
+12. *MASTER's subagent line keeps the gist's free hand, with a nudge (§7.2).* There is no
+    spawn, tell or computer tool, so the gist's wording would describe tools that do not
+    exist, and its "use subagents only when the user asks for them" assumes a spawn that
+    carries the whole view and therefore saves nothing. Here a subagent's steps stay out of
+    the log, so delegating is cheaper than it is elsewhere (see 19) — the paragraph says so
+    and tells the agent to lean towards it a little, naming contained programming as well as
+    looking, but leaves the choice to its judgement rather than making a rule of it. Added:
+    each turn is a fresh process, so anything started in the background dies with it.
 13. *Free nodes are built at once*, without waiting for rule 3 (§4.1): they need no model call,
     so the compactor never sees them; the result is the same.
 14. *Failures do not retry forever at 10 s (§4.1).* A usage-limit error pauses the compactor
@@ -211,21 +213,27 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     the log: what is remembered is the report it hands back, logged as one message of kind
     `work` (the gist's own kind for it).
     Exploration that would have been twenty tool/echo pairs in the log costs one line.
-    MASTER therefore prefers a subagent by default for reading, searching and surveying, and
-    keeps the agent's own hands on anything that changes something or whose next step depends
-    on the last. The price of a logged message, measured over this chat (1206 messages,
+    MASTER therefore keeps the gist's free hand but leans towards delegating (see 12): the
+    work worth sending out is work whose steps need not be kept, contained programming as
+    much as reading, while anything whose next step depends on the last, or that the user is
+    waiting on, stays here. The price of a logged message, measured over this chat (1206 messages,
     $270 at per-model rates): 11.9 cents of compaction, 22.4 cents all in. An average run of
     four tool calls is eight messages, so delegating it saves about a dollar of compaction and
     pays the subagent's own reads once, out of a fresh context instead of the turn's growing
     one. The report is a message too: a transcript handed back buys nothing.
 
-    A subagent runs on the cheap model (`agent_model`, sonnet): reading a lot and writing one
-    short report is work a smaller model does well, and paying the big model's rate for it
-    would undo the saving. `--agents` redefines Claude Code's own `general-purpose` and
-    `Explore` rather than adding a name, so whichever one the master picks is the cheap one,
-    with the AGENT prompt (no view, no follow-up, report that stands alone, read-only unless
-    told otherwise) and reading tools only. Verified against the CLI: the turn stays on opus
-    while the subagent's requests come back as sonnet.
+    A subagent runs on the cheap model by default (`agent_model`, sonnet): doing one stated
+    job and writing one short report is work a smaller model does well, and paying the big
+    model's rate for it would undo the saving. `--agents` redefines Claude Code's own
+    `general-purpose` and `Explore` rather than adding a name, so whichever one the master
+    picks is the cheap one, with the AGENT prompt (no view, no follow-up, do only what the
+    task names, report that stands alone). `Explore` gets the reading tools; `general-purpose`
+    also gets `Edit` and `Write`, since a contained programming task is worth delegating too.
+    The default is not a ceiling: the master may pass `model` with the call, and the CLI
+    honours that over the definition, so a hard task can go out on opus. Both halves verified
+    against the CLI: without the parameter the turn stays on opus while the subagent's
+    requests come back as sonnet; with `model: opus` the subagent's own requests come back as
+    opus.
 
     The subagent pays for itself in log bytes, and that is exactly why its own spending has to
     be counted: dropping its events would otherwise drop its tokens too. A subagent's requests

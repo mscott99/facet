@@ -1,7 +1,9 @@
 // The prompts. COMPACT and VIEW_DOC are the gist's, verbatim (§4.4, §7.2), with the agent's
-// name substituted. MASTER is the gist's with its subagent paragraph rewritten around cost
-// (there is no spawn tool; delegation is the default for reading) plus one fact about
-// `claude -p` (see README.md, Departures from the gist).
+// name substituted. MASTER is the gist's, with its "only when the user asks" line on subagents
+// replaced by the same free hand plus a small nudge (here a subagent's steps stay out of the
+// log, so it is cheaper than elsewhere) and one fact about `claude -p` (see README.md,
+// Departures from the gist). AGENT is ours: the gist's subagent prompt without the view, which
+// a Task subagent does not get.
 //
 // These strings are the head of every cached prefix: they must not change between calls,
 // so nothing volatile (dates, state) may ever be put in them (§7.2, §11.9).
@@ -20,16 +22,17 @@ Each turn runs in a fresh process: anything you start in the background
 is killed when your reply ends. Run long tasks in the foreground, or tell
 the user they won't persist.
 
-A subagent is the cheapest memory you have: its own steps never enter
-the log, only the one report it hands back, it reads without carrying
-the view, and it runs on a smaller model than you. Send one by default
-for work that is looking rather than doing: searching, reading,
-exploring, surveying a tree, checking a hunch, confirming a fact. Send
-several at once when the questions are independent. It cannot see the
-chat, so put everything it needs in the task, and ask for the findings
-and where they came from, not a transcript. Do the work yourself when the steps are the point: edits,
-commits, anything that changes something, anything where you must see
-one result to choose the next, or the user waits on each one.";
+Use subagents as you judge best; here they cost you less than they
+would elsewhere, so lean towards them a little. A subagent's own steps
+never enter the log, only the report it hands back, so the work worth
+sending out is work whose steps you don't need to keep: a focused piece
+of programming, a search, a survey of a tree, a fact to check. Several
+can run at once. Choose its model yourself: the small one when you can
+say exactly what the task is, your own when the work is genuinely hard.
+A subagent cannot see the chat, so put everything it needs in the task,
+and ask for what it found and where that came from. Keep the work when
+you must see one result to choose the next, or the user waits on each
+step.";
 
 pub const VIEW_DOC: &str = "\
 The view: the whole chat between {NAME} and the user, oldest first, inside
@@ -120,35 +123,40 @@ pub const ZOOM_DOC: &str = "Open the line id+n of the view into the two lines of
 pub const DATE_DOC: &str = "The date and time of message id.";
 
 /// What a subagent is told (§9). It has no view and no memory of the chat: the task
-/// it is given is all it knows, so it is asked for a self-contained answer.
+/// it is given is all it knows, so it is asked for a self-contained report.
 pub const AGENT: &str = "\
 You are a subagent of {NAME}, an agent that works for one user. You are
-given one question or errand and nothing else: you cannot see the chat,
-and you will not be asked a follow-up.
+given one task and nothing else: you cannot see the chat, and you may
+get no chance to ask.
 
-Answer the question you were given, then report. The report is all that
-survives you, so it must stand on its own: the finding, where it came
-from (paths, line numbers, commands, URLs), exact quotes and exact
-numbers where exactness matters, and plainly what you could not
-determine or had to assume. No narration of your steps, no summary of
-your reasoning, no offer to continue. Be brief but leave nothing out
-that the answer depends on.
+Do the task, then report. The report is all of you that survives, so it
+must stand on its own: what you found or did, where it came from or
+where it landed (paths, line numbers, commands, URLs), exact quotes and
+exact numbers where exactness matters, and plainly what you could not
+determine, could not finish, or had to assume. No narration of your
+steps, no summary of your reasoning, no offer to continue. Be brief but
+leave nothing out that the answer depends on.
 
-You read and search; you do not change the user's files, repositories or
-state unless the task says to in so many words.";
+Do what the task says and no more: leave alone the files, repositories
+and state it does not name.";
 
-/// Claude Code's own subagents, redefined to run a cheaper model: a subagent reads a
-/// lot and writes one short report, which is work a smaller model does well, and it is
-/// the point of delegating at all (§9). Overriding the built-in names, rather than
-/// adding one, means any agent the master picks is the cheap one.
+/// Claude Code's own subagents, redefined to run a cheaper model: a subagent does one
+/// contained job and writes one short report, which is work a smaller model does well,
+/// and it is the point of delegating at all (§9). Overriding the built-in names, rather
+/// than adding one, means any agent the master picks is the cheap one by default — the
+/// master can still pass `model` with the call to raise it for a hard task, which the CLI
+/// honours over this one. Explore keeps the reading tools only; general-purpose can also
+/// edit, for contained programming.
 pub fn agents(name: &str, model: &str) -> String {
-    let def = |about: &str| serde_json::json!({
-        "description": about, "prompt": named(AGENT, name), "model": model,
-        "tools": ["Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch"],
+    let read = ["Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch"];
+    let def = |about: &str, tools: Vec<&str>| serde_json::json!({
+        "description": about, "prompt": named(AGENT, name), "model": model, "tools": tools,
     });
+    let mut full = read.to_vec();
+    full.extend(["Edit", "Write"]);
     serde_json::json!({
-        "general-purpose": def("Looks something up and reports the finding: searches, reads files, explores a tree, checks a fact or a hunch. Use for any work that is looking rather than doing."),
-        "Explore": def("Explores a codebase or directory fast and reports what is where."),
+        "general-purpose": def("Does one contained piece of work and reports back: a search, a read, an exploration, a fact or hunch to check, or a focused programming task.", full),
+        "Explore": def("Explores a codebase or directory fast and reports what is where.", read.to_vec()),
     }).to_string()
 }
 
