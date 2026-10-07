@@ -319,6 +319,10 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     there, so the depth of the chat is open to it while only the summary is pushed on it.
     Because that reading is free, the `AGENT` prompt tells the subagent so and tells it to
     zoom freely rather than guess from a summary line — the same stance `MASTER` takes.
+    Both prompts also say the view is true as a working rule: act on it without checking it
+    over again, and zoom for what a line leaves out rather than to confirm what it says.
+    The cheap call is the one that recovers a dropped detail; re-reading what the summary
+    already got right buys nothing, and a wrong line is overwritten as the chat goes on.
     Measured against the CLI: a subagent given those names in its definition called
     `mcp__optchat__zoom` with `{id: 0, n: 1}` and got `0+0|user: Can you put on my alarm?`
     back from the live engine, with no permission prompt. The MCP tool names need not be in

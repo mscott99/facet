@@ -76,7 +76,11 @@ messages it was made from; zoom(id, 1) gives message id in full. It is
 your core tool, and cheap: zoom freely, without being frugal about it,
 whenever a summary only mentions something you need — what your last
 reply said, a decision, a past attempt, where a file is — rather than
-act, guess or ask. date(id) gives the date and time of message id.";
+act, guess or ask. date(id) gives the date and time of message id.
+
+The view is your memory, and as a working rule it is true: act on what
+it tells you without checking it over again. Zoom for what a summary
+leaves out, not to confirm what it says.";
 
 pub const COMPACT: &str = "\
 You write the memory of {NAME}, an AI agent that works for one user in one
@@ -181,7 +185,9 @@ view only alludes to, and the reading is yours alone — no node is built
 from it and no summary of it is kept — so use it freely rather than
 guess: open any line the task turns on, and keep descending until you
 have the words themselves, where exact wording, numbers or paths
-matter. A line reading
+matter. What the view tells you is true as a working rule: act on it
+without checking it over again, and zoom for what a line leaves out
+rather than to confirm it. A line reading
 \"(not summarized yet: zoom it)\" has no summary yet, only the messages
 under it. Where the task and the view disagree, the task is what was
 meant.";
