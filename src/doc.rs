@@ -257,14 +257,20 @@ fn header(line: &str) -> Option<(usize, &str)> {
 
 /// The body under the header of that name, the header line itself excluded, ending at the
 /// next header of the same or a higher level. The name is matched without case, as there.
-pub fn section(text: &str, want: &str) -> Option<String> {
+pub fn section(text: &str, want: &str) -> Option<String> { section_at(text, want).map(|(b, _)| b) }
+
+/// The same, with the line the body starts on (1-based, blank lines at its head skipped as the
+/// trim skips them): an assembled page says which line of which note each block came from.
+pub fn section_at(text: &str, want: &str) -> Option<(String, usize)> {
     let lines: Vec<&str> = text.lines().collect();
     let (at, level) = lines.iter().enumerate().find_map(|(i, l)|
         header(l).filter(|(_, h)| h.to_lowercase() == want.trim().to_lowercase()).map(|(lv, _)| (i, lv)))?;
     let end = lines.iter().enumerate().skip(at + 1)
         .find(|(_, l)| header(l).map(|(lv, _)| lv <= level).unwrap_or(false))
         .map(|(i, _)| i).unwrap_or(lines.len());
-    Some(lines[at + 1..end].join("\n").trim().to_string())
+    let body = &lines[at + 1..end];
+    let skip = body.iter().position(|l| !l.trim().is_empty()).unwrap_or(0);
+    Some((body.join("\n").trim().to_string(), at + 2 + skip))
 }
 
 /// One embed line. The `label::` before it and the `#Section` within it are both optional;
@@ -300,41 +306,94 @@ const DEPTH: usize = 3;
 /// An embed line expanded into the text it stands for. Any other line comes back unchanged,
 /// so this can be mapped over a whole note without reading the note's structure.
 pub fn expand(cfg: &Cfg, line: &str) -> String {
-    inline(cfg, line, 0, &mut Vec::new())
+    assemble(cfg, "", &[line], 0).0
 }
 
-fn inline(cfg: &Cfg, line: &str, depth: usize, seen: &mut Vec<String>) -> String {
-    let Some(e) = embed(line) else { return line.to_string() };
+/// Where one line of an assembled page came from: the note holding it, and its line number
+/// there. An embed's lines answer with the embedded note and its own numbering, so a reader
+/// who clicks a statement reaches the note that states it, not the longform that quotes it.
+pub type Src = (String, usize);
+
+/// A stretch of a note's lines with their embeds expanded, and one `Src` per line of the
+/// result. `from` is the index of `lines[0]` in `home`, so the numbers are the file's own.
+pub fn assemble(cfg: &Cfg, home: &str, lines: &[&str], from: usize) -> (String, Vec<Src>) {
+    let mut out: Vec<(String, Src)> = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        inline(cfg, l, &(home.to_string(), from + i + 1), 0, &mut Vec::new(), &mut out);
+    }
+    (out.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join("\n"),
+     out.into_iter().map(|(_, s)| s).collect())
+}
+
+fn inline(cfg: &Cfg, line: &str, at: &Src, depth: usize, seen: &mut Vec<String>,
+          out: &mut Vec<(String, Src)>) {
+    let Some(e) = embed(line) else { return out.push((line.to_string(), at.clone())) };
     // A missing embed is a hole in a paper: say so where it is, rather than drop the line.
-    let miss = |why: &str| format!("\n`{}` — {}\n", line.trim(), why);
-    if depth >= DEPTH { return miss("nested too deep") }
-    if seen.iter().any(|n| n == &e.note) { return miss("embeds itself") }
-    let Some(path) = find(cfg, &e.note) else { return miss("no such note") };
-    let Ok(text) = std::fs::read_to_string(&path) else { return miss("note unreadable") };
-    let body = match &e.section {
-        Some(h) => match section(&text, h) { Some(b) => b, None => return miss("no such section") },
-        None => text.lines().skip(front_len(&text)).collect::<Vec<_>>().join("\n").trim().to_string(),
+    let mut miss = |out: &mut Vec<(String, Src)>, why: &str| {
+        out.push((String::new(), at.clone()));
+        out.push((format!("`{}` — {}", line.trim(), why), at.clone()));
+        out.push((String::new(), at.clone()));
     };
-    if body.is_empty() { return miss("empty") }
+    if depth >= DEPTH { return miss(out, "nested too deep") }
+    if seen.iter().any(|n| n == &e.note) { return miss(out, "embeds itself") }
+    let Some(path) = find(cfg, &e.note) else { return miss(out, "no such note") };
+    let Ok(text) = std::fs::read_to_string(&path) else { return miss(out, "note unreadable") };
+    let (body, start) = match &e.section {
+        Some(h) => match section_at(&text, h) { Some(b) => b, None => return miss(out, "no such section") },
+        None => {
+            let rest: Vec<&str> = text.lines().skip(front_len(&text)).collect();
+            let skip = rest.iter().position(|l| !l.trim().is_empty()).unwrap_or(0);
+            (rest.join("\n").trim().to_string(), front_len(&text) + skip + 1)
+        }
+    };
+    if body.is_empty() { return miss(out, "empty") }
     seen.push(e.note.clone());
-    let body: Vec<String> = body.lines().map(|l| inline(cfg, l, depth + 1, seen)).collect();
+    let mut acc: Vec<(String, Src)> = Vec::new();
+    for (j, l) in body.lines().enumerate() {
+        inline(cfg, l, &(e.note.clone(), start + j), depth + 1, seen, &mut acc);
+    }
     seen.pop();
-    let body = labelled(e.label.as_deref(), body.join("\n").trim());
+    // what the trim did when a body was one string: a nested expansion pads its own ends
+    while acc.first().is_some_and(|(t, _)| t.trim().is_empty()) { acc.remove(0); }
+    while acc.last().is_some_and(|(t, _)| t.trim().is_empty()) { acc.pop(); }
+    labelled(e.label.as_deref(), &mut acc);
+    if let Some(lbl) = &e.label { close(lbl, &mut acc); }
     // Blank lines around it: in a longform the embeds sit on consecutive lines, and two
     // statements with no blank line between them would render as one paragraph.
-    format!("\n{}\n", body)
+    out.push((String::new(), at.clone()));
+    out.append(&mut acc);
+    out.push((String::new(), at.clone()));
 }
 
 /// The label a reader sees: "Definition." in bold, run into the first line, which is how the
-/// paper reads. A body that opens with a block of its own takes the label as its own line.
-fn labelled(label: Option<&str>, body: &str) -> String {
-    let Some(label) = label else { return body.to_string() };
+/// paper reads. A body that opens with a block of its own takes the label as its own line —
+/// which belongs to the embedded note too, so the label is clickable like the rest of it.
+fn labelled(label: Option<&str>, body: &mut Vec<(String, Src)>) {
+    let (Some(label), Some(first)) = (label, body.first().cloned()) else { return };
     let mut c = label.chars();
     let name: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
-    if body.starts_with(|c: char| "#->|*".contains(c)) || body.starts_with("$$") {
-        format!("**{}.**\n\n{}", name, body)
+    if first.0.starts_with(|c: char| "#->|*".contains(c)) || first.0.starts_with("$$") {
+        body.insert(0, (String::new(), first.1.clone()));
+        body.insert(0, (format!("**{}.**", name), first.1));
     } else {
-        format!("**{}.** {}", name, body)
+        body[0].0 = format!("**{}.** {}", name, first.0);
+    }
+}
+
+/// Where an embedded environment ends, for a reader who only sees it inlined and has no page
+/// boundary to tell it apart from the prose around it. A proof earns the usual tombstone; any
+/// other labelled block (a theorem, a definition...) a plainer mark — either way, appended to
+/// the last line it can safely join, or its own line when that would break a fence or a display.
+fn close(label: &str, body: &mut Vec<(String, Src)>) {
+    let mark = if label.eq_ignore_ascii_case("proof") { " ∎" } else { " □" };
+    let Some(last) = body.last_mut() else { return };
+    let risky = { let t = last.0.trim(); t == "$$" || t.starts_with("```") || t.ends_with("```") };
+    if risky {
+        let src = last.1.clone();
+        body.push((String::new(), src.clone()));
+        body.push((mark.trim().to_string(), src));
+    } else {
+        last.0.push_str(mark);
     }
 }
 
@@ -392,6 +451,37 @@ mod tests {
         assert!(out.contains("**Lemma.** from B") && out.contains("**Lemma.** from C"));
         assert!(out.contains("nested too deep"), "the fourth level is refused: {}", out);
         assert!(!out.contains("from A\n\n**Lemma.** from B\n\n**Lemma.** from C\n\n**Lemma.** from A"));
+    }
+
+    #[test]
+    fn assemble_tags_each_line_with_where_it_came_from() {
+        // A slice starting at file line 5 (`from` 0-based = 4), of a note "A" whose second
+        // line embeds a two-line section of a note "B" starting at B's own line 2.
+        let cfg = vault("srcs", &[("B", "# Statement\nfirst\nsecond\n")]);
+        let lines = ["intro line", "theorem::![[B#Statement]]"];
+        let (text, srcs) = assemble(&cfg, "A", &lines, 4);
+        let home = |n| ("A".to_string(), n);
+        let there = |n| ("B".to_string(), n);
+        assert_eq!(srcs, vec![home(5), home(6), there(2), there(3), home(6)]);
+        let got: Vec<&str> = text.lines().collect();
+        assert_eq!(got[0], "intro line");
+        assert_eq!(got[2], "**Theorem.** first");
+        assert_eq!(got[3], "second □");   // the close mark lands on B's own last line
+    }
+
+    #[test]
+    fn a_labelled_embed_is_closed_where_it_ends() {
+        let cfg = vault("closed", &[
+            ("A", "# Statement\nA network $G$.\n"),
+            ("B", "# Proof\nBy induction on depth.\n"),
+        ]);
+        let thm = expand(&cfg, "theorem::![[A#Statement]]");
+        assert!(thm.trim_end().ends_with("A network $G$. □"), "theorem gets a plain mark: {}", thm);
+        let proof = expand(&cfg, "proof::![[B#Proof]]");
+        assert!(proof.trim_end().ends_with("By induction on depth. ∎"), "proof gets a tombstone: {}", proof);
+        // an unlabelled embed names nothing to close
+        let cfg2 = vault("closed-plain", &[("A", "# Statement\nA network $G$.\n")]);
+        assert!(!expand(&cfg2, "![[A#Statement]]").contains('□'));
     }
 
     #[test]

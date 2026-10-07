@@ -33,9 +33,10 @@ them). They expect `facet` and the scripts in `bin/` on `~/.local/bin` (symlinks
     com.facet.engine   facet engine            the memory; owns ~/.optchat and its socket
     com.facet          facet serve             web pages + Telegram         127.0.0.1:8730
     com.facet.term     bin/facet-term          ttyd running `facet chat`    127.0.0.1:8731
-    com.facet.vault    bin/facet-vault-bridge  vault-phone (a separate note viewer; its
-                                               path is set in the plist) and its
-                                               feedback into the chat       127.0.0.1:8765
+    com.facet.vault    bin/facet-vault-bridge  vault-phone (a separate note viewer, kept
+                                               running but no longer needed: `/n/` and
+                                               `/m/` do the same reading and the same
+                                               tap-to-comment now)             127.0.0.1:8765
 
     bin/life           mail / calendar / web (used by Telegram /cal and /mail)
     bin/facet-scrub    length-preserving secret redaction over the chat log
@@ -59,8 +60,17 @@ One secret token in the path gates the web pages and the terminal (`token` in fa
 terminal script reads the same value from `~/.config/optchat-web/token`). Set `base_url`,
 `terminal_url` and `vault_phone` in facet.json to the published addresses, so pages and
 messages link to them. `vault_phone` is a link in the nav and on the home page only:
-wikilinks resolve on `/n/`, against the vault in `vault` — the vault-phone script is pointed
-at a vault of its own, and a link out of a doc answered 404 whenever the two differed.
+wikilinks resolve on `/n/`, against the vault in `vault` — the vault-phone script used to be
+pointed at a vault of its own, and a link out of a doc answered 404 whenever the two differed.
+
+There is one viewer, not two: vault-phone's own reading and tap-to-comment are still there (the
+job keeps running, and nothing stops it), but `/n/` and `/m/` now do both themselves, so facet
+no longer depends on it for either. Every block of a rendered note carries where it came from —
+`data-line`, and `data-note` for the note itself, which through an embed is not the page's own
+note but the one the embed quotes (see **a longform**, below). A double-click (double-tap) on
+one asks what to say about it and sends it through the ordinary `POST /x/send`, shaped
+`[[Note]] L<line>: "quoted line text"` followed by what was typed, so it reads the same as a
+reply typed by hand.
 
 Web pages (`facet serve`, all under `/<token>`):
 
@@ -71,6 +81,8 @@ Web pages (`facet serve`, all under `/<token>`):
     /m/                published notes; /m/<slug> one note
     /n/<note>          any note of the vault by its own name, read-only; `?h=<section>` one
                        section of it. Where every `[[wikilink]]` goes
+                       both carry `data-line`/`data-note` on every block (a double-click
+                       comments on it, into `POST /x/send`, below)
     /d/                open comments on notes
     POST /x/send       a message into the conversation (form field `text`; `later=1`: a turn of
                        its own; in the box, Enter sends, Shift-Enter sends later, Alt-Enter is
@@ -515,13 +527,23 @@ cache claim above from request usage; with `ANTHROPIC_BASE_URL` at a logging pro
 A longform keeps its prose in one note and every statement and proof in a note of its own,
 embedded on a line of the vault's own form, `proposition::![[Range cover#Statement]]`. Markdown
 renders such a line as literal text — the `!` stops even the wikilink extension — so the page
-assembles it instead: the line is replaced by the section it names, under a bold run-in label
-("Proposition."), three levels deep at most, and an embed that resolves to nothing says so
-where it stands rather than vanishing. Which header forms count and where a section ends
-(the next header of the same or a higher level, the header line itself left out) are the
-vault's own rules, from its `Scripts/read_section_rust`. A line's text is expanded only as it
-is rendered, never before the blocks are cut, so a comment anchored to an embed line still
+assembles it instead (`doc::assemble`): the line is replaced by the section it names, under a
+bold run-in label ("Proposition."), three levels deep at most, and an embed that resolves to
+nothing says so where it stands rather than vanishing. A labelled embed is also closed where it
+ends — a tombstone (∎) for a proof, a plainer mark (□) for anything else — so a reader meets the
+boundary an inlined block has no page break to show. Which header forms count and where a
+section ends (the next header of the same or a higher level, the header line itself left out)
+are the vault's own rules, from its `Scripts/read_section_rust`. A line's text is expanded only
+as it is rendered, never before the blocks are cut, so a comment anchored to an embed line still
 lands beside it.
+
+Assembly keeps one more thing besides the text: which note, and which line of it, each
+assembled line came from (`doc::Src`) — the embedded note's own line once a line is inside an
+embed, not the longform quoting it. Rendering carries this through by asking comrak for its own
+`data-sourcepos` (`render.sourcepos`) and rewriting each block's copy of it into `data-line`/
+`data-note`, rather than keeping a second line-count of its own; a wikilink's `href` is found
+the same way regardless of which attribute comes first in the tag, since `data-sourcepos` (or
+the rewritten `data-line`) usually comes before it now.
 
 ## state
 

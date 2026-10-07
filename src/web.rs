@@ -51,11 +51,13 @@ textarea{flex:1;resize:none;background:#0f1115;color:var(--fg);border:1px solid 
  border-radius:8px;padding:9px 11px;font:15px/1.4 inherit;max-height:40vh}
 #toast{max-width:46rem;margin:4px auto 0;font-size:12.5px;color:var(--dim);min-height:1em}
 .katex{font-size:1.02em}.katex-display{overflow-x:auto;overflow-y:hidden}
+[data-line]:hover{outline:1px dashed var(--line);outline-offset:2px;cursor:text}
 </style></head><body>
 <header>{{NAV}}<span class=sp></span><span class=at>{{STATUS}}</span></header>
 <main>{{BODY}}</main>
 {{FOOT}}
 <script>
+var TOK="{{TOK}}";
 function mathify(r){r.querySelectorAll('span[data-math-style]').forEach(function(s){
   if(s.dataset.k)return; s.dataset.k=1;
   try{katex.render(s.textContent,s,{displayMode:s.dataset.mathStyle=='display',throwOnError:false})}
@@ -74,6 +76,20 @@ document.addEventListener('keydown',function(e){
   var f=e.target.form;f.elements.later.value=e.shiftKey?'1':'0';
   htmx.trigger(f,'submit');});
 document.addEventListener('htmx:afterRequest',function(e){var l=e.target.elements&&e.target.elements.later;if(l)l.value='0'});
+// A double-click (double-tap) on any rendered line of a note — comment cards, chat and the
+// compose box excluded — asks what to say about it, then sends through the same `/x/send`
+// a message typed by hand would, shaped the way a reply quoting a line always is.
+document.addEventListener('dblclick',function(e){
+  if(e.target.closest('a,form,button,textarea,.diag'))return;
+  var b=e.target.closest('[data-line]');if(!b||!b.dataset.note)return;
+  var quote=(b.textContent||'').trim().replace(/\s+/g,' ').slice(0,160);
+  var where='[['+b.dataset.note+']] L'+b.dataset.line+(quote?': "'+quote+'"':'');
+  var said=prompt(where+'\n\nSay what to change:');
+  if(!said)return;
+  var body='text='+encodeURIComponent(where+'\n'+said)+'&later=1';
+  fetch(TOK+'/x/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
+    .then(function(r){return r.text()}).then(function(t){var el=document.getElementById('toast');if(el)el.textContent=t});
+});
 </script></body></html>"#;
 
 fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> String {
@@ -115,12 +131,9 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
 /// own script was pointed at, so a link out of a doc answered 404 whenever the two differed.
 fn note_base(cfg: &Cfg) -> String { format!("{}/n/", cfg.token_path()) }
 
-/// A note's lines with their vault embeds expanded. Mapped line by line, and as late as it
-/// can be: `note_html` cuts blocks and anchors comment cards by source line number, so the
-/// text of a line may change on the way out but its number never does.
-fn expanded(cfg: &Cfg, lines: &[&str]) -> String {
-    lines.iter().map(|l| doc::expand(cfg, l)).collect::<Vec<_>>().join("\n")
-}
+/// The name a wikilink or an embed uses for this note — its file stem, the same key `doc::find`
+/// matches against — so a block rendered from it tags itself the way a click handler expects.
+fn home_of(d: &doc::Doc) -> String { d.path.file_stem().unwrap_or_default().to_string_lossy().to_string() }
 
 fn msg_html(cfg: &Cfg, m: &log::Msg) -> String {
     let base = note_base(cfg);
@@ -187,14 +200,19 @@ fn diag_card(cfg: &Cfg, d: &diag::Diag, show_where: bool, quote: bool) -> String
 fn note_html(cfg: &Cfg, d: &doc::Doc) -> String {
     let ds = diag::for_note(cfg, &d.path);
     let base = note_base(cfg);
+    let home = home_of(d);
     let lines: Vec<&str> = d.text.split('\n').collect();
     let skip = doc::front_len(&d.text);     // frontmatter is metadata, not prose
-    if ds.is_empty() { return md::render(&expanded(cfg, &lines[skip.min(lines.len())..]), &base) }
+    if ds.is_empty() {
+        let (text, srcs) = doc::assemble(cfg, &home, &lines[skip.min(lines.len())..], skip);
+        return md::render_at(&text, &base, &srcs);
+    }
     let mut out = String::new();
     let (mut start, mut fence, mut math) = (skip, false, false);
     let mut emit = |out: &mut String, a: usize, b: usize| {
         if a >= b { return }
-        out.push_str(&md::render(&expanded(cfg, &lines[a..b]), &base));
+        let (text, srcs) = doc::assemble(cfg, &home, &lines[a..b], a);
+        out.push_str(&md::render_at(&text, &base, &srcs));
         for g in ds.iter().filter(|g| g.line - 1 >= a as i64 && g.line - 1 < b as i64) {
             out.push_str(&diag_card(cfg, g, false, false));
         }
@@ -225,9 +243,10 @@ fn note_html(cfg: &Cfg, d: &doc::Doc) -> String {
 /// One `#`-section of a note: what `[[Note#Section]]` asks for, as `?h=`. No comment cards
 /// here — their line numbers are the whole file's, and a section does not start where it does.
 fn section_html(cfg: &Cfg, d: &doc::Doc, h: &str) -> String {
-    let Some(s) = doc::section(&d.text, h) else { return note_html(cfg, d) };
+    let Some((s, start)) = doc::section_at(&d.text, h) else { return note_html(cfg, d) };
     let lines: Vec<&str> = s.split('\n').collect();
-    format!("<h2>{}</h2>{}", md::esc(h), md::render(&expanded(cfg, &lines), &note_base(cfg)))
+    let (text, srcs) = doc::assemble(cfg, &home_of(d), &lines, start - 1);
+    format!("<h2>{}</h2>{}", md::esc(h), md::render_at(&text, &note_base(cfg), &srcs))
 }
 
 /// Any note of the vault, read-only, on the same page as a published one. Wikilinks in docs,
