@@ -19,10 +19,18 @@ const PRECAP: usize = 2500;     // whole prelude
 
 fn buffer() -> std::path::PathBuf { cfg::dir().join("buffer.jsonl") }
 
+// A long poll held open across a machine sleep leaves a socket that is dead but never closed:
+// without a cap the read blocks forever, the inbound thread is gone, and nothing says so —
+// outbound keeps pushing, so the bridge looks alive while receiving nothing. The cap turns
+// that into an error the loop retries. It must clear POLL, or every poll is a timeout.
+const WAIT: Duration = Duration::from_secs(45);
+const POLL: i64 = 20;
+
 fn api(cfg: &Cfg, method: &str, body: Value) -> Result<Value, String> {
     let tok = cfg.opt("telegram.bot_token").ok_or("no telegram.bot_token")?;
     let url = format!("https://api.telegram.org/bot{}/{}", tok, method);
-    let mut r = ureq::post(&url).send_json(&body).map_err(|e| e.to_string())?;
+    let mut r = ureq::post(&url).config().timeout_global(Some(WAIT)).build()
+        .send_json(&body).map_err(|e| e.to_string())?;
     let text = r.body_mut().read_to_string().map_err(|e| e.to_string())?;
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
@@ -173,11 +181,23 @@ fn inbound(cfg: Cfg) {
         st["tg_offset"] = Value::from(newest.map(|i| i + 1).unwrap_or(0));
         cfg::put_state(&st);
     }
+    // Silence was the bug: a stalled bridge must say so once, and say when it is back.
+    let mut down = false;
     loop {
         let mut st = cfg::state();
         let offset = st["tg_offset"].as_i64().unwrap_or(0);
-        let r = api(&cfg, "getUpdates", json!({"offset": offset, "timeout": 20}));
-        let Ok(v) = r else { std::thread::sleep(Duration::from_secs(5)); continue };
+        let r = api(&cfg, "getUpdates", json!({"offset": offset, "timeout": POLL}));
+        let v = match r {
+            Ok(v) => {
+                if down { eprintln!("[{}] telegram: receiving again", crate::stamp()); down = false }
+                v
+            }
+            Err(e) => {
+                if !down { eprintln!("[{}] telegram: not receiving: {}", crate::stamp(), e); down = true }
+                std::thread::sleep(Duration::from_secs(5));
+                continue
+            }
+        };
         for up in v["result"].as_array().into_iter().flatten() {
             let id = up["update_id"].as_i64().unwrap_or(0);
             st["tg_offset"] = Value::from(id + 1);
