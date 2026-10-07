@@ -1,5 +1,6 @@
 // One line per API request in <dir>/usage.jsonl: {date, kind, model, usage}. kind is
-// compact | prime | turn. The same format the previous engine wrote, so its history counts.
+// compact | prime | turn | agent (a subagent's own request, §9). The same format the previous
+// engine wrote, so its history counts.
 //
 // "eq" is the request's cost in input-token equivalents at API price ratios:
 // in + 0.1 read + 1.25 write(5m) + 2 write(1h) + 5 out. On a subscription it is a proxy for

@@ -7,6 +7,9 @@
 #
 # Turn script, taken from the last text block of the first user message:
 #   "TOOLS n"  -> n tool steps of 0.6 s each, then a reply "done"
+#   "AGENT"    -> one subagent: the Agent tool call, the task events, two of the subagent's
+#                 own requests (assistant messages carrying parent_tool_use_id, never
+#                 streamed, as measured on the real CLI), then its report as a tool result
 #   otherwise  -> one reply "ok"
 # Compactor (no --tools): replies 600 bytes first, then 300 bytes after the size feedback,
 # unless the step contains "STUBBORN" (always 600). "REFUSE" makes it fail.
@@ -84,10 +87,35 @@ if compactor:
     sys.exit(0)
 
 # master turn
+def run_agent():
+    tid = "toolu_agent_%f" % time.time()
+    step([{"type": "tool_use", "id": tid, "name": "Agent",
+           "input": {"description": "look it up", "prompt": "find the thing" + "." * 50,
+                     "subagent_type": "general-purpose"}}], stop="tool_use")
+    out({"type": "system", "subtype": "task_started", "task_id": "task_fake_1", "tool_use_id": tid,
+         "description": "look it up", "subagent_type": "general-purpose", "spawn_depth": 1,
+         "task_type": "local_agent", "prompt": "find the thing"})
+    # the subagent's own two requests: its usage rides on `assistant`, not on a stream_event
+    out({"type": "assistant", "parent_tool_use_id": tid,
+         "message": {"model": "fake-model", "usage": usage(0, 4000),
+                     "content": [{"type": "tool_use", "id": "sub1", "name": "Bash", "input": {"command": "grep -r thing"}}]}})
+    out({"type": "user", "parent_tool_use_id": tid,
+         "message": {"content": [{"type": "tool_result", "tool_use_id": "sub1", "content": "found in three files"}]}})
+    out({"type": "assistant", "parent_tool_use_id": tid,
+         "message": {"model": "fake-model", "usage": usage(4000, 20),
+                     "content": [{"type": "text", "text": "SUBAGENT PROSE, not the chat's business"}]}})
+    out({"type": "system", "subtype": "task_notification", "task_id": "task_fake_1", "tool_use_id": tid,
+         "status": "completed", "summary": "found it",
+         "usage": {"total_tokens": 4321, "tool_uses": 1, "duration_ms": 1234}})
+    time.sleep(0.2)
+    out({"type": "user", "message": {"content": [{"tool_use_id": tid, "type": "tool_result",
+         "content": [{"type": "text", "text": "REPORT: the thing is in three files"}]}]}})
+
 def run_turn(msg):
     if replay: out({"type": "user", "isReplay": True, "message": msg["message"]})
     t = text_of(msg)
     n = int(t.split("TOOLS ")[1].split()[0]) if "TOOLS " in t else 0
+    if "AGENT" in t: run_agent()
     for k in range(n):
         tid = "tool%d_%f" % (k, time.time())
         step([{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "sleep %d" % k}}], stop="tool_use")

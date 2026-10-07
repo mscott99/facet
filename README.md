@@ -209,7 +209,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     does not start them and cannot talk to one while it runs. Every event carrying a
     `parent_tool_use_id` is dropped, so a subagent's own calls, results and prose never enter
     the log: what is remembered is the report it hands back, logged as one message of kind
-    `work` (the gist's own kind for it). Its tokens are metered into the turn that sent it.
+    `work` (the gist's own kind for it).
     Exploration that would have been twenty tool/echo pairs in the log costs one line.
     MASTER therefore prefers a subagent by default for reading, searching and surveying, and
     keeps the agent's own hands on anything that changes something or whose next step depends
@@ -218,6 +218,19 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     four tool calls is eight messages, so delegating it saves about a dollar of compaction and
     pays the subagent's own reads once, out of a fresh context instead of the turn's growing
     one. The report is a message too: a transcript handed back buys nothing.
+
+    The subagent pays for itself in log bytes, and that is exactly why its own spending has to
+    be counted: dropping its events would otherwise drop its tokens too. A subagent's requests
+    are not streamed (no `stream_event` ever carries a `parent_tool_use_id`; its usage arrives
+    on the `assistant` message instead), so the turn's meter never saw them and the usage log
+    understated them completely. Each of its messages is now metered as one request of kind
+    `agent`, so `/usage` prices delegation apart from the turn that sent it, and each subagent
+    leaves one `agent` record in events.jsonl: what it was asked (`ask_bytes`), what it spent
+    (`reqs`, `eq`, and Claude Code's own `tokens`, `tools`, `task_ms`), what the chat now
+    carries (`report_bytes`), and whether it finished. The turn record totals the same per turn
+    (`agents`, `agent_reqs`, `agent_eq`, `agent_bytes`). So the question the default answers by
+    assumption — how much to send out versus do here — becomes measurable: the subagent's own
+    eq against the compaction its report avoided, over real turns.
 
 20. *The view has two limits, and the cache marks sit under the budget (§5.2, §8).* The gist
     collapses whenever the view is over its budget, which in practice is nearly every append:
@@ -312,14 +325,20 @@ the engine's work, never read back by it; a write that fails is dropped silently
 
     engine   start: pid, exe, dir, messages, nodes, view_lines, view_bytes, startup_ms,
              load_notes (torn lines etc. found at load), conf (the settings in force)
-    req      one API request: kind (turn | prime | compact), model, usage, eq, ms, cc (Claude
-             Code version), and what it was for: turn + step | turn + pieces (prime) |
-             node ("id+n") + try
+    req      one API request: kind (turn | prime | compact | agent), model, usage, eq, ms, cc
+             (Claude Code version), and what it was for: turn + step | turn + pieces (prime) |
+             node ("id+n") + try | agent (tool_use_id) + agent_kind + step (subagent)
     turn     one fresh call: first, last (message ids), messages_in, settle_ms (waiting for
              summaries), ms, steps, primed, prime_read, prime_write, midrun_delivered,
              queue_after, outcome (done | cancelled | error), model, effort, view_bytes,
              view_lines, view_marks, shared_bytes (prefix shared with the previous turn's
-             view), shared_to_mark (the last cache mark inside that prefix)
+             view), shared_to_mark (the last cache mark inside that prefix), and what its
+             subagents cost: agents, agent_reqs, agent_eq, agent_bytes (reports logged)
+    agent    one subagent, from the tool call that sent it to the report it handed back:
+             tool_use_id, task, agent_kind (subagent_type), description, status, ask_bytes
+             (the prompt it was given), report_bytes (what the chat now carries), reqs and eq
+             (ours, counted from its own messages), tokens, tools, task_ms (Claude Code's own
+             account of the task), ms (wall time in the turn)
     node     one compactor node: node, l, i, ok, kept (bytes), tries (bytes of every try),
              error, limit, requests, ms, gate_ms (waiting for another call's cache write),
              context_bytes, step_bytes, blocks, marks
@@ -335,6 +354,7 @@ Questions it answers, for example:
     jq -c 'select(.ev=="turn") | {first, ms, steps, outcome, settle_ms}' events.jsonl
     jq -s '[.[] | select(.ev=="req")] | group_by(.kind) | map({kind: .[0].kind, eq: (map(.eq) | add)})' events.jsonl
     jq -c 'select(.ev=="node" and (.tries | length) > 1) | {node, tries}' events.jsonl
+    jq -c 'select(.ev=="agent") | {agent_kind, eq, reqs, report_bytes, ms}' events.jsonl
     jq -c 'select(.ev=="limits") | {t, s: .info.unifiedWindows.five_hour.utilization}' events.jsonl
 
 **Service logs** (LaunchAgents; paths set in the plists): `facet serve` →

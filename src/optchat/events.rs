@@ -10,6 +10,8 @@
 //   turn     one fresh call: message ids, settle wait, view size and how much of it the previous
 //            turn's view shared (the cache's chance), steps, duration, how it ended
 //   node     one compactor node: tries' sizes, the kept size, gate wait, duration, failure
+//   agent    one subagent: what it was asked, its requests and tokens (its own steps never
+//            reach the chat, so this is the only place they are counted), its report's size
 //   limits   the subscription's rate_limit_info, each time it changes
 //   input    a message arrived: how it was taken (starting / queued / held / delivered)
 //   system   a new system prompt version (its text is stored once, by hash, beside the log)

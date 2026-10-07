@@ -15,7 +15,7 @@ use super::claude::{self, Meter, Proc, Tick};
 use super::engine::{state_dir, Engine};
 use super::{prompts, view, CAP};
 use serde_json::{json, Value};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::process::ChildStdin;
 use std::sync::mpsc::RecvTimeoutError;
@@ -130,6 +130,29 @@ impl State {
 struct Trace {
     first: usize, steps: usize, primed: bool, prime_read: u64, prime_write: u64,
     delivered: usize, requeued: usize, outcome: &'static str,
+    /// subagents sent out this turn, their requests, and what they cost (§9)
+    agents: usize, agent_reqs: usize, agent_eq: f64, agent_bytes: usize,
+}
+
+/// One subagent, from the tool call that sent it to the report it hands back. Its own
+/// requests never reach the chat, so nothing downstream can see them: they are counted
+/// here, logged as `agent` in usage.jsonl and as one `agent` record in events.jsonl, so
+/// delegating can later be weighed against doing the same work in the turn (§19).
+struct Agent {
+    kind: String, desc: String, task: String, ask: usize,
+    at: Instant, reqs: usize, eq: f64, tokens: u64, tools: u64, ms: u64, status: String,
+}
+
+impl Agent {
+    fn new(input: &Value) -> Self {
+        Agent {
+            kind: input["subagent_type"].as_str().unwrap_or("").into(),
+            desc: input["description"].as_str().unwrap_or("").into(),
+            task: String::new(), ask: input["prompt"].as_str().unwrap_or("").len(),
+            at: Instant::now(), reqs: 0, eq: 0.0, tokens: 0, tools: 0, ms: 0,
+            status: "unfinished".into(),
+        }
+    }
 }
 
 /// A user message from any route (§7: "on user input text").
@@ -224,6 +247,8 @@ fn run(e: &Arc<Engine>) {
             "settle_ms": settle_ms, "ms": tc.elapsed().as_millis(), "steps": tr.steps, "primed": tr.primed,
             "prime_read": tr.prime_read, "prime_write": tr.prime_write, "midrun_delivered": tr.delivered,
             "queue_after": tr.requeued, "outcome": tr.outcome, "model": e.model(), "effort": e.conf.effort,
+            "agents": tr.agents, "agent_reqs": tr.agent_reqs, "agent_eq": tr.agent_eq.round(),
+            "agent_bytes": tr.agent_bytes,
         });
         if let (Some(r), Some(v)) = (rec.as_object_mut(), vstats.as_object()) { for (k, x) in v { r.insert(k.clone(), x.clone()); } }
         super::events::log(&e.dir, "turn", rec);
@@ -359,7 +384,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     let mut meter = Meter::default();
     let mut replays = 0usize;
     let mut deferred: Vec<String> = Vec::new();
-    let mut agents: HashSet<String> = HashSet::new(); // live subagent tool ids
+    let mut agents: HashMap<String, Agent> = HashMap::new(); // live subagents, by tool id
     let mut checked_tools = false;
     let mut killed = false;
     let (mut cc, mut tq) = (String::new(), Instant::now());
@@ -384,15 +409,46 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
         }
         // A subagent's own steps are not the chat: its calls, results and prose carry
         // `parent_tool_use_id` and are dropped here, so the log keeps the one report it
-        // hands back (a top-level tool result) and nothing else. Its tokens are already
-        // metered above.
-        if ev["parent_tool_use_id"].is_string() { continue }
+        // hands back (a top-level tool result) and nothing else. They are not streamed
+        // either (no `stream_event` carries a parent), so the meter above never sees them:
+        // each of the subagent's messages is one request, and is counted here instead.
+        if let Some(id) = ev["parent_tool_use_id"].as_str() {
+            if ev["type"] == "assistant" {
+                let m = &ev["message"];
+                let r = claude::Req { model: m["model"].as_str().unwrap_or("").into(), usage: m["usage"].clone() };
+                let eq = super::usage::eq(&r.usage);
+                e.spend("agent", &r);
+                tr.agent_reqs += 1;
+                tr.agent_eq += eq;
+                let (kind, step) = match agents.get_mut(id) {
+                    Some(a) => { a.reqs += 1; a.eq += eq; (a.kind.clone(), a.reqs) }
+                    None => (String::new(), 0), // a subagent's own subagent: counted, not traced
+                };
+                super::events::req(&e.dir, "agent", &r, &cc, 0, json!({"turn": tr.first, "agent": id, "agent_kind": kind, "step": step}));
+            }
+            continue;
+        }
         match ev["type"].as_str().unwrap_or("") {
             "system" if ev["subtype"] == "init" && !checked_tools => {
                 checked_tools = true;
                 let tools = ev["tools"].as_array().cloned().unwrap_or_default();
                 if !tools.iter().any(|t| t.as_str().is_some_and(|s| s.ends_with("zoom"))) {
                     e.notice("WARNING: the zoom tool is not available to the model (MCP not connected)");
+                }
+            }
+            // Claude Code's own account of a subagent: its id and type when it starts, and
+            // its tokens, tool calls and duration when it ends. Kept beside our own count.
+            "system" if ev["subtype"] == "task_started" || ev["subtype"] == "task_notification" => {
+                let id = ev["tool_use_id"].as_str().unwrap_or("");
+                if let Some(a) = agents.get_mut(id) {
+                    if let Some(t) = ev["task_id"].as_str() { a.task = t.into(); }
+                    if let Some(k) = ev["subagent_type"].as_str() { a.kind = k.into(); }
+                    if let Some(d) = ev["description"].as_str() { if a.desc.is_empty() { a.desc = d.into(); } }
+                    if let Some(s) = ev["status"].as_str() { a.status = s.into(); }
+                    let u = &ev["usage"];
+                    a.tokens = u["total_tokens"].as_u64().unwrap_or(a.tokens);
+                    a.tools = u["tool_uses"].as_u64().unwrap_or(a.tools);
+                    a.ms = u["duration_ms"].as_u64().unwrap_or(a.ms);
                 }
             }
             "stream_event" => {
@@ -417,7 +473,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                             e.log("tool", &line);
                             let name = b["name"].as_str().unwrap_or("");
                             if name == "Task" || name == "Agent" {
-                                if let Some(id) = b["id"].as_str() { agents.insert(id.to_string()); }
+                                if let Some(id) = b["id"].as_str() { agents.insert(id.to_string(), Agent::new(&b["input"])); }
                             }
                             let mut t = e.turn.lock().unwrap();
                             if let Some(id) = b["id"].as_str() { t.pending.insert(id.into()); }
@@ -450,8 +506,11 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                     if b["type"] != "tool_result" { continue }
                     let id = b["tool_use_id"].as_str().unwrap_or("");
                     // a subagent's report is the one thing it leaves behind: its own kind (§9)
-                    let kind = if agents.remove(id) { "work" } else { "echo" };
-                    e.log(kind, &cap(&result_text(&b["content"])));
+                    let sent = agents.remove(id);
+                    let kind = if sent.is_some() { "work" } else { "echo" };
+                    let text = cap(&result_text(&b["content"]));
+                    if let Some(a) = sent { done(e, &a, id, &text, tr); }
+                    e.log(kind, &text);
                     if !id.is_empty() { e.turn.lock().unwrap().pending.remove(id); }
                 }
                 if e.turn.lock().unwrap().pending.is_empty() {
@@ -469,6 +528,9 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
         }
     }
     for m in deferred.drain(..) { e.log("user", &m); }
+    // a subagent whose report never came back (the call ended or was killed first) still spent
+    let left: Vec<(String, Agent)> = agents.drain().collect();
+    for (id, a) in left { done(e, &a, &id, "", tr); }
     let mut t = e.turn.lock().unwrap();
     t.stdin = None;
     t.pending.clear();
@@ -484,6 +546,22 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     if killed && !cancel { e.notice("messages that arrived after the last tool call go to a fresh call"); }
     if !killed { p.finish(); }
     if let Some(r) = meter.take() { e.spend("turn", &r); }
+}
+
+/// One subagent, finished (or cut off with the call): what it was asked, what it cost, and
+/// the one thing it leaves in the chat. `eq` and `reqs` are ours, counted from its messages;
+/// `tokens`, `tools` and `ms` are Claude Code's own account of the task. `report` is what the
+/// chat has to carry afterwards, the number to weigh against the tool and result messages the
+/// same work would have logged had the turn done it itself (§19).
+fn done(e: &Arc<Engine>, a: &Agent, id: &str, report: &str, tr: &mut Trace) {
+    tr.agents += 1;
+    tr.agent_bytes += report.len();
+    super::events::log(&e.dir, "agent", json!({
+        "turn": tr.first, "tool_use_id": id, "task": a.task, "agent_kind": a.kind,
+        "description": a.desc, "status": a.status, "ask_bytes": a.ask, "report_bytes": report.len(),
+        "reqs": a.reqs, "eq": a.eq.round(), "tokens": a.tokens, "tools": a.tools,
+        "task_ms": a.ms, "ms": a.at.elapsed().as_millis(),
+    }));
 }
 
 fn result_text(c: &Value) -> String {

@@ -35,6 +35,18 @@ def log():
 def fake():
     return [json.loads(l) for l in open(FAKE_LOG)] if os.path.exists(FAKE_LOG) else []
 
+def events():
+    """The engine's introspection log: its state directory is named by a hash of D, so it is
+    found by the `engine` record that names the directory it was started for."""
+    import glob
+    for p in glob.glob(os.path.join(os.environ["HOME"], ".local/share/facet/engine-*/events.jsonl")):
+        for line in open(p):
+            v = json.loads(line)
+            if v.get("ev") != "engine": continue
+            if v.get("dir") == D: return [json.loads(l) for l in open(p)]
+            break  # some other engine's log
+    return []
+
 def wait(pred, secs, what):
     t = time.time()
     while time.time() - t < secs:
@@ -220,8 +232,33 @@ try:
     check(len(notes) == 1 and notes[0]["text"] == "during a turn" and new[-1]["kind"] == "note",
           "a queued import is logged once, after the turn's messages")
 
+    # G: a subagent: its steps stay out of the chat, its cost does not stay out of the log
+    n0 = len(log())
+    req({"op": "send", "text": "AGENT please"})
+    wait(lambda: any(m["kind"] == "talk" for m in log()[n0:]), 30, "reply after the subagent")
+    wait(idle, 60, "idle after the subagent turn")
+    L = log()[n0:]
+    work = [m for m in L if m["kind"] == "work"]
+    check(len(work) == 1 and work[0]["text"].startswith("REPORT:"), "the subagent's report is logged, as kind work")
+    check(not any("SUBAGENT PROSE" in m["text"] or "grep -r thing" in m["text"] for m in L),
+          "the subagent's own steps and prose are not logged")
+    ev = events()
+    a = [x for x in ev if x["ev"] == "agent"]
+    check(len(a) == 1 and a[0]["reqs"] == 2 and a[0]["eq"] > 0 and a[0]["status"] == "completed",
+          "one agent record, with the requests we counted: %r" % (a[-1] if a else None))
+    check(a and a[0]["tokens"] == 4321 and a[0]["tools"] == 1 and a[0]["task_ms"] == 1234
+          and a[0]["report_bytes"] == len(work[0]["text"]) and a[0]["ask_bytes"] > 0 and a[0]["task"] == "task_fake_1",
+          "the agent record keeps what it was asked, what it cost and what it left behind")
+    ar = [x for x in ev if x["ev"] == "req" and x["kind"] == "agent"]
+    check(len(ar) == 2 and all(x["agent"].startswith("toolu_agent") for x in ar),
+          "each subagent request is logged on its own, under the agent that made it (%d)" % len(ar))
+    t = [x for x in ev if x["ev"] == "turn"][-1]
+    check(t["agents"] == 1 and t["agent_reqs"] == 2 and t["agent_eq"] > 0 and t["agent_bytes"] == len(work[0]["text"]),
+          "the turn record totals what its subagents cost")
+
     u = [json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))]
-    check({"compact", "prime", "turn"} <= {x["kind"] for x in u}, "usage logged per request for compact, prime and turn")
+    check({"compact", "prime", "turn", "agent"} <= {x["kind"] for x in u}, "usage logged per request for compact, prime, turn and agent")
+    check(sum(1 for x in u if x["kind"] == "agent") == 2, "a subagent's own requests are priced apart from the turn's")
     check(os.path.isdir(os.path.join(D, ".git")), "chat directory committed after turns")
 finally:
     eng.kill()
