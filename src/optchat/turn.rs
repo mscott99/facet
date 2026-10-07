@@ -315,6 +315,10 @@ fn args(e: &Engine) -> Vec<String> {
     let mut a = claude::base_args(&e.model(), &e.conf.effort, &f.to_string_lossy(), &e.conf.tools);
     let mcp = json!({"mcpServers": {"optchat": {"type": "http", "url": e.mcp_url.get().cloned().unwrap_or_default()}}});
     a.extend(["--mcp-config".into(), mcp.to_string(), "--permission-mode".into(), e.conf.permission.clone(), "--replay-user-messages".into()]);
+    // Subagents run on the cheap model (§9): they read a lot and write one short report.
+    if e.conf.tools.contains("Task") && !e.conf.agent_model.is_empty() {
+        a.extend(["--agents".into(), prompts::agents(&e.conf.name, &e.conf.agent_model)]);
+    }
     if e.conf.safe_mode { a.push("--safe-mode".into()); }
     a
 }

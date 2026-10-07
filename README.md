@@ -115,7 +115,7 @@ Ctrl-J is a new line; Ctrl-C or Ctrl-D leaves (the engine and a running turn car
 `/resume`, `/stats`, `/status`, `/quit`. A mistyped `/command` is refused, never sent.
 
 Settings live under `chat` in facet.json (all optional): `model` (opus), `effort` (high),
-`compact_model` (sonnet), `compact_effort` (medium), `tools`, `permission`
+`compact_model` (sonnet), `compact_effort` (medium), `agent_model` (sonnet), `tools`, `permission`
 (bypassPermissions), `cwd` (~), `instructions` (~/.optchat/instructions.md, appended to the
 system prompt), `cache_ttl` (5m), `prime` (true), `budget_hour_eq` (0 = none), `claude`
 (path to the binary). `/model` overrides `model`, and is kept across restarts.
@@ -218,6 +218,14 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     four tool calls is eight messages, so delegating it saves about a dollar of compaction and
     pays the subagent's own reads once, out of a fresh context instead of the turn's growing
     one. The report is a message too: a transcript handed back buys nothing.
+
+    A subagent runs on the cheap model (`agent_model`, sonnet): reading a lot and writing one
+    short report is work a smaller model does well, and paying the big model's rate for it
+    would undo the saving. `--agents` redefines Claude Code's own `general-purpose` and
+    `Explore` rather than adding a name, so whichever one the master picks is the cheap one,
+    with the AGENT prompt (no view, no follow-up, report that stands alone, read-only unless
+    told otherwise) and reading tools only. Verified against the CLI: the turn stays on opus
+    while the subagent's requests come back as sonnet.
 
     The subagent pays for itself in log bytes, and that is exactly why its own spending has to
     be counted: dropping its events would otherwise drop its tokens too. A subagent's requests

@@ -21,12 +21,13 @@ is killed when your reply ends. Run long tasks in the foreground, or tell
 the user they won't persist.
 
 A subagent is the cheapest memory you have: its own steps never enter
-the log, only the one report it hands back, and it reads without carrying
-the view. Send one by default for work that is looking rather than
-doing: searching, reading, exploring, surveying a tree, checking a
-hunch, confirming a fact. Send several at once when the questions are
-independent. Ask each for the findings and where they came from, not a
-transcript. Do the work yourself when the steps are the point: edits,
+the log, only the one report it hands back, it reads without carrying
+the view, and it runs on a smaller model than you. Send one by default
+for work that is looking rather than doing: searching, reading,
+exploring, surveying a tree, checking a hunch, confirming a fact. Send
+several at once when the questions are independent. It cannot see the
+chat, so put everything it needs in the task, and ask for the findings
+and where they came from, not a transcript. Do the work yourself when the steps are the point: edits,
 commits, anything that changes something, anything where you must see
 one result to choose the next, or the user waits on each one.";
 
@@ -117,6 +118,39 @@ pub const SCALE: &str = "user: wants the parser rewritten as a Pratt loop, keep 
 
 pub const ZOOM_DOC: &str = "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.";
 pub const DATE_DOC: &str = "The date and time of message id.";
+
+/// What a subagent is told (§9). It has no view and no memory of the chat: the task
+/// it is given is all it knows, so it is asked for a self-contained answer.
+pub const AGENT: &str = "\
+You are a subagent of {NAME}, an agent that works for one user. You are
+given one question or errand and nothing else: you cannot see the chat,
+and you will not be asked a follow-up.
+
+Answer the question you were given, then report. The report is all that
+survives you, so it must stand on its own: the finding, where it came
+from (paths, line numbers, commands, URLs), exact quotes and exact
+numbers where exactness matters, and plainly what you could not
+determine or had to assume. No narration of your steps, no summary of
+your reasoning, no offer to continue. Be brief but leave nothing out
+that the answer depends on.
+
+You read and search; you do not change the user's files, repositories or
+state unless the task says to in so many words.";
+
+/// Claude Code's own subagents, redefined to run a cheaper model: a subagent reads a
+/// lot and writes one short report, which is work a smaller model does well, and it is
+/// the point of delegating at all (§9). Overriding the built-in names, rather than
+/// adding one, means any agent the master picks is the cheap one.
+pub fn agents(name: &str, model: &str) -> String {
+    let def = |about: &str| serde_json::json!({
+        "description": about, "prompt": named(AGENT, name), "model": model,
+        "tools": ["Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch"],
+    });
+    serde_json::json!({
+        "general-purpose": def("Looks something up and reports the finding: searches, reads files, explores a tree, checks a fact or a hunch. Use for any work that is looking rather than doing."),
+        "Explore": def("Explores a codebase or directory fast and reports what is where."),
+    }).to_string()
+}
 
 pub fn named(p: &str, name: &str) -> String { p.replace("{NAME}", name) }
 

@@ -17,7 +17,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 pub struct Job { pub l: usize, pub i: usize, pub chat: String, pub step: String }
 
@@ -124,19 +124,25 @@ fn run(e: &Arc<Engine>, j: Job) {
             let n = { let mut m = e.mem.lock().unwrap(); let c = m.failed.entry((j.l, j.i)).or_insert(0); *c += 1; *c };
             let name = format!("{}+{}", j.i << j.l, 1 << j.l);
             if f.limit {
-                e.mem.lock().unwrap().pause(Instant::now() + Duration::from_secs(300), &f.text);
+                e.mem.lock().unwrap().pause(SystemTime::now() + Duration::from_secs(300), &f.text);
                 e.notice(&format!("compactor paused for 5 min: {}", f.text));
             } else if n >= PARK {
                 // §4.1 says retry forever; a node that fails every time (a refusal, say) would
                 // then cost a paid call every 10 s. Park instead, and say so.
-                e.mem.lock().unwrap().pause(Instant::now() + Duration::from_secs(3600), &format!("node {} failed {} times", name, n));
+                e.mem.lock().unwrap().pause(SystemTime::now() + Duration::from_secs(3600), &format!("node {} failed {} times", name, n));
                 e.notice(&format!("compactor parked for 1 h: node {} failed {} times: {} (/resume to retry now)", name, n, f.text));
             } else if n == 1 {
                 e.notice(&format!("node {} failed (retrying every {} s): {}", name, RETRY.as_secs(), f.text));
             }
-            let wait = e.mem.lock().unwrap().paused().map(|u| u.saturating_duration_since(Instant::now())).unwrap_or(RETRY).max(RETRY);
-            std::thread::sleep(wait);
-            e.mem.lock().unwrap().busy.remove(&(j.l, j.i));
+            // Wait RETRY, and then out any pause, in short steps against the wall clock: one
+            // long sleep would miss a /resume and, on macOS, stand still while the machine sleeps.
+            let t0 = Instant::now();
+            let mut m = e.mem.lock().unwrap();
+            while t0.elapsed() < RETRY || m.paused().is_some() {
+                m = e.changed.wait_timeout(m, RETRY).unwrap().0;
+            }
+            m.busy.remove(&(j.l, j.i));
+            drop(m);
         }
     }
     pump(e);

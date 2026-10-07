@@ -27,7 +27,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 pub struct Conf {
     pub name: String,
@@ -37,6 +37,7 @@ pub struct Conf {
     pub permission: String,
     pub compact_model: String,
     pub compact_effort: String,
+    pub agent_model: String,
     pub ttl: String,
     pub cwd: PathBuf,
     pub instructions: PathBuf,
@@ -67,6 +68,7 @@ impl Conf {
             permission: s("permission", "bypassPermissions"),
             compact_model: s("compact_model", "sonnet"),
             compact_effort: s("compact_effort", "medium"),
+            agent_model: s("agent_model", "sonnet"),
             ttl: s("cache_ttl", "5m"),
             cwd: cfg::tilde(&s("cwd", "~")),
             instructions: c.opt("chat.instructions").map(|p| cfg::tilde(&p)).unwrap_or_else(|| dir.join("instructions.md")),
@@ -89,7 +91,9 @@ pub struct Mem {
     /// failures per node since its last success
     pub failed: HashMap<(usize, usize), u32>,
     lo: Vec<usize>,
-    pause: Option<(Instant, String)>,
+    /// Wall clock, not `Instant`: on macOS `Instant` stops while the machine sleeps, so a
+    /// pause until the limit resets would outlast the reset by however long the lid was shut.
+    pause: Option<(SystemTime, String)>,
 }
 
 impl Mem {
@@ -99,11 +103,11 @@ impl Mem {
         while self.store.built(l, self.lo[l]) { self.lo[l] += 1; }
         self.lo[l]
     }
-    pub fn paused(&mut self) -> Option<Instant> {
-        if let Some((u, _)) = &self.pause { if *u <= Instant::now() { self.pause = None; } }
+    pub fn paused(&mut self) -> Option<SystemTime> {
+        if let Some((u, _)) = &self.pause { if *u <= SystemTime::now() { self.pause = None; } }
         self.pause.as_ref().map(|p| p.0)
     }
-    pub fn pause(&mut self, until: Instant, why: &str) { self.pause = Some((until, why.into())); }
+    pub fn pause(&mut self, until: SystemTime, why: &str) { self.pause = Some((until, why.into())); }
     pub fn pause_reason(&mut self) -> Option<String> { self.paused()?; self.pause.as_ref().map(|p| p.1.clone()) }
 }
 
@@ -186,7 +190,7 @@ impl Engine {
         if self.conf.budget_hour > 0.0 && hour > self.conf.budget_hour {
             let mut m = self.mem.lock().unwrap();
             if m.paused().is_none() {
-                m.pause(Instant::now() + Duration::from_secs(600), "hourly budget spent");
+                m.pause(SystemTime::now() + Duration::from_secs(600), "hourly budget spent");
                 drop(m);
                 self.notice(&format!("compactor paused 10 min: {:.0} eq spent in the last hour (budget {:.0}); /resume to go on", hour, self.conf.budget_hour));
             }
@@ -208,7 +212,7 @@ impl Engine {
         self.emit(json!({"ev": "limits", "line": super::usage::limits_line(&info)}));
         if info["status"] == "rejected" {
             let secs = info["resetsAt"].as_i64().map(|t| t - chrono::Utc::now().timestamp()).unwrap_or(300).clamp(60, 6 * 3600);
-            self.mem.lock().unwrap().pause(Instant::now() + Duration::from_secs(secs as u64), "usage limit reached");
+            self.mem.lock().unwrap().pause(SystemTime::now() + Duration::from_secs(secs as u64), "usage limit reached");
             self.notice(&format!("usage limit reached; compactor waits: {}", super::usage::limits_line(&info)));
         }
     }
@@ -337,6 +341,7 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
                 m.pause = None;
                 m.failed.clear();
                 drop(m);
+                e.changed.notify_all(); // a failed job waiting out the pause
                 e.notice("compactor resumed");
                 compact::pump(e);
                 json!({"ok": true})
