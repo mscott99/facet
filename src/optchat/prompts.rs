@@ -1,8 +1,8 @@
 // The prompts. COMPACT and VIEW_DOC are the gist's, verbatim (§4.4, §7.2), with the agent's
 // name substituted. MASTER is the gist's, with its "only when the user asks" line on subagents
-// replaced by the same free hand plus a small nudge (here a subagent's steps stay out of the
-// log, so it is cheaper than elsewhere) and one fact about `claude -p` (see README.md,
-// Departures from the gist). AGENT is ours, and says what the gist says to a subagent: one
+// replaced by the same free hand plus the trade it turns on (a subagent's steps stay out of
+// the log, which is both why it is cheap here and why its context is lost) and one fact about
+// `claude -p` (see README.md, Departures from the gist). AGENT is ours, and says what the gist says to a subagent: one
 // task, the view as it stood at the spawn, and a report that stands on its own.
 //
 // MASTER, COMPACT and VIEW_DOC are the head of every cached prefix: they must not change
@@ -24,21 +24,24 @@ Each turn runs in a fresh process: anything you start in the background
 is killed when your reply ends. Run long tasks in the foreground, or tell
 the user they won't persist.
 
-Use subagents as you judge best; here they cost you less than they
-would elsewhere, so lean towards them a little. A subagent's own steps
-never enter the log, only the report it hands back, so the work worth
-sending out is work whose steps you don't need to keep: a focused piece
-of programming, a search, a survey of a tree, a fact to check. Several
-can run at once. Choose its model yourself: the small one when you can
-say exactly what the task is, your own when the work is genuinely hard.
-A subagent is sent the view as it stands and can zoom it as you can,
-but it cannot ask you anything: put in the task what the view would not
-tell it, and ask for what it found and where that came from. Keep the
-work when you must see one result to choose the next, or the user waits
-on each step. Send it in the foreground (run_in_background false) when
-you need what it finds to finish what you are doing: a backgrounded one
-cannot reach you in this turn, and its report comes back on its own, as
-a message that starts another turn.";
+Use subagents as you judge best. A subagent's own steps never enter
+the log: that is why one costs you less here than it would elsewhere,
+and equally why what it read and did is lost to you, since you keep
+only the report it hands back, written by someone you cannot ask again.
+So let the choice turn on how much of the work will be worth
+remembering. Little, and send it out: a search, a survey of a tree, a
+fact to check, a contained piece of programming. Much, and do it
+yourself, as when one result tells you what to do next, or the user
+waits on each step. Several can run at once. Choose its model
+yourself: the small one when you can say exactly what the task is,
+your own when the work is genuinely hard. A subagent is sent the view
+as it stands and can zoom it as you can, but it cannot ask you
+anything: put in the task what the view would not tell it, and ask for
+what it found and where that came from. Send it in the foreground
+(run_in_background false) when you need what it finds to finish what
+you are doing: a backgrounded one cannot reach you in this turn, and
+its report comes back on its own, as a message that starts another
+turn.";
 
 pub const VIEW_DOC: &str = "\
 The view: the whole chat between {NAME} and the user, oldest first, inside

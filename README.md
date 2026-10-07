@@ -188,10 +188,14 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     spawn, tell or computer tool, so the gist's wording would describe tools that do not
     exist, and its "use subagents only when the user asks for them" is a caution about
     delegating blind, not about price. A spawn here carries the whole view, as the gist's
-    does (see 19), but a subagent's steps stay out of the log, and that saving is the larger
-    of the two: delegating is cheaper than it is elsewhere — the paragraph says so
-    and tells the agent to lean towards it a little, naming contained programming as well as
-    looking, but leaves the choice to its judgement rather than making a rule of it. Added:
+    does (see 19), but a subagent's steps stay out of the log, which makes delegating cheaper
+    here than elsewhere and is the whole of the price: what the subagent read and did is gone,
+    only its report survives, and it cannot be asked again. The paragraph states both halves
+    and gives the one quantity the choice turns on: how much of the work will be worth
+    remembering. Little, send it out (a search, a survey, a fact, a contained piece of
+    programming); much, do it here. Cost alone must not decide it, since the saving and the
+    loss are the same fact. The choice is left to the agent's judgement rather than made a
+    rule of. Added:
     each turn is a fresh process, so anything started in the background dies with it — except
     a backgrounded subagent, which the call waits for whether or not the master does, so the
     paragraph tells it to spawn in the foreground when it needs what the subagent finds
@@ -222,10 +226,11 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     `work` (the gist's own kind for it) when it comes back inside the turn, and as the gist's
     own `[id] ` user message when it comes back after the turn is over (below).
     Exploration that would have been twenty tool/echo pairs in the log costs one line.
-    MASTER therefore keeps the gist's free hand but leans towards delegating (see 12): the
-    work worth sending out is work whose steps need not be kept, contained programming as
-    much as reading, while anything whose next step depends on the last, or that the user is
-    waiting on, stays here. The price of a logged message, measured over this chat (1206 messages,
+    MASTER therefore keeps the gist's free hand and states the one quantity the choice turns
+    on (see 12): how much of the work will be worth remembering. Little, and it is sent out
+    (a search, a survey, a fact, a contained piece of programming); much, and it stays here,
+    as does anything whose next step depends on the last or that the user is waiting on. The
+    saving and the loss are the same fact, so cost alone must not decide it. The price of a logged message, measured over this chat (1206 messages,
     $270 at per-model rates): 11.9 cents of compaction, 22.4 cents all in. An average run of
     four tool calls is eight messages, so delegating it saves about a dollar of compaction and
     pays the subagent's own reads once, out of a fresh context instead of the turn's growing
