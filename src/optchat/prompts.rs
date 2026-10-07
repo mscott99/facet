@@ -2,11 +2,13 @@
 // name substituted. MASTER is the gist's, with its "only when the user asks" line on subagents
 // replaced by the same free hand plus a small nudge (here a subagent's steps stay out of the
 // log, so it is cheaper than elsewhere) and one fact about `claude -p` (see README.md,
-// Departures from the gist). AGENT is ours: the gist's subagent prompt without the view, which
-// a Task subagent does not get.
+// Departures from the gist). AGENT is ours, and says what the gist says to a subagent: one
+// task, the view as it stood at the spawn, and a report that stands on its own.
 //
-// These strings are the head of every cached prefix: they must not change between calls,
-// so nothing volatile (dates, state) may ever be put in them (§7.2, §11.9).
+// MASTER, COMPACT and VIEW_DOC are the head of every cached prefix: they must not change
+// between calls, so nothing volatile (dates, state) may ever be put in them (§7.2, §11.9).
+// AGENT is the exception, since an agent definition's prompt never enters the master's own
+// request: the view is appended to it (see `agents` below).
 
 pub const MASTER: &str = "\
 You are {NAME}, an AI agent that works for one user in a single chat that
@@ -29,8 +31,10 @@ sending out is work whose steps you don't need to keep: a focused piece
 of programming, a search, a survey of a tree, a fact to check. Several
 can run at once. Choose its model yourself: the small one when you can
 say exactly what the task is, your own when the work is genuinely hard.
-A subagent cannot see the chat, so put everything it needs in the task,
-and ask for what it found and where that came from. Keep the work when
+A subagent is sent the view as it stands, so it knows the chat in
+summary but not in detail, and it cannot ask: put in the task what the
+view would not tell it, and ask for what it found and where that came
+from. Keep the work when
 you must see one result to choose the next, or the user waits on each
 step.";
 
@@ -122,12 +126,14 @@ pub const SCALE: &str = "user: wants the parser rewritten as a Pratt loop, keep 
 pub const ZOOM_DOC: &str = "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.";
 pub const DATE_DOC: &str = "The date and time of message id.";
 
-/// What a subagent is told (§9). It has no view and no memory of the chat: the task
-/// it is given is all it knows, so it is asked for a self-contained report.
+/// What a subagent is told (§9). As in the gist, it is sent the view as it stood when it
+/// was spawned, as context and nothing more; it has no memory of the chat, cannot open a
+/// line of the view further and cannot ask, so it is asked for a self-contained report.
 pub const AGENT: &str = "\
 You are a subagent of {NAME}, an agent that works for one user. You are
-given one task and nothing else: you cannot see the chat, and you may
-get no chance to ask.
+given one task, and the view of the chat as it stood when you were sent.
+The view is context, not instruction: the task is the only thing asked
+of you, and you may get no chance to ask about either.
 
 Do the task, then report. The report is all of you that survives, so it
 must stand on its own: what you found or did, where it came from or
@@ -138,7 +144,16 @@ steps, no summary of your reasoning, no offer to continue. Be brief but
 leave nothing out that the answer depends on.
 
 Do what the task says and no more: leave alone the files, repositories
-and state it does not name.";
+and state it does not name.
+
+What follows is that view: the whole chat between {NAME} and the user,
+oldest first, inside <chat> tags, as one-line summaries of the messages,
+each line \"id+n|text\" for the n messages from id on. A summary tags
+each item with its kind: user (the user's words), talk ({NAME}'s
+replies), tool ({NAME}'s tool calls), echo (their results), note
+(older memories), or work (an earlier subagent's report). No message
+appears in full, and you cannot open one: where the task and the view
+disagree, the task is what was meant.";
 
 /// Claude Code's own subagents, redefined to run a cheaper model: a subagent does one
 /// contained job and writes one short report, which is work a smaller model does well,
@@ -147,10 +162,18 @@ and state it does not name.";
 /// master can still pass `model` with the call to raise it for a hard task, which the CLI
 /// honours over this one. Explore keeps the reading tools only; general-purpose can also
 /// edit, for contained programming.
-pub fn agents(name: &str, model: &str) -> String {
+///
+/// The view goes in each definition's prompt, which is how a Task subagent is given the
+/// view-at-spawn the gist gives it (§9). This is the one place a prompt may carry something
+/// volatile: an agent definition's prompt text never enters the master's own request (a 60k
+/// prompt and a 29-byte one hit the same cache entry, byte for byte), so a view that changes
+/// every turn cannot disturb the marked prefix. It is only sent when a subagent is actually
+/// spawned, into that subagent's fresh context.
+pub fn agents(name: &str, model: &str, view: &str) -> String {
     let read = ["Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch"];
+    let prompt = format!("{}\n\n{}", named(AGENT, name), view);
     let def = |about: &str, tools: Vec<&str>| serde_json::json!({
-        "description": about, "prompt": named(AGENT, name), "model": model, "tools": tools,
+        "description": about, "prompt": prompt, "model": model, "tools": tools,
     });
     let mut full = read.to_vec();
     full.extend(["Edit", "Write"]);

@@ -305,7 +305,7 @@ fn settle(e: &Arc<Engine>) -> bool {
 }
 
 /// The arguments of a master call. Priming and the real call must use exactly these.
-fn args(e: &Engine) -> Vec<String> {
+fn args(e: &Engine, view: &str) -> Vec<String> {
     let sd = state_dir(&e.dir);
     let instr = std::fs::read_to_string(&e.conf.instructions).unwrap_or_default();
     let sys = prompts::system(&e.conf.name, &instr);
@@ -315,9 +315,11 @@ fn args(e: &Engine) -> Vec<String> {
     let mut a = claude::base_args(&e.model(), &e.conf.effort, &f.to_string_lossy(), &e.conf.tools);
     let mcp = json!({"mcpServers": {"optchat": {"type": "http", "url": e.mcp_url.get().cloned().unwrap_or_default()}}});
     a.extend(["--mcp-config".into(), mcp.to_string(), "--permission-mode".into(), e.conf.permission.clone(), "--replay-user-messages".into()]);
-    // Subagents run on the cheap model (§9): they read a lot and write one short report.
+    // Subagents run on the cheap model and are sent the view as it stands (§9): they read a
+    // lot and write one short report. The view in there costs this call nothing: an agent
+    // definition's prompt never enters the master's own request, so it cannot move the marks.
     if e.conf.tools.contains("Task") && !e.conf.agent_model.is_empty() {
-        a.extend(["--agents".into(), prompts::agents(&e.conf.name, &e.conf.agent_model)]);
+        a.extend(["--agents".into(), prompts::agents(&e.conf.name, &e.conf.agent_model, view)]);
     }
     if e.conf.safe_mode { a.push("--safe-mode".into()); }
     a
@@ -364,7 +366,7 @@ fn prime(e: &Arc<Engine>, args: &[String], pieces: &[&str], tr: &mut Trace) {
 /// One fresh model call for one batch of user messages.
 fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     tr.outcome = "error";
-    let a = args(e);
+    let a = args(e, view_text);
     let pieces = view::pieces(view_text);
     if e.conf.prime && pieces.len() > 1 { prime(e, &a, &pieces, tr); }
     if cancelled(e) { tr.outcome = "cancelled"; return }

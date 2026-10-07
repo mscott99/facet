@@ -182,9 +182,10 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 
 12. *MASTER's subagent line keeps the gist's free hand, with a nudge (§7.2).* There is no
     spawn, tell or computer tool, so the gist's wording would describe tools that do not
-    exist, and its "use subagents only when the user asks for them" assumes a spawn that
-    carries the whole view and therefore saves nothing. Here a subagent's steps stay out of
-    the log, so delegating is cheaper than it is elsewhere (see 19) — the paragraph says so
+    exist, and its "use subagents only when the user asks for them" is a caution about
+    delegating blind, not about price. A spawn here carries the whole view, as the gist's
+    does (see 19), but a subagent's steps stay out of the log, and that saving is the larger
+    of the two: delegating is cheaper than it is elsewhere — the paragraph says so
     and tells the agent to lean towards it a little, naming contained programming as well as
     looking, but leaves the choice to its judgement rather than making a rule of it. Added:
     each turn is a fresh process, so anything started in the background dies with it.
@@ -226,7 +227,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     job and writing one short report is work a smaller model does well, and paying the big
     model's rate for it would undo the saving. `--agents` redefines Claude Code's own
     `general-purpose` and `Explore` rather than adding a name, so whichever one the master
-    picks is the cheap one, with the AGENT prompt (no view, no follow-up, do only what the
+    picks is the cheap one, with the AGENT prompt (no follow-up, do only what the
     task names, report that stands alone). `Explore` gets the reading tools; `general-purpose`
     also gets `Edit` and `Write`, since a contained programming task is worth delegating too.
     The default is not a ceiling: the master may pass `model` with the call, and the CLI
@@ -234,6 +235,22 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     against the CLI: without the parameter the turn stays on opus while the subagent's
     requests come back as sonnet; with `model: opus` the subagent's own requests come back as
     opus.
+
+    A spawn carries the view, as the gist's does: the view as it stands at the call is
+    appended to each agent definition's prompt, which is the only channel a Task subagent
+    has for context, since the master writes its task but not its system prompt. So the
+    subagent knows the chat in summary, cannot open a line of it (no zoom; the MCP tools go
+    to the master's call only) and cannot be told more once sent, which is what AGENT says to
+    it and what MASTER tells the master to expect. The master's own prefix is untouched by
+    this: an agent definition's prompt never enters the master's request at all — the same
+    call with a 60k-character agent prompt and with a 29-byte one hit one cache entry, byte
+    for byte, 10468 tokens written then read — so a view that changes every turn cannot move
+    the marks. Verified the other way too: a planted line in the view of a generated
+    definition came back verbatim from a real subagent that was only asked to read it.
+    The price is the subagent's, paid once in a fresh context: a full 128k view is about 32k
+    tokens, 12 cents at sonnet's cache-write rate, and later spawns in the same turn read it
+    back at a tenth of that. Against 11.9 cents per logged message of compaction, a delegated
+    run pays for its view as soon as it keeps two messages of steps out of the chat.
 
     The subagent pays for itself in log bytes, and that is exactly why its own spending has to
     be counted: dropping its events would otherwise drop its tokens too. A subagent's requests

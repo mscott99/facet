@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # End-to-end test of the engine against tests/fake_claude.py: no model is called.
 #   python3 tests/engine_test.py [path/to/facet]
-import json, os, socket, subprocess, sys, tempfile, time
+import json, os, re, socket, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "target", "debug", "facet")
@@ -255,6 +255,15 @@ try:
     t = [x for x in ev if x["ev"] == "turn"][-1]
     check(t["agents"] == 1 and t["agent_reqs"] == 2 and t["agent_eq"] > 0 and t["agent_bytes"] == len(work[0]["text"]),
           "the turn record totals what its subagents cost")
+    av = [v.get("argv", []) for v in fake()]
+    defs = [json.loads(a[a.index("--agents") + 1]) for a in av if "--agents" in a]
+    check(defs and all(set(d) == {"general-purpose", "Explore"} for d in defs)
+          and all("<chat>" in a["prompt"] and a["model"] for d in defs for a in d.values()),
+          "every call defines the subagents, and each definition carries the view")
+    p = defs[-1]["general-purpose"]["prompt"] if defs else ""
+    grew = len(p) > len(defs[0]["general-purpose"]["prompt"]) if len(defs) > 1 else False
+    check(p.rstrip().endswith("</chat>") and re.search(r"\n\d+\+\d+\|", p) and grew,
+          "the view in a definition is the whole current one, lines and all")
 
     u = [json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))]
     check({"compact", "prime", "turn", "agent"} <= {x["kind"] for x in u}, "usage logged per request for compact, prime, turn and agent")
