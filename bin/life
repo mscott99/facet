@@ -18,7 +18,13 @@ CALDB = f"{HOME}/Library/Group Containers/group.com.apple.calendar/Calendar.sqli
 APPLE_EPOCH = 978307200  # 2001-01-01 in unix time
 
 
+def need_macos(feature):
+    if sys.platform != "darwin":
+        sys.exit(f"life: {feature} is only available on macOS (AppleScript + local SQLite stores) — not here")
+
+
 def osa(script):
+    need_macos("mail/calendar/browser-automation (AppleScript)")
     p = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
     if p.returncode:
         sys.exit(f"applescript failed: {p.stderr.strip()}")
@@ -27,6 +33,7 @@ def osa(script):
 
 def ro(path, wal=False):
     """Open a live macOS store read-only; copy it first when it has a WAL we must see."""
+    need_macos("mail/calendar")
     if wal:
         tmp = os.path.join(tempfile.mkdtemp(prefix="life-"), os.path.basename(path))
         for suf in ("", "-wal", "-shm"):

@@ -1,0 +1,17 @@
+# systemd --user unit, equivalent to launchd/com.facet.engine.plist (`facet engine`).
+# See facet.service for install steps; %h expands to the running user's home directory.
+[Unit]
+Description=facet engine (runs agent turns/subagents in the background)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/facet/target/release/facet engine
+Restart=always
+RestartSec=2
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+StandardOutput=append:%h/.local/share/facet/engine.out.log
+StandardError=append:%h/.local/share/facet/engine.err.log
+
+[Install]
+WantedBy=default.target

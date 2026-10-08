@@ -236,7 +236,7 @@ fn init() {
     }
     for (k, v) in [("store", "~/.optchat"), ("vault", "~/Obsidian/myVault"),
                    ("host", "127.0.0.1"), ("input.mode", "tmux"),
-                   ("input.tmux_target", "TMUX:1.0"), ("input.tmux", "/opt/homebrew/bin/tmux"),
+                   ("input.tmux_target", "TMUX:1.0"), ("input.tmux", "tmux"),
                    ("life", "~/.local/bin/life"), ("review_memory", "LLM/Review memory.md")] {
         if c.opt(k).is_none() { c.set(k, v.into()); }
     }

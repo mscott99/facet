@@ -1,0 +1,19 @@
+# systemd --user unit, equivalent to launchd/com.facet.term.plist (ttyd browser terminal).
+# See facet.service for install steps; %h expands to the running user's home directory.
+# Needs `ttyd` on PATH (apt install ttyd, or build from source) - bin/facet-term checks
+# and fails loudly if it is missing.
+[Unit]
+Description=facet-term (ttyd: `facet chat` in a browser terminal over the tailnet)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/facet-term
+Restart=always
+RestartSec=10
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+StandardOutput=append:%h/.local/share/facet/facet-term.log
+StandardError=append:%h/.local/share/facet/facet-term.log
+
+[Install]
+WantedBy=default.target

@@ -1,1 +1,18 @@
 /target
+
+# facet's own runtime data never belongs in the source tree (it normally lives
+# under ~/.local/share/facet and ~/.config/facet, outside this repo entirely -
+# these just guard against it ending up here by accident, e.g. during local
+# testing with a repo-relative data dir).
+/data/
+/state/
+/chat/
+*.jsonl
+/token
+/tokens
+/cards.json
+/notes.json
+/later.json
+/limits.json
+/usage.json
+facet.json

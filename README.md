@@ -48,6 +48,42 @@ them). They expect `facet` and the scripts in `bin/` on `~/.local/bin` (symlinks
 The engine needs Claude Code (`claude`) logged in with a subscription; set `chat.claude` to
 its full path if launchd's PATH does not find it.
 
+## running on Linux
+
+The `linux` branch carries what macOS-only code needed: `src/main.rs`'s `input.tmux` default
+and `bin/facet-term`'s `ttyd` now resolve from `PATH` instead of a hardcoded
+`/opt/homebrew/bin/...`, and `bin/life` (AppleScript Mail/Calendar + the macOS SQLite stores)
+now exits with a clear message instead of a raw stack trace when it is not on Darwin. Nothing
+else in `src/` is platform-specific — the crate is plain Rust (`comrak`, `ureq`, `tiny_http`,
+`rustyline`, `serde_json`, `chrono`), no macOS frameworks.
+
+Service management is `systemd --user`, not launchd: the unit files in `systemd/` are
+equivalent to the plists in `launchd/` (`facet.service` = `com.facet`/`facet serve`,
+`facet-engine.service` = `com.facet.engine`/`facet engine`, `facet-term.service` =
+`com.facet.term`; there is no Linux unit for the vault bridge, since that job is retired on
+macOS too — see "one viewer" above). Install (as whichever user facet runs as — root, on a
+single-user box):
+
+    mkdir -p ~/.config/systemd/user
+    cp systemd/*.service ~/.config/systemd/user/
+    loginctl enable-linger "$USER"   # let --user units run without a login session
+    systemctl --user daemon-reload
+    systemctl --user enable --now facet.service facet-engine.service facet-term.service
+
+Reach it the same way as the Mac — `tailscale serve`/`tailscale cert` for the TLS-terminated
+URLs (see **routes**, below); Tailscale's Linux client does `serve`/`cert` the same as macOS.
+
+What does not work here: `bin/life` end to end, so Telegram's `/cal` and `/mail` fail loudly
+(mail/calendar are Mail.app/Calendar.app and their local SQLite stores, Mac-only by
+construction, not reimplemented); `life web`'s `js`/`open`/`tabs` (AppleScript browser
+control) fail the same way. `life web get` (plain `curl`, used for logged-out page fetches)
+still works.
+
+A Linux box (the Hetzner one this branch was built against: Ubuntu 24.04 x86, cloned at
+`/root/facet`) is meant to become the main host — source of truth for `~/.optchat`, run
+continuously instead of sleeping with a laptop lid, agents launched there by default — with
+the Mac as one more tailnet client.
+
 ## routes
 
 Every service binds 127.0.0.1 only. To reach them from other devices, publish them on a

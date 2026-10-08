@@ -1,0 +1,28 @@
+# systemd --user unit, equivalent to launchd/com.facet.plist (`facet serve`).
+# %h expands to the running user's home directory, so this retargets itself;
+# on the Hetzner box (root@..., repo cloned at /root/facet) %h=/root, so this
+# runs /root/facet/target/release/facet and logs to /root/.local/share/facet/.
+# Edit only if the repo/binary live somewhere other than ~/facet.
+#
+# Install (as the user facet should run as, e.g. root on a single-user box):
+#   mkdir -p ~/.config/systemd/user
+#   cp systemd/*.service ~/.config/systemd/user/
+#   loginctl enable-linger "$USER"   # let --user units run without a login session
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now facet.service
+[Unit]
+Description=facet serve (chat web server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/facet/target/release/facet serve
+Restart=always
+RestartSec=2
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+StandardOutput=append:%h/.local/share/facet/facet.log
+StandardError=append:%h/.local/share/facet/facet.log
+
+[Install]
+WantedBy=default.target
