@@ -1,19 +1,46 @@
 // §7.1 zoom and date, served from the engine process over MCP (streamable HTTP, JSON replies)
 // on a loopback port with a random secret in the path (§9: "MCP over HTTP on a local port").
 // The tool list is a constant: it is part of every cached prefix.
+//
+// The master also gets the two output tools (README, "Stream and venues"): send_chat, its
+// only way to speak in the chat venue, and answer_card, its way to answer a line-comment card.
+// A detached subagent (`facet spawn`) is pointed at a second path of the same server, which
+// lists and serves zoom and date only: a subagent reports, it never speaks to the user. Task
+// subagents share the master's connection; their definitions (prompts::agents) leave the two
+// output tools out of their tool list.
 use super::engine::Engine;
 use super::{flat, prompts};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::sync::Arc;
 
-pub fn tools() -> Value {
-    json!([
+pub fn tools(full: bool) -> Value {
+    let mut t = json!([
         {"name": "zoom", "description": prompts::ZOOM_DOC,
          "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}, "n": {"type": "integer"}}, "required": ["id", "n"]}},
         {"name": "date", "description": prompts::DATE_DOC,
          "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}}
-    ])
+    ]);
+    if full {
+        let a = t.as_array_mut().unwrap();
+        a.push(json!({"name": "send_chat", "description": prompts::SEND_DOC,
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}));
+        a.push(json!({"name": "answer_card", "description": prompts::ANSWER_DOC,
+            "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"},
+                "apply": {"type": "string"}}, "required": ["id", "text"]}}));
+    }
+    t
+}
+
+/// What a successful output-tool call returns. The turn loop leaves the call and this result
+/// out of the log (the `chat` or `answer` message already says it); anything else, an error,
+/// is logged as an echo so a failed send is remembered.
+pub const SENT: &str = "sent";
+pub const ANSWERED: &str = "answered";
+
+/// The path a detached subagent is given: the same server, read-only tools.
+pub fn agent_url(master: &str) -> String {
+    match master.strip_suffix("/mcp") { Some(b) => format!("{}/agent", b), None => master.to_string() }
 }
 
 /// zoom(id, n): n = 1 gives the message whole; otherwise the two lines under id+n.
@@ -52,11 +79,14 @@ fn secret() -> String {
 pub fn start(e: Arc<Engine>) -> String {
     let server = tiny_http::Server::http("127.0.0.1:0").expect("mcp server");
     let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
-    let path = format!("/{}/mcp", secret());
+    let sec = secret();
+    let path = format!("/{}/mcp", sec);
+    let agent = format!("/{}/agent", sec);
     let url = format!("http://127.0.0.1:{}{}", port, path);
     std::thread::spawn(move || {
         for mut req in server.incoming_requests() {
-            if req.url() != path {
+            let full = req.url() == path;
+            if !full && req.url() != agent {
                 let _ = req.respond(tiny_http::Response::empty(404));
                 continue;
             }
@@ -66,7 +96,7 @@ pub fn start(e: Arc<Engine>) -> String {
             }
             let mut body = String::new();
             let _ = req.as_reader().read_to_string(&mut body);
-            let reply = serde_json::from_str::<Value>(&body).ok().and_then(|v| handle(&e, &v));
+            let reply = serde_json::from_str::<Value>(&body).ok().and_then(|v| handle(&e, &v, full));
             let resp = match reply {
                 None => tiny_http::Response::from_string("").with_status_code(202),
                 Some(r) => tiny_http::Response::from_string(r.to_string()).with_header(
@@ -79,7 +109,7 @@ pub fn start(e: Arc<Engine>) -> String {
 }
 
 /// One JSON-RPC message; None for a notification.
-fn handle(e: &Engine, v: &Value) -> Option<Value> {
+fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
     let id = v.get("id")?.clone();
     let method = v["method"].as_str().unwrap_or("");
     let result = match method {
@@ -89,17 +119,30 @@ fn handle(e: &Engine, v: &Value) -> Option<Value> {
             "serverInfo": {"name": "optchat", "version": "1"}
         }),
         "ping" => json!({}),
-        "tools/list" => json!({"tools": tools()}),
+        "tools/list" => json!({"tools": tools(full)}),
         "tools/call" => {
             let a = &v["params"]["arguments"];
             let num = |k: &str| a[k].as_i64().or_else(|| a[k].as_str().and_then(|s| s.trim().parse().ok()));
-            let m = e.mem.lock().unwrap();
-            let text = match v["params"]["name"].as_str().unwrap_or("") {
-                "zoom" => match (num("id"), num("n")) { (Some(i), Some(n)) => zoom(&m.store, i, n), _ => "zoom needs id and n.".into() },
-                "date" => match num("id") { Some(i) => date(&m.store, i), None => "date needs id.".into() },
-                other => format!("No tool {}.", other),
+            let st = |k: &str| a[k].as_str().map(String::from).or_else(|| a[k].as_i64().map(|x| x.to_string())).unwrap_or_default();
+            let (text, err) = match v["params"]["name"].as_str().unwrap_or("") {
+                "zoom" => (match (num("id"), num("n")) { (Some(i), Some(n)) => zoom(&e.mem.lock().unwrap().store, i, n), _ => "zoom needs id and n.".into() }, false),
+                "date" => (match num("id") { Some(i) => date(&e.mem.lock().unwrap().store, i), None => "date needs id.".into() }, false),
+                // the mem lock is not held here: logging takes it
+                "send_chat" if full => match super::engine::chat(e, &st("text")) {
+                    Ok(()) => (SENT.into(), false),
+                    Err(x) => (format!("send_chat failed: {}", x), true),
+                },
+                "answer_card" if full => {
+                    let id = st("id");
+                    let apply = a["apply"].as_str();
+                    match super::engine::answer(e, &id, &st("text"), apply) {
+                        Ok(_) => (ANSWERED.into(), false),
+                        Err(x) => (format!("answer_card {} failed: {}", id, x), true),
+                    }
+                }
+                other => (format!("No tool {}.", other), true),
             };
-            json!({"content": [{"type": "text", "text": text}]})
+            json!({"content": [{"type": "text", "text": text}], "isError": err})
         }
         _ => return Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}})),
     };
@@ -109,6 +152,16 @@ fn handle(e: &Engine, v: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_detached_agent_gets_the_reading_tools_only() {
+        assert_eq!(agent_url("http://127.0.0.1:5/abc/mcp"), "http://127.0.0.1:5/abc/agent");
+        let names = |t: Value| t.as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(names(tools(false)), ["zoom", "date"]);
+        assert_eq!(names(tools(true)), ["zoom", "date", "send_chat", "answer_card"]);
+        let a = crate::optchat::prompts::agents("X", "sonnet", "<chat></chat>");
+        assert!(!a.contains("send_chat") && !a.contains("answer_card"));
+    }
+
     #[test]
     fn zoom_addresses() {
         let d = std::env::temp_dir().join(format!("facet-mcp-{}", std::process::id()));

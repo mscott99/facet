@@ -1,5 +1,7 @@
-// Telegram is a *route*, not an output avenue of its own: it carries the same conversation.
-// What it alone has is push. So it pushes what is worth waking a phone for — a reply, a new
+// Telegram is a *route*, not an output avenue of its own: it carries the same conversation as
+// the web chat page — together they are the chat venue (README, "Stream and venues"). What it
+// alone has is push. So it pushes what is worth waking a phone for — a chat send (kind `chat`;
+// the agent's plain `talk` and its card `answer`s stay off it), a new
 // note's link, new comments on a paper — and renders none of it in depth; fidelity lives in
 // the reader.
 //
@@ -333,7 +335,9 @@ fn outbound(_cfg: Cfg) {
         let mut high = last;
         for m in log::since(&c, last) {
             high = high.max(m.i);
-            if m.kind == "talk" && !m.text.trim().is_empty() { let _ = push(&c, &m.text); }
+            // only what the agent sent to the chat venue (kind `chat`): never its plain text
+            // (`talk`, stream-only) and never a card's answer (`answer`, card venue)
+            if m.kind == "chat" && !m.text.trim().is_empty() { let _ = push(&c, &m.text); }
         }
 
         // new published notes: title and link, never the body

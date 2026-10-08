@@ -9,7 +9,9 @@
 //   -> {"op":"note","text":..,"date":..}  import a note (queued during a turn; duplicates skipped)
 //   -> {"op":"answer","id":..,"text":..,"apply":..}  a deliberate reply to a line-comment card
 //                                     (never a talk reply its poll happens to catch); "apply",
-//                                     if given, becomes a fix the card can apply (diag::propose)
+//                                     if given, becomes a fix the card can apply (diag::propose).
+//                                     Logged as kind `answer`; the master's MCP `answer_card` is
+//                                     the same call (see `answer` below)
 //   -> {"op":"resume"}                lift a compactor pause
 //   -> {"op":"view"} / {"op":"status"} / {"op":"zoom","id":..,"n":..}
 //   -> {"op":"model","name":..}       the master model for the next turns
@@ -354,29 +356,9 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
             "answer" => {
                 let id = v["id"].as_str().unwrap_or("").trim().to_string();
                 let text = v["text"].as_str().unwrap_or("").trim().to_string();
-                if id.is_empty() || text.is_empty() { json!({"ok": false, "error": "id and text required"}) }
-                else {
-                    let sd = state_dir(&e.dir);
-                    match cards::get(&sd, &id) {
-                        None => json!({"ok": false, "error": format!("no card {}", id)}),
-                        Some(card) => {
-                            // a replacement is only ever what this call attaches on purpose,
-                            // never guessed from the answer's own prose
-                            let code = match v["apply"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                                Some(rep) => {
-                                    let note = card["note"].as_str().unwrap_or("");
-                                    let line = card["line"].as_i64().unwrap_or(0);
-                                    match diag::propose(&Cfg::load(), note, line, rep) {
-                                        Ok(c) => Some(c),
-                                        Err(x) => { e.notice(&format!("answer {}: fix not attached: {}", id, x)); None }
-                                    }
-                                }
-                                None => None,
-                            };
-                            let _ = cards::answer(&sd, &id, &text, code.as_deref());
-                            json!({"ok": true, "code": code})
-                        }
-                    }
+                match answer(e, &id, &text, v["apply"].as_str()) {
+                    Ok(code) => json!({"ok": true, "code": code}),
+                    Err(x) => json!({"ok": false, "error": x}),
                 }
             }
             "resume" => {
@@ -426,6 +408,45 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
         };
         if writeln!(w, "{}", reply).is_err() { return }
     }
+}
+
+/// The two venues output reaches (README, "Stream and venues"). The log is the stream, and
+/// everything lands in it; a venue is where some of it is also delivered. `chat` is the
+/// conversation as the user reads it, on Telegram and the web chat page alike: only what
+/// lands here as kind `chat` (and the user's own messages) is shown there. The master's
+/// plain text (kind `talk`) reaches the stream only.
+pub fn chat(e: &Arc<Engine>, text: &str) -> Result<(), String> {
+    let text = text.trim();
+    if text.is_empty() { return Err("empty".into()) }
+    e.log("chat", text);
+    Ok(())
+}
+
+/// A card answer: onto the card (cards.json, where the card's own poll reads it) and into the
+/// stream as kind `answer`, so memory has it too — but never in the chat venue: Telegram and
+/// the web chat page skip the kind. Returns the code of the fix attached, if one was.
+pub fn answer(e: &Arc<Engine>, id: &str, text: &str, apply: Option<&str>) -> Result<Option<String>, String> {
+    let (id, text) = (id.trim(), text.trim());
+    if id.is_empty() || text.is_empty() { return Err("id and text required".into()) }
+    let sd = state_dir(&e.dir);
+    let card = cards::get(&sd, id).ok_or_else(|| format!("no card {}", id))?;
+    let note = card["note"].as_str().unwrap_or("").to_string();
+    let line = card["line"].as_i64().unwrap_or(0);
+    // a replacement is only ever what this call attaches on purpose, never guessed from the
+    // answer's own prose
+    let rep = apply.map(str::trim).filter(|s| !s.is_empty());
+    let code = match rep {
+        Some(rep) => match diag::propose(&Cfg::load(), &note, line, rep) {
+            Ok(c) => Some(c),
+            Err(x) => { e.notice(&format!("answer {}: fix not attached: {}", id, x)); None }
+        },
+        None => None,
+    };
+    cards::answer(&sd, id, text, code.as_deref())?;
+    let mut s = format!("#{} on [[{}]] L{}: {}", id, note.trim_end_matches(".md"), line, text);
+    if let (Some(r), Some(_)) = (rep, &code) { s.push_str(&format!("\n(fix offered, replacing the line with: {})", r)); }
+    e.log("answer", &s);
+    Ok(code)
 }
 
 /// One request to a running engine, one reply.

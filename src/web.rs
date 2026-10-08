@@ -324,7 +324,7 @@ fn msg_html(cfg: &Cfg, m: &log::Msg) -> String {
     let base = note_base(cfg);
     match m.kind.as_str() {
         "user" => format!("<div class=\"msg user\">{}</div>", md::render(&m.text, &base)),
-        "talk" | "note" | "work" => format!("<div class=\"msg talk\">{}</div>", md::render(&m.text, &base)),
+        "chat" | "talk" | "note" | "work" => format!("<div class=\"msg talk\">{}</div>", md::render(&m.text, &base)),
         _ => {
             let head: String = m.text.lines().next().unwrap_or("").chars().take(110).collect();
             format!("<details class=step><summary>{} · {}</summary><pre>{}</pre></details>",
@@ -335,10 +335,13 @@ fn msg_html(cfg: &Cfg, m: &log::Msg) -> String {
 
 /// The chat fragment: new messages, then a fresh poller carrying the new cursor. The cursor
 /// lives in the DOM; there is no client-side state to get out of step.
+/// Only the chat venue is shown (`Msg::in_chat`): the user's chat messages and the agent's
+/// `send_chat`s. The rest of the stream (plain talk, steps, card traffic) is the memory's, and
+/// the tree view (/tree) is where to read it.
 fn log_fragment(cfg: &Cfg, since: i64) -> String {
     let msgs = log::since(cfg, since);
     let high = msgs.last().map(|m| m.i).unwrap_or(since);
-    let mut out: String = msgs.iter().map(|m| msg_html(cfg, m)).collect();
+    let mut out: String = msgs.iter().filter(|m| m.in_chat()).map(|m| msg_html(cfg, m)).collect();
     out.push_str(&format!(
         "<div id=tail hx-get=\"{}/f/log?since={}\" hx-trigger=\"load delay:2s\" hx-swap=outerHTML></div>",
         cfg.token_path(), high));
@@ -368,9 +371,9 @@ fn reply_fragment(cfg: &Cfg, id: &str, since: usize) -> String {
 }
 
 fn chat_page(cfg: &Cfg) -> String {
-    let all = log::since(cfg, -1);
-    let start = all.len().saturating_sub(40);
-    let since = if start == 0 { -1 } else { all[start - 1].i };
+    // the last 40 messages of the chat venue, not of the stream
+    let shown: Vec<i64> = log::since(cfg, -1).into_iter().filter(|m| m.in_chat()).map(|m| m.i).collect();
+    let since = shown.len().checked_sub(40).and_then(|k| shown.get(k)).map(|i| i - 1).unwrap_or(-1);
     page(cfg, "Facet", "chat", &format!("<div id=log>{}</div>", log_fragment(cfg, since)), true)
 }
 

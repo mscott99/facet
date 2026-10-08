@@ -109,10 +109,13 @@ its own Python server on 127.0.0.1:8765/tailnet :9443 — is retired (archived a
     under the line, given a short id of its own there and then, and sends through the ordinary
     `POST /x/send`, shaped `[[Note]] L<line> #<id>: "quoted line text"` followed by what was
     typed, so it reads the same as a reply typed by hand. The id is what lets an answer find
-    its way back to the right card instead of to every card at once: `facet answer <id>
-    <text>` (`cards.rs`, engine op `answer`) is the only thing that can put a reply inside one,
-    kept out of the main chat and Telegram altogether (the tool call and its echo are the only
-    trace in the log; the master is told to end such a turn without chat text). Every card keeps a quiet `remove`, sent or not; once answered, a further line opens
+    its way back to the right card instead of to every card at once: the master's MCP tool
+    `answer_card`, or `facet answer <id> <text>` (`cards.rs`, engine op `answer`), is the only
+    thing that can put a reply inside one. The answer is the card venue's (see **stream and
+    venues**, below): it is logged into the stream as kind `answer`, so the memory has it, but
+    never reaches Telegram or the chat page; the comment that asked is hidden from the chat
+    page too, and a turn started by card comments alone gets no fallback reply in the chat.
+    Every card keeps a quiet `remove`, sent or not; once answered, a further line opens
     inside it to reply back, carrying the same id, so the thread stays attached to where it
     started. `--apply <replacement>` on the answer, given only when there truly is one to
     offer (never guessed from prose), becomes a diagnostic fix (`diag::propose`) the card can
@@ -140,7 +143,9 @@ Web pages (`facet serve`, all under `/<token>`):
 
     /                  home: every page below, with live state and usage left
     /home              the same (old links)
-    /chat              the conversation: live log (HTMX), and a box to send a message
+    /chat              the chat venue: your messages and the agent's send_chat messages, live
+                       (HTMX), and a box to send a message. Its plain text, steps, card
+                       traffic and subagent reports are not shown (the stream has them: /tree)
     /tree              the memory tree: one root down to every message, searchable
     /m/                published notes; /m/<slug> one note
     /n/<note>          any note of the vault by its own name, read-only; `?h=<section>` one
@@ -157,8 +162,9 @@ Web pages (`facet serve`, all under `/<token>`):
                        (`/f/reply?id=&since=`: a card's own answers past what it has shown)
 
 Telegram (bot `telegram.username`, polled by `facet serve`; only the paired chat is heard):
-plain text is a message into the conversation; replies come back as they are written, and
-new notes and comments are announced. Commands are answered on the spot and ride along with
+plain text is a message into the conversation; what the agent sends to the chat (kind
+`chat`, see **stream and venues**) is pushed as it is logged — never its plain text or a card's
+answer — and new notes and comments are announced. Commands are answered on the spot and ride along with
 the next message: `/help`, `/ping` (= `/usage`: engine state and usage left), `/last N`,
 `/link`, `/notes`, `/diag`, `/cal N`, `/mail [query]`, `/buffer`, `/flush`.
 
@@ -180,15 +186,39 @@ Telegram and every `facet chat` use it):
                         is added once)
     answer {id, text, apply?}   a deliberate reply to a line-comment card, never a talk reply
                         its poll might otherwise catch; `apply`, given only when there is a
-                        concrete replacement to offer, becomes a fix the card can apply
+                        concrete replacement to offer, becomes a fix the card can apply;
+                        logged as kind `answer` (the same call as MCP `answer_card`)
     cancel / resume     stop the turn or the wait / lift a compactor pause
     view / status       the rendered view / engine state, usage left
     zoom {id, n}        a line of the view opened, as the agent's zoom
     model {name}        the master model for the next turns
     watch               then a stream of events: msg, delta, thought, accepted, phase, notice, limits
 
-The MCP server for `zoom` and `date` listens on a random loopback port with a random
-secret path, for the engine's own `claude` calls and the subagents they spawn only.
+The MCP server listens on a random loopback port with a random secret path, for the engine's
+own `claude` calls and the subagents they spawn only. The master's path (`/<secret>/mcp`) serves
+`zoom`, `date`, `send_chat {text}` and `answer_card {id, text, apply?}`; a detached subagent
+(`facet spawn`) is given `/<secret>/agent`, which lists and serves `zoom` and `date` only, and
+Task subagents' definitions leave the two output tools out of their tool lists.
+
+### stream and venues
+
+The log is the **stream**: everything lands in it, and the memory tree is built on it alone —
+user messages, the agent's text, its tool calls and results, subagent reports, card comments
+and card answers, chat sends. A **venue** is where some of it is also delivered. There are two:
+
+  - **chat**: Telegram and the web chat page, one venue. It shows the user's messages and what
+    the agent sent with `send_chat` (logged as kind `chat`), nothing else.
+  - **card**: a line-comment card on a note (`cards.json`). It shows the answers sent with
+    `answer_card` / `facet answer` (logged as kind `answer`, text `#<id> on [[Note]] L<n>: ...`).
+
+The agent's plain text (kind `talk`) reaches the stream only. A successful `send_chat` or
+`answer_card` call leaves no `tool`/`echo` lines: the `chat` or `answer` message is the record
+(a failed one is logged as an echo, so the failure is remembered). The safety net: when a call
+ends (not cancelled) and a user chat message in it — not a card comment, not a "[id] " report —
+has no `chat` after it, the turn's final text (the `talk` lines after its last step, else its
+last `talk`, else a line saying the turn ended without a reply) is logged as `chat`, so it
+reaches the user, and a `fallback` event is written (the turn record gets `fallback: true`).
+The text then stands in the stream twice, once as `talk` and once as `chat`.
 
 ## chat
 
@@ -502,7 +532,9 @@ directory's path, so tests and other chats never share one.
 Append-only, one JSON object per line, fsynced; never edit or delete a line.
 
     chat/main/YYYY-MM-DD.jsonl   {i, kind, text, size, date}   every message; i is the permanent id,
-                                 kind is user | talk | tool | echo | note, date is UTC ISO
+                                 kind is user | talk | chat | answer | tool | echo | note | work,
+                                 date is UTC ISO (talk: stream only; chat: sent to the chat
+                                 venue; answer: sent to a card — see **stream and venues**)
     chat/tree/YYYY-MM-DD.jsonl   {l, i, text, size}            summary node (l, i) covers messages
                                  [i·2^l, (i+1)·2^l); shown as id+n with id = i·2^l, n = 2^l
     usage.jsonl                  {date, kind, model, usage}    one line per API request the engine
@@ -545,7 +577,8 @@ the engine's work, never read back by it; a write that fails is dropped silently
              second init), model, effort, view_bytes,
              view_lines, view_marks, shared_bytes (prefix shared with the previous turn's
              view), shared_to_mark (the last cache mark inside that prefix), and what its
-             subagents cost: agents, agent_reqs, agent_eq, agent_bytes (reports logged)
+             subagents cost: agents, agent_reqs, agent_eq, agent_bytes (reports logged);
+             fallback (its final text was sent to the chat for it)
     agent    one subagent, from the tool call that sent it to the report it handed back:
              tool_use_id, task, agent_kind (subagent_type), description, status, ask_bytes
              (the prompt it was given), report_bytes (what the chat now carries), reqs and eq
@@ -556,6 +589,8 @@ the engine's work, never read back by it; a write that fails is dropped silently
              context_bytes, step_bytes, blocks, marks
     limits   info: Claude Code's rate_limit_info (status, five_hour / seven_day utilization
              and resetsAt), each time it changes
+    fallback turn, bytes: a call ended with a chat message unanswered in the chat venue, so
+             its final text was logged as `chat` (see **stream and venues**)
     input    how (starting | queued | held | delivered | later), bytes; never the text
     model    model: a /model switch
     system   name (master | compact), hash, bytes: a new system prompt version

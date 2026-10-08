@@ -56,11 +56,16 @@ report reaches you later the same way a backgrounded one would, had it
 lived — a message of its own, starting \"[id] \", that begins a fresh
 turn whenever it is ready.
 
+Your text goes to the log, not to the user: they see only what you
+send with send_chat, on Telegram and the chat page alike. Send them
+what they should read, as often as you like; whatever else you write
+stays in the log as your own record. A turn that ends without a send
+after a chat message has its last text sent for you.
+
 A line-comment from the viewer carries its own id, shaped `[[Note]]
-L<n> #<id>: \"quote\"`; answer it with `facet answer <id> <text>`
-and nothing else: the reply belongs to that card alone, so end the turn
-without chat text (or one short line at most). Give `--apply <replacement>` only when
-you mean to replace the line itself.";
+L<n> #<id>: \"quote\"`; answer it with answer_card, not send_chat:
+the reply belongs to that card alone. Give `apply` only when you mean
+to replace the line itself.";
 
 pub const VIEW_DOC: &str = "\
 The view: the whole chat between {NAME} and the user, oldest first, inside
@@ -69,7 +74,9 @@ The view: the whole chat between {NAME} and the user, oldest first, inside
   id+n|text   the n messages from id on, summarized (newlines shown as spaces)
 
 A summary tags each item with its kind: user (the user's words), talk
-({NAME}'s replies), tool ({NAME}'s tool calls), echo (their results), note
+({NAME}'s text, for the log only), chat ({NAME}'s messages to the user),
+answer ({NAME}'s replies on a line-comment card), tool ({NAME}'s tool
+calls), echo (their results), note
 (memories from before this chat), or work (the report of a subagent or
 a computer task, which the log holds as a user message starting
 \"[id] \"). A short message is its own line, word for word. Recent lines
@@ -92,7 +99,9 @@ pub const COMPACT: &str = "\
 You write the memory of {NAME}, an AI agent that works for one user in one
 endless chat, through tools and subagents. Each message has a kind: user
 (the user's words; but one starting \"[id] \" is a subagent's report),
-talk ({NAME}'s replies), tool ({NAME}'s tool calls), echo (tool results), note
+talk ({NAME}'s own text, which only the log sees), chat ({NAME}'s messages
+to the user), answer ({NAME}'s replies on a line-comment card), tool
+({NAME}'s tool calls), echo (tool results), note
 (memories from before this chat).
 
 Over the messages grows a binary tree of one-line summaries. First, each
@@ -154,6 +163,8 @@ pub const SCALE: &str = "user: wants the parser rewritten as a Pratt loop, keep 
 
 pub const ZOOM_DOC: &str = "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.";
 pub const DATE_DOC: &str = "The date and time of message id.";
+pub const SEND_DOC: &str = "Send text to the user in the chat (Telegram and the chat page). The only way your words reach them there; it is also logged.";
+pub const ANSWER_DOC: &str = "Answer the line-comment card with this id (from `[[Note]] L<n> #<id>`): the text appears on that card only, not in the chat; it is also logged. apply, only if you mean it: replacement text for the commented line, offered on the card as a fix.";
 
 /// What a subagent is told (§9). As in the gist, it is sent the view as it stood when it
 /// was spawned, as context and nothing more; it has no memory of the chat and cannot ask,
@@ -182,7 +193,9 @@ What follows is that view: the whole chat between {NAME} and the user,
 oldest first, inside <chat> tags, as one-line summaries of the messages,
 each line \"id+n|text\" for the n messages from id on. A summary tags
 each item with its kind: user (the user's words), talk ({NAME}'s
-replies), tool ({NAME}'s tool calls), echo (their results), note
+own text), chat ({NAME}'s messages to the user), answer ({NAME}'s
+replies on a line-comment card), tool ({NAME}'s tool calls), echo
+(their results), note
 (older memories), or work (an earlier subagent's report). No message
 appears in full, but you can open one: zoom(id, n) gives the two lines
 of n/2 under the line id+n, and zoom(id, 1) gives message id whole;

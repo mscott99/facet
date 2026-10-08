@@ -56,7 +56,9 @@ pub fn spawn(e: &Arc<Engine>, model: &str, kind: &str, desc: &str, task: &str) -
     let read = "Bash,Read,Glob,Grep,WebFetch,WebSearch,mcp__optchat__zoom,mcp__optchat__date";
     let tools = if kind == "explore" { read.to_string() } else { format!("{},Edit,Write", read) };
     let mut args = claude::base_args(&model, "", &sysf.to_string_lossy(), &tools);
-    let mcp = json!({"mcpServers": {"optchat": {"type": "http", "url": e.mcp_url.get().cloned().unwrap_or_default()}}});
+    // the read-only path: zoom and date, never the master's send_chat / answer_card
+    let url = super::mcp::agent_url(&e.mcp_url.get().cloned().unwrap_or_default());
+    let mcp = json!({"mcpServers": {"optchat": {"type": "http", "url": url}}});
     args.extend(["--mcp-config".into(), mcp.to_string(), "--permission-mode".into(), e.conf.permission.clone()]);
 
     let mut p = Proc::spawn_detached(&args, &[("FACET_SPAWN", "1")], &e.conf.cwd).map_err(|x| x.to_string())?;

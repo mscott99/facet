@@ -35,6 +35,20 @@ pub fn register(dir: &Path, id: &str, note: &str, line: i64) {
     save(dir, &data);
 }
 
+/// The card a message came from, if it came from one: the id in `[[Note]] L<n> #<id>...`,
+/// the shape web.rs's `comment()` gives every line-comment (after a Telegram prelude, if
+/// one rode along). Such a message belongs to the card venue: it is answered on the card, it
+/// is not shown in the chat, and a turn it starts gets no fallback reply in the chat.
+pub fn from_card(text: &str) -> Option<&str> {
+    let t = match text.find("[end prior context]\n\n") { Some(k) => &text[k + 21..], None => text };
+    let t = t.trim_start().strip_prefix("[[")?;
+    let t = &t[t.find("]] L")? + 4..];
+    let t = t.trim_start_matches(|c: char| c.is_ascii_digit());
+    let t = t.strip_prefix(" #")?;
+    let n = t.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(t.len());
+    if n == 0 { None } else { Some(&t[..n]) }
+}
+
 pub fn get(dir: &Path, id: &str) -> Option<Value> { load(dir).get(id).cloned() }
 
 /// The answer, with the code of the fix it offered, if it offered one. An id this file has
@@ -58,6 +72,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn a_card_comment_is_told_from_a_chat_message() {
+        assert_eq!(from_card("[[Some Note]] L16 #cmuyx4le1x81: \"$x$\" fix this"), Some("cmuyx4le1x81"));
+        assert_eq!(from_card("[[Some Note]] L3 #c1 hi"), Some("c1"));
+        assert_eq!(from_card("[2 command(s) answered on Telegram]\nx\n[end prior context]\n\n[[N]] L1 #ab: q"), Some("ab"));
+        assert_eq!(from_card("look at [[Some Note]] L3 #c1"), None);
+        assert_eq!(from_card("[[Some Note]] is wrong"), None);
+        assert_eq!(from_card("hello"), None);
     }
 
     #[test]

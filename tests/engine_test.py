@@ -357,7 +357,9 @@ try:
     r = req({"op": "answer", "id": "c1", "text": "looks right to me"})
     check(r["ok"] is True and r.get("code") is None, "answering with no --apply attaches no fix: %r" % r)
     time.sleep(0.5)
-    check(not any(m["text"] == "looks right to me" for m in log()[n0:]), "the answer stays out of the chat log")
+    L = log()[n0:]
+    check([(m["kind"], m["text"]) for m in L] == [("answer", "#c1 on [[Some Note]] L3: looks right to me")],
+          "the answer is in the stream as kind answer, naming its card: %r" % L)
     card = json.load(open(cards_f))["c1"]
     check(len(card["answers"]) == 1 and card["answers"][0]["text"] == "looks right to me" and card["answers"][0]["code"] is None,
           "the answer is recorded against its card, not just the chat: %r" % card)
@@ -365,6 +367,66 @@ try:
     check(r2["ok"] is False and "no card" in r2["error"], "an unregistered id is refused, not silently dropped")
     r3 = req({"op": "answer", "id": "c1", "text": ""})
     check(r3["ok"] is False, "an empty answer is refused")
+
+    # K: stream and venues. The master's plain text is the stream's only; send_chat (an MCP
+    # tool) is what reaches the chat venue; answer_card reaches the card and the stream, never
+    # the chat; a chat message left unanswered in the chat gets the turn's final text (fallback)
+    n0 = len(log())
+    req({"op": "send", "text": "CHAT hello from the chat tool"})
+    wait(lambda: any(m["kind"] == "talk" and m["text"] == "said it" for m in log()[n0:]), 30, "reply after send_chat")
+    wait(idle, 30, "idle after send_chat")
+    L = log()[n0:]
+    check([(m["kind"], m["text"]) for m in L] == [("user", "CHAT hello from the chat tool"), ("chat", "hello from the chat tool"), ("talk", "said it")],
+          "send_chat logs kind chat, and its call and result leave no tool/echo lines: %r" % [(m["kind"], m["text"]) for m in L])
+    check(not any(x.get("fallback") for x in events() if x["ev"] == "turn" and x["first"] == n0), "a turn that sent to the chat gets no fallback")
+
+    n0 = len(log())
+    req({"op": "send", "text": "plain question"})
+    wait(lambda: any(m["kind"] == "chat" for m in log()[n0:]), 30, "fallback chat")
+    wait(idle, 30, "idle after fallback")
+    L = [(m["kind"], m["text"]) for m in log()[n0:]]
+    check(L == [("user", "plain question"), ("talk", "ok"), ("chat", "ok")], "with no send, the final text goes to the chat as kind chat: %r" % L)
+    check(any(x["ev"] == "fallback" and x["turn"] == n0 for x in events()) and
+          any(x["ev"] == "turn" and x["first"] == n0 and x["fallback"] for x in events()), "the fallback is recorded")
+
+    json.dump({"c2": {"note": "Other Note", "line": 7, "answers": []}}, open(cards_f, "w"))
+    n0 = len(log())
+    req({"op": "send", "text": '[[Other Note]] L7 #c2: "a line" CARD c2 please', "later": True})
+    wait(lambda: any(m["kind"] == "talk" and m["text"] == "noted" for m in log()[n0:]), 30, "reply after answer_card")
+    wait(idle, 30, "idle after answer_card")
+    L = [(m["kind"], m["text"]) for m in log()[n0:]]
+    check(L == [("user", '[[Other Note]] L7 #c2: "a line" CARD c2 please'), ("answer", "#c2 on [[Other Note]] L7: card answer"), ("talk", "noted")],
+          "answer_card logs kind answer, and a card-only turn gets no chat fallback: %r" % L)
+    card = json.load(open(cards_f))["c2"]
+    check([a["text"] for a in card["answers"]] == ["card answer"], "answer_card lands on the card")
+
+    n0 = len(log())
+    req({"op": "send", "text": "CHATFAIL"})
+    wait(lambda: any(m["kind"] == "chat" for m in log()[n0:]), 30, "fallback after a failed send")
+    wait(idle, 30, "idle after failed send")
+    L = [(m["kind"], m["text"]) for m in log()[n0:]]
+    check(L[1][0] == "echo" and "send_chat failed" in L[1][1] and L[-1] == ("chat", "ok"),
+          "a failed send is remembered as an echo, and the fallback still answers: %r" % L)
+
+    # what the chat venue shows (the web chat page and Telegram share `Msg::in_chat`; Telegram
+    # pushes kind chat alone, unit-tested in log.rs): the real binary's page, served against D
+    import random, urllib.request
+    home = os.path.join(D, "home"); os.makedirs(os.path.join(home, ".config/facet"))
+    port = random.randint(20000, 40000)
+    json.dump({"store": D, "port": port, "token": "tk"}, open(os.path.join(home, ".config/facet/facet.json"), "w"))
+    srv = subprocess.Popen([BIN, "serve"], env=dict(env, HOME=home), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        page = ""
+        for _ in range(50):
+            try:
+                page = urllib.request.urlopen("http://127.0.0.1:%d/tk/f/log?since=-1" % port, timeout=2).read().decode(); break
+            except Exception: time.sleep(0.1)
+        check("hello from the chat tool" in page and "plain question" in page, "the chat page shows user messages and chat sends")
+        check("said it" not in page and "noted" not in page, "the chat page hides the agent's plain text")
+        check("card answer" not in page and "CARD c2" not in page, "the chat page hides card comments and card answers")
+        check("send_chat failed" not in page and "seed message" not in page, "the chat page hides steps and notes")
+    finally:
+        srv.kill()
 
     check(os.path.isdir(os.path.join(D, ".git")), "chat directory committed after turns")
 finally:

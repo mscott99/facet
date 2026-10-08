@@ -135,6 +135,8 @@ struct Trace {
     delivered: usize, requeued: usize, outcome: &'static str,
     /// subagents sent out this turn, their requests, and what they cost (§9)
     agents: usize, agent_reqs: usize, agent_eq: f64, agent_bytes: usize,
+    /// the turn sent nothing to the chat, so its final text was sent there for it (`fallback`)
+    fallback: bool,
 }
 
 /// One subagent, from the tool call that sent it to the report it hands back. Its own
@@ -256,7 +258,7 @@ fn run(e: &Arc<Engine>) {
             "prime_read": tr.prime_read, "prime_write": tr.prime_write, "midrun_delivered": tr.delivered,
             "queue_after": tr.requeued, "outcome": tr.outcome, "model": e.model(), "effort": e.conf.effort,
             "agents": tr.agents, "agent_reqs": tr.agent_reqs, "agent_eq": tr.agent_eq.round(),
-            "agent_bytes": tr.agent_bytes,
+            "agent_bytes": tr.agent_bytes, "fallback": tr.fallback,
         });
         if let (Some(r), Some(v)) = (rec.as_object_mut(), vstats.as_object()) { for (k, x) in v { r.insert(k.clone(), x.clone()); } }
         super::events::log(&e.dir, "turn", rec);
@@ -404,6 +406,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     let mut deferred: Vec<String> = Vec::new();
     let mut agents: HashMap<String, Agent> = HashMap::new(); // live subagents, by tool id
     let mut checked_tools = false;
+    let mut quiet: HashSet<String> = HashSet::new(); // send_chat / answer_card calls, by tool id
     let mut killed = false;
     let mut stale = false; // a follow-up turn of this conversation has started (see `init`)
     let (mut cc, mut tq) = (String::new(), Instant::now());
@@ -525,9 +528,14 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                         }
                         "thinking" => e.emit(json!({"ev": "thought", "text": b["thinking"]})),
                         "tool_use" => {
-                            let line = format!("{} {}", b["name"].as_str().unwrap_or("?"), b["input"]);
-                            e.log("tool", &line);
                             let name = b["name"].as_str().unwrap_or("");
+                            // an output tool's call is not logged as a step: the `chat` or
+                            // `answer` message it logs itself is the record (mcp.rs)
+                            if is_output(name) {
+                                if let Some(id) = b["id"].as_str() { quiet.insert(id.to_string()); }
+                            } else {
+                                e.log("tool", &format!("{} {}", name, b["input"]));
+                            }
                             if name == "Task" || name == "Agent" {
                                 if let Some(id) = b["id"].as_str() { agents.insert(id.to_string(), Agent::new(&b["input"])); }
                             }
@@ -569,7 +577,8 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                         Some(a) => { if text.starts_with("Async agent launched") { a.bg = true; } a.bg }
                         None => false,
                     };
-                    if !bg {
+                    let ok = quiet.remove(id) && (text == super::mcp::SENT || text == super::mcp::ANSWERED);
+                    if !bg && !ok {
                         // a subagent's report is the one thing it leaves behind: its own kind (§9)
                         let sent = agents.remove(id);
                         let kind = if sent.is_some() { "work" } else { "echo" };
@@ -593,6 +602,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
         }
     }
     for m in deferred.drain(..) { e.log("user", &m); }
+    if tr.outcome != "cancelled" { fallback(e, tr); }
     // a subagent whose report never came back (the call ended or was killed first) still spent
     let left: Vec<(String, Agent)> = agents.drain().collect();
     for (id, a) in left { done(e, &a, &id, "", tr); }
@@ -611,6 +621,36 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     if killed && !cancel && tr.requeued > 0 { e.notice("messages that arrived after the last tool call go to a fresh call"); }
     if !killed { p.finish(); }
     if let Some(r) = meter.take() { e.spend("turn", &r); }
+}
+
+fn is_output(name: &str) -> bool { name.ends_with("__send_chat") || name.ends_with("__answer_card") }
+
+/// The safety net for the chat venue (README, "Stream and venues"): the agent's plain text
+/// reaches the stream only, so a turn that ends without a `send_chat` after a chat message
+/// would leave the user with silence. Then the turn's final text (the `talk` lines after its
+/// last step) goes to the chat as it stands, as kind `chat`, and an event records the
+/// fallback; with no text at all, one line saying the turn ended without a reply. Card
+/// comments and subagent reports are not owed a chat reply, so a turn of only those gets none.
+fn fallback(e: &Arc<Engine>, tr: &mut Trace) {
+    let pick = {
+        let m = e.mem.lock().unwrap();
+        let msgs = &m.store.msgs[tr.first.min(m.store.msgs.len())..];
+        // the last chat message the user is owed an answer to, and whether one came after it
+        let Some(k) = msgs.iter().rposition(|x| x.kind == "user" && crate::log::wants_chat(&x.text)) else { return };
+        if msgs[k..].iter().any(|x| x.kind == "chat") { return }
+        let after = &msgs[k + 1..];
+        let tail = after.iter().rev().take_while(|x| x.kind == "talk").collect::<Vec<_>>();
+        let text = if !tail.is_empty() {
+            tail.iter().rev().map(|x| x.text.trim()).collect::<Vec<_>>().join("\n\n")
+        } else {
+            after.iter().rev().find(|x| x.kind == "talk").map(|x| x.text.trim().to_string())
+                .unwrap_or_else(|| format!("(the turn ended without a reply: {})", tr.outcome))
+        };
+        text
+    };
+    tr.fallback = true;
+    super::events::log(&e.dir, "fallback", json!({"turn": tr.first, "bytes": pick.len()}));
+    e.log("chat", &pick);
 }
 
 /// One subagent, finished (or cut off with the call): what it was asked, what it cost, and

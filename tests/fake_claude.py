@@ -15,6 +15,10 @@
 #                 in the task notification's `summary`, and Claude Code then opens a
 #                 follow-up turn of this conversation (a second `init`) to hand it over —
 #                 all as measured on the real CLI (2.1.268)
+#   "CHAT x"   -> calls the engine's MCP send_chat with "x" (as the real CLI would, over HTTP to
+#                 the --mcp-config URL), then a reply "said it"
+#   "CARD id"  -> calls MCP answer_card for card id with "card answer", then a reply "noted"
+#   "CHATFAIL" -> calls send_chat with empty text (an error result), then a reply "ok"
 #   otherwise  -> one reply "ok"
 # A detached agent (`facet spawn`, FACET_SPAWN=1 in the environment): sleeps 1 s, then one
 # reply "SPAWN REPORT: looked into it, done" — long enough that a turn sent right after the
@@ -161,12 +165,33 @@ def run_bg_agent():
     step([{"type": "text", "text": "STALE FOLLOW-UP, not the chat's business"}])
     result("launched, I will hear back")
 
+def mcp_call(name, args):
+    import urllib.request
+    url = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]["optchat"]["url"]
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}).encode()
+    r = json.loads(urllib.request.urlopen(urllib.request.Request(url, body, {"Content-Type": "application/json"})).read())
+    return r["result"]["content"][0]["text"]
+
+def output_tool(name, args):
+    tid = "toolu_out_%f" % time.time()
+    step([{"type": "tool_use", "id": tid, "name": "mcp__optchat__" + name, "input": args}], stop="tool_use")
+    said = mcp_call(name, args)
+    out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tid, "content": said}]}})
+
 def run_turn(msg):
     if replay: out({"type": "user", "isReplay": True, "message": msg["message"]})
     t = text_of(msg)
     n = int(t.split("TOOLS ")[1].split()[0]) if "TOOLS " in t else 0
     if "BGAGENT" in t: return run_bg_agent()
     if "AGENT" in t: run_agent()
+    if "CHATFAIL" in t:
+        output_tool("send_chat", {"text": ""})
+    elif "CHAT " in t:
+        output_tool("send_chat", {"text": t.split("CHAT ", 1)[1].strip()})
+        time.sleep(0.2); step([{"type": "text", "text": "said it"}]); result("said it"); return
+    if "CARD " in t:
+        output_tool("answer_card", {"id": t.split("CARD ", 1)[1].split()[0], "text": "card answer"})
+        time.sleep(0.2); step([{"type": "text", "text": "noted"}]); result("noted"); return
     for k in range(n):
         tid = "tool%d_%f" % (k, time.time())
         step([{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "sleep %d" % k}}], stop="tool_use")

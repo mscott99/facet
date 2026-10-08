@@ -143,6 +143,9 @@ fn watch(dir: &std::path::Path, mut out_fn: impl FnMut(String) -> bool + Send + 
                         if rest.is_empty() { Some(String::new()) } else { Some(format!("{}\n", rest)) }
                     }
                     "talk" => Some(format!("{}\n", s("text"))),
+                    // the terminal shows the whole stream; what went to the chat or a card is marked
+                    "chat" => Some(format!("{}{}→ chat{}\n{}\n", BOLD, CYAN, OFF, s("text"))),
+                    "answer" => Some(format!("{}→ card {}{}", DIM, s("text"), OFF)),
                     "user" if mine(&s("text")) => None,
                     "user" => Some(format!("{}{}› {}{}", BOLD, CYAN, s("text"), OFF)),
                     "tool" => Some(format!("{}⏺ {}{}", DIM, one_line(&s("text"), 160), OFF)),
