@@ -102,7 +102,7 @@ textarea:focus{outline:1px solid var(--line)}
 .say .hd{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.35rem}
 .say .hd .q{flex:1;font:11.5px/1.5 var(--mono);color:var(--dim);
  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.say .hd .x{flex:none;font:11px var(--mono);color:var(--dim)}
+.say .hd .x{flex:none;font:16px/1 var(--mono);background:none;border:0;cursor:pointer;padding:0 4px;color:var(--dim)}
 .say .hd .x:hover{color:var(--err)}
 .say .th .t{white-space:pre-wrap;margin:.5rem 0 0}
 .say .th .t:first-child{margin-top:0}
@@ -235,7 +235,7 @@ document.addEventListener('visibilitychange',function(){
 function card(b,o){
   var d=document.createElement('div');d.className='say';
   d.dataset.id=o.id;d.dataset.note=o.note;d.dataset.line=o.line;d.dataset.where=o.where;
-  d.innerHTML='<div class=hd><div class=q></div><button class=x type=button>remove</button></div>'+
+  d.innerHTML='<div class=hd><div class=q></div><button class=x type=button title=remove aria-label=remove>&times;</button></div>'+
     '<div class=th></div><div class=cmp><textarea rows=1></textarea><button class=go type=button>send</button></div>'+
     '<div class=st></div>';
   d.querySelector('.q').textContent=o.where;
