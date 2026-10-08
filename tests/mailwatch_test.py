@@ -11,6 +11,11 @@ path = os.path.join(HERE, "..", "bin", "mailwatch")
 W = importlib.util.module_from_spec(importlib.util.spec_from_loader("mailwatch", importlib.machinery.SourceFileLoader("mailwatch", path)))
 W.__spec__.loader.exec_module(W)
 QUIET = W.quiet
+VAN = ZoneInfo("America/Vancouver")
+def at(h, m=0, d=8): return datetime(2026, 10, d, h, m, tzinfo=VAN)
+CLOCK = [at(10)]
+JUDGE0 = W.judge
+W.now_of = lambda conf: CLOCK[0]          # fake clock: tests move CLOCK[0]
 
 
 def msg(i, frm, subj, addr=None, bulk=False, seen=False, acct="a"):
@@ -66,7 +71,7 @@ class T(unittest.TestCase):
         W.run(dry, out=out.append)
         return open(sent).read().splitlines() if os.path.exists(sent) else [], out
 
-    VERDICT = "print(json.dumps({'is_error':False,'result':json.dumps([{'id':'a:2','notify':True,'why':'deadline'},{'id':'a:3','notify':False,'why':'promo'}])}))"
+    VERDICT = "print(json.dumps({'is_error':False,'result':json.dumps([{'id':'a:1','tier':'now','why':'m'},{'id':'a:2','notify':True,'tier':'now','why':'deadline'},{'id':'a:3','notify':False,'tier':'none','why':'promo'}])}))"
 
     def test_one_message_per_run(self):
         os.path.exists(W.STATE_DIR) or os.makedirs(W.STATE_DIR)
@@ -95,7 +100,7 @@ class T(unittest.TestCase):
         self.assertEqual(len(sent), 1); self.assertIn("triage unavailable", sent[0]); self.assertIn("unjudged", sent[0])
 
     BOTH = ("req=sys.stdin.read()\n"
-            "r=[{'id':'a:1','attention':False,'why':'fyi'},{'id':'a:2','attention':True,'why':'asks for slides by Fri'}] if 'attention' in req else [{'id':'a:2','verdict':'notify','why':'person'}]\n"
+            "r=[{'id':'a:1','tier':'none','why':'fyi'},{'id':'a:2','tier':'now','why':'asks for slides by Fri'}] if 'can_wait' in req else [{'id':'a:2','verdict':'notify','why':'person'}]\n"
             "print(json.dumps({'is_error':False,'result':json.dumps(r)}))")
 
     def test_sonnet_filters_and_summarises(self):
@@ -106,14 +111,16 @@ class T(unittest.TestCase):
         self.assertTrue(sent[0].startswith("push --log [mailwatch] 1 needs you"))
 
     def test_sonnet_says_none_pushes_nothing(self):
-        none = ("print(json.dumps({'is_error':False,'result':json.dumps([{'id':'a:1','attention':False,'why':'fyi'}])}))")
+        none = ("print(json.dumps({'is_error':False,'result':json.dumps([{'id':'a:1','tier':'none','why':'fyi'}])}))")
         sent, out = self.run_pass([msg(1, "Michael", "hi", "michael.friedlander@ubc.ca")], none)
         self.assertEqual(sent, [])
 
     def test_missing_sonnet_verdict_still_tells(self):
         sent, out = self.run_pass([msg(1, "Michael", "hi", "michael.friedlander@ubc.ca")],
                                   "print(json.dumps({'is_error':False,'result':'[]'}))")
-        self.assertEqual(len(sent), 1); self.assertIn("a:1", sent[0])
+        self.assertEqual(sent, [])                                  # missing verdict -> 'today': queued, not pushed
+        q = json.load(open(W.STATE_DIR + "/state.json"))["_digest"]["queue"]
+        self.assertEqual([x["id"] for x in q], ["a:1"])
 
     def test_dry_run_shows_push(self):
         sent, out = self.run_pass([msg(2, "Bob", "deadline")], self.BOTH, dry=True)
@@ -253,7 +260,7 @@ class Idle(unittest.TestCase):
         self.sent = os.path.join(tmp, "isent.txt")
         if os.path.exists(self.sent): os.remove(self.sent)
         W.FACET = script(f"open({self.sent!r},'a').write(' '.join(sys.argv[1:]).replace(chr(10),'|')+chr(10))")
-        W.CLAUDE = script("print(json.dumps({'is_error':False,'result':json.dumps([{'id':'a:1','attention':True,'why':'asks you'},{'id':'a:2','attention':True,'why':'x'}])}))")
+        W.CLAUDE = script("print(json.dumps({'is_error':False,'result':json.dumps([{'id':'a:1','tier':'now','why':'asks you'},{'id':'a:2','tier':'now','why':'x'}])}))")
         W.fulltext = lambda L, acct, uid, cap=6000: "full"
         W.snippet = lambda L, a, u: "body"
         self.acct = {"name": "a"}
@@ -325,6 +332,129 @@ class Idle(unittest.TestCase):
 def email_addr(h):
     import email.utils
     return email.utils.parseaddr(h)
+
+
+
+class Digest(unittest.TestCase):
+    """Tiers, digest timing, after-lunch push, quiet hours, dedupe with idle. Fake clock (CLOCK)."""
+    def setUp(self):
+        os.makedirs(W.STATE_DIR, exist_ok=True)
+        json.dump(dict(W.DEFAULTS), open(W.CONF, "w"))
+        self.sent = os.path.join(tmp, "dsent.txt")
+        if os.path.exists(self.sent): os.remove(self.sent)
+        W.FACET = script(f"open({self.sent!r},'a').write(' '.join(sys.argv[1:]).replace(chr(10),'|')+chr(10))")
+        self.verdicts = {}
+        W.judge = lambda items, conf: ({m["id"]: self.verdicts.get(m["id"], ("today", False, "w")) for m, _ in items}, None)
+        W.fulltext = lambda L, acct, uid, cap=6000: "full"
+        W.snippet = lambda L, a, u: "body"
+        self.acct = {"name": "a"}
+        self.L = type("L", (), {"accounts": staticmethod(lambda: [self.acct])})
+        W.load_life = lambda: self.L
+        self.qn = False
+        W.quiet = lambda c, now=None: self.qn
+        self.mails = []
+        W.new_mail = lambda L, a, st, back=0: (list(self.mails), {"uv": 1, "last": 50}, False)
+        json.dump({"a": {"uv": 1, "last": 0}}, open(W.STATE_DIR + "/state.json", "w"))
+        CLOCK[0] = at(9)
+
+    def tearDown(self):
+        W.judge = JUDGE0
+        CLOCK[0] = at(10)
+
+    def pushes(self):
+        return open(self.sent).read().splitlines() if os.path.exists(self.sent) else []
+
+    def state(self):
+        return json.load(open(W.STATE_DIR + "/state.json"))
+
+    def mail(self, i, frm="Michael", subj="s"):
+        return msg(i, frm, subj, "michael.friedlander@ubc.ca")
+
+    def test_tier_of_defaults(self):
+        self.assertEqual(W.tier_of({"id": "x"})[0], "today")
+        self.assertEqual(W.tier_of({"tier": "NOW", "why": "w"}), ("now", False, "w"))
+        self.assertEqual(W.tier_of({"tier": "banana"})[0], "today")
+        self.assertEqual(W.tier_of({"tier": "today", "can_wait": "yes"})[1], False)    # only a real true counts
+
+    def test_now_pushes_immediately_today_queues(self):
+        self.verdicts = {"a:1": ("now", False, "urgent")}
+        self.mails = [self.mail(1), self.mail(2)]
+        W.run(False, out=lambda l: None)
+        p = self.pushes()
+        self.assertEqual(len(p), 1); self.assertIn("a:1", p[0]); self.assertNotIn("a:2", p[0])
+        self.assertEqual([q["id"] for q in self.state()["_digest"]["queue"]], ["a:2"])
+
+    def test_digest_at_times_once_and_empty_sends_nothing(self):
+        self.mails = [self.mail(1), self.mail(2)]
+        CLOCK[0] = at(6, 30); self.qn = False
+        W.run(False, out=lambda l: None)                    # 06:30: queued, no digest due yet
+        self.assertEqual(self.pushes(), [])
+        self.mails = []
+        CLOCK[0] = at(8, 5); W.run(False, out=lambda l: None)
+        p = self.pushes()
+        self.assertEqual(len(p), 1); self.assertTrue(p[0].startswith("push --log [mail digest] 2 to read today"))
+        self.assertIn("a:1", p[0]); self.assertIn("a:2", p[0])
+        self.assertEqual(self.state()["_digest"]["queue"], [])
+        CLOCK[0] = at(8, 25); W.run(False, out=lambda l: None)                  # same digest slot: nothing
+        CLOCK[0] = at(12, 35); W.run(False, out=lambda l: None)                 # lunch digest, empty queue: nothing
+        self.assertEqual(len(self.pushes()), 1)
+        self.mails = [self.mail(3)]
+        CLOCK[0] = at(9); W.new_mail = lambda L, a, st, back=0: (list(self.mails), {"uv": 1, "last": 60}, False)
+        CLOCK[0] = at(12, 40); W.run(False, out=lambda l: None)                 # arrives after lunch digest
+        self.assertEqual(len(self.pushes()), 2)                                   # after lunch, can_wait False -> pushed
+
+    def test_after_lunch_cannot_wait_pushed_can_wait_queued(self):
+        self.verdicts = {"a:1": ("today", False, "due tonight"), "a:2": ("today", True, "fyi")}
+        self.mails = [self.mail(1), self.mail(2)]
+        CLOCK[0] = at(14)
+        W.run(False, out=lambda l: None)
+        p = self.pushes()
+        self.assertEqual(len(p), 1); self.assertIn("a:1", p[0]); self.assertNotIn("a:2", p[0])
+        self.assertNotIn("[mail digest]", p[0])
+        self.assertEqual([q["id"] for q in self.state()["_digest"]["queue"]], ["a:2"])
+        self.mails = []
+        CLOCK[0] = at(8, 1, d=9); W.run(False, out=lambda l: None)             # next morning's digest carries it
+        self.assertEqual(len(self.pushes()), 2); self.assertIn("a:2", self.pushes()[1])
+
+    def test_before_lunch_cannot_wait_still_waits_for_digest(self):
+        self.verdicts = {"a:1": ("today", False, "x")}
+        self.mails = [self.mail(1)]
+        CLOCK[0] = at(10)
+        W.run(False, out=lambda l: None)
+        self.assertEqual(self.pushes(), [])
+
+    def test_quiet_hours_hold_now_until_seven(self):
+        self.verdicts = {"a:1": ("now", False, "urgent")}
+        self.mails = [self.mail(1)]
+        self.qn = True; CLOCK[0] = at(23, 30)
+        W.run(False, out=lambda l: None)
+        self.assertEqual(self.pushes(), []); self.assertEqual(self.state()["a"]["last"], 0)   # cursor untouched
+        self.qn = False; CLOCK[0] = at(7, 5, d=9)
+        W.run(False, out=lambda l: None)
+        self.assertEqual(len(self.pushes()), 1); self.assertIn("a:1", self.pushes()[0])
+
+    def test_idle_and_timer_dedupe(self):
+        self.mails = [self.mail(1)]
+        CLOCK[0] = at(7, 30)
+        self.assertEqual(W.idle_handle(self.L, self.acct, lambda l: None), 1)       # idle queues it
+        W.run(False, out=lambda l: None)                                              # timer skips it
+        self.assertEqual([q["id"] for q in self.state()["_digest"]["queue"]], ["a:1"])
+        W.dispatch(self.state(), dict(W.DEFAULTS), [], [(self.mail(1), "w", False)], at(9), True, lambda l: None)
+        st = self.state()
+        W.dispatch(st, dict(W.DEFAULTS), [], [(self.mail(1), "w", False)], at(9), False, lambda l: None)
+        self.assertEqual(len(st["_digest"]["queue"]), 1)
+
+    def test_dry_run_sends_and_saves_nothing(self):
+        self.mails = [self.mail(1)]
+        before = open(W.STATE_DIR + "/state.json").read()
+        out = []
+        CLOCK[0] = at(13); W.run(True, out=out.append)
+        self.assertEqual(self.pushes(), []); self.assertEqual(open(W.STATE_DIR + "/state.json").read(), before)
+        self.assertTrue(any("tiers:" in l for l in out))
+
+    def test_push_refuses_empty(self):
+        with self.assertRaises(RuntimeError):
+            W.push("  ")
 
 
 if __name__ == "__main__":

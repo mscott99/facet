@@ -740,7 +740,8 @@ that is obviously not worth reading (see "Marking read" below).
 4. **One Sonnet judgement** of the candidates (`always` mail plus triage `notify`; `unsure` is never escalated, and
    stays unread). One `claude -p --model sonnet` (`judge_model`) call reads each candidate's full text (PEEK,
    text/plain, quotes stripped, 6000 chars each) and says per mail whether it truly needs his attention, with a
-   short why (who, what is asked, deadline). A missing verdict counts as "needs attention". If Sonnet fails, every
+   short why (who, what is asked, deadline). Verdicts are tiers, see "Tiers and digests" below; a missing or garbled
+   verdict counts as `today` (never `now`). If Sonnet fails, every
    candidate is pushed with its triage-level reason (`(unjudged)`), so an always-sender mail is never dropped.
    Mail Sonnet calls not needed is only noted in `~/.local/state/mailwatch/judged.jsonl` (no bodies); it is *not*
    marked read.
@@ -750,6 +751,24 @@ straight to Telegram, no Opus turn, and the same text is added to the chat log a
 while a turn is running, so it never starts a turn but OptChat sees it later). `facet push --log` pushes first;
 if only the logging fails it warns on stderr and still exits 0, so the push is never repeated. `--dry-run` prints
 `WOULD PUSH:` plus the text. Ids work with `life mail show/thread`. Quiet hours hold everything until morning.
+
+**Tiers and digests.** Only mail needing immediate attention notifies instantly. The one batched Sonnet call returns
+per mail `tier` = `now` (action within hours: same-day meeting change, deadline today, supervisor waiting),
+`today` (read it today) or `none`, and for `today` also `can_wait` (true = can wait till tomorrow morning). Both the
+timer and the `--idle` path use it (`tiers()` + `dispatch()` in `bin/mailwatch`).
+- `now`: pushed at once with `facet push --log` (`[mailwatch] N need you`), as before.
+- `today`: appended to a queue in `state.json` under `_digest.queue` (deduped by account:uid, so idle and timer never
+  double-queue). Config `digest_times` (default `["08:00","12:30"]`, in the config's `timezone`): the first timer run
+  after each time sends ONE message `[mail digest] N to read today`, one line per mail (sender, subject, id, why), and
+  clears the queue; empty queue sends nothing. `_digest.last` stops a slot firing twice.
+- After the day's last digest time, `today` mail with `can_wait` false is pushed at once (together with any `now`
+  mail, one message); with `can_wait` true it stays queued for the next morning's digest.
+- Quiet hours (23:00-07:00) stay hard. Nothing runs then: the timer and idle return before touching mail or the
+  cursor, so a `now` mail that arrived overnight is simply found by the first timer run at/after 07:00 and pushed
+  then (`today` mail from then waits for the 08:00 digest).
+- `facet push` (and `mailwatch.push()`) refuse empty text.
+- `--dry-run` prints each tier decision, `tiers: now=N today=N none=N`, queue/push decisions and the digest it would
+  send; it saves nothing. Tests use a fake clock.
 
 **Marking read** (config `mark_read`, default true). Set `\Seen` only on (a) mail matching a `mute` rule or
 carrying bulk headers, and (b) mail the triage returns as `skip`. The triage verdict is 3-way
