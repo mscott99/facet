@@ -356,7 +356,8 @@ try:
     n0 = len(log())
     r = req({"op": "answer", "id": "c1", "text": "looks right to me"})
     check(r["ok"] is True and r.get("code") is None, "answering with no --apply attaches no fix: %r" % r)
-    wait(lambda: any(m["kind"] == "talk" and m["text"] == "looks right to me" for m in log()[n0:]), 10, "the answer joins the chat as talk")
+    time.sleep(0.5)
+    check(not any(m["text"] == "looks right to me" for m in log()[n0:]), "the answer stays out of the chat log")
     card = json.load(open(cards_f))["c1"]
     check(len(card["answers"]) == 1 and card["answers"][0]["text"] == "looks right to me" and card["answers"][0]["code"] is None,
           "the answer is recorded against its card, not just the chat: %r" % card)

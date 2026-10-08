@@ -58,7 +58,8 @@ turn whenever it is ready.
 
 A line-comment from the viewer carries its own id, shaped `[[Note]]
 L<n> #<id>: \"quote\"`; answer it with `facet answer <id> <text>`
-rather than only in chat, and give `--apply <replacement>` only when
+and nothing else: the reply belongs to that card alone, so end the turn
+without chat text (or one short line at most). Give `--apply <replacement>` only when
 you mean to replace the line itself.";
 
 pub const VIEW_DOC: &str = "\

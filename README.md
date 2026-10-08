@@ -111,8 +111,8 @@ its own Python server on 127.0.0.1:8765/tailnet :9443 — is retired (archived a
     typed, so it reads the same as a reply typed by hand. The id is what lets an answer find
     its way back to the right card instead of to every card at once: `facet answer <id>
     <text>` (`cards.rs`, engine op `answer`) is the only thing that can put a reply inside one,
-    logged as an ordinary `talk` message besides, so the main chat keeps the whole exchange
-    too. Every card keeps a quiet `remove`, sent or not; once answered, a further line opens
+    kept out of the main chat and Telegram altogether (the tool call and its echo are the only
+    trace in the log; the master is told to end such a turn without chat text). Every card keeps a quiet `remove`, sent or not; once answered, a further line opens
     inside it to reply back, carrying the same id, so the thread stays attached to where it
     started. `--apply <replacement>` on the answer, given only when there truly is one to
     offer (never guessed from prose), becomes a diagnostic fix (`diag::propose`) the card can

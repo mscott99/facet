@@ -374,7 +374,6 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
                                 None => None,
                             };
                             let _ = cards::answer(&sd, &id, &text, code.as_deref());
-                            e.log("talk", &text);
                             json!({"ok": true, "code": code})
                         }
                     }
