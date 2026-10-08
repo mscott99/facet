@@ -196,6 +196,7 @@ fn put(cfg: &Cfg, data: &mut Value, note: &str, rest: Vec<Value>) {
     if let Some(m) = data.as_object_mut() {
         if rest.is_empty() { m.remove(note); } else { m.insert(note.into(), Value::Array(rest)); }
     }
+    if let Some(d) = file(cfg).parent() { let _ = std::fs::create_dir_all(d); }
     let _ = crate::doc::write(&file(cfg),
         &(serde_json::to_string_pretty(data).unwrap_or_default() + "\n"));
 }
