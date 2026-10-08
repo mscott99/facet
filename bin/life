@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """life — read/act on your mail, calendar and the web from the shell.
 
+On Linux the same commands run against IMAP/SMTP and iCal URLs (bin/life_linux.py, config
+~/.config/life/accounts.json); the rest of this describes macOS.
+
 Read paths go straight at the macOS SQLite stores (fast, no app interaction):
   mail      ~/Library/Mail/V10/MailData/Envelope Index   (+ .emlx bodies)
   calendar  ~/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb
@@ -23,8 +26,18 @@ def need_macos(feature):
         sys.exit(f"life: {feature} is only available on macOS (AppleScript + local SQLite stores) — not here")
 
 
+def linux():
+    """Linux backend (IMAP/SMTP, iCal URLs): bin/life_linux.py next to this script."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "life_linux.py")
+    spec = importlib.util.spec_from_file_location("life_linux", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def osa(script):
-    need_macos("mail/calendar/browser-automation (AppleScript)")
+    need_macos("browser automation (web js/open/tabs; AppleScript) — no browser here; `life web get` works")
     p = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
     if p.returncode:
         sys.exit(f"applescript failed: {p.stderr.strip()}")
@@ -123,7 +136,7 @@ def text_of(msg):
 
 
 def cmd_mail_show(a):
-    path = emlx_path(a.id)
+    path = emlx_path(int(a.id))
     if not path:
         sys.exit(f"no message file for id {a.id} (not cached locally?)")
     raw = open(path, "rb").read()
@@ -236,6 +249,7 @@ def cmd_cal(a):
 
 
 def cmd_cal_add(a):
+    a.calendar = a.calendar or "Work"
     st = datetime.fromisoformat(a.start)
     en = st + timedelta(minutes=a.minutes)
     d = lambda x: x.strftime('%m/%d/%Y %H:%M:%S')
@@ -309,9 +323,10 @@ def main():
         s.add_argument("--everywhere", action="store_true", help="all mailboxes, not just inboxes")
         s.add_argument("-v", "--verbose", action="store_true", help="show snippets")
         s.set_defaults(fn=cmd_mail_list)
-    s = m.add_parser("show"); s.add_argument("id", type=int); s.add_argument("--full", action="store_true")
+    s = m.add_parser("show"); s.add_argument("id"); s.add_argument("--full", action="store_true")
     s.add_argument("--chars", type=int, default=4000); s.set_defaults(fn=cmd_mail_show)
     s = m.add_parser("send"); s.add_argument("--to", action="append", required=True); s.add_argument("--cc", action="append")
+    s.add_argument("--from", dest="from_account", help="account name (Linux; default: first)")
     s.add_argument("--subject", required=True); s.add_argument("--body"); s.add_argument("--body-file")
     s.add_argument("--send", action="store_true", help="actually send (default: open a draft)")
     s.set_defaults(fn=cmd_mail_send)
@@ -320,7 +335,7 @@ def main():
     s = c.add_parser("next"); s.add_argument("--days", type=int, default=14); s.add_argument("--past", type=int, default=0)
     s.set_defaults(fn=cmd_cal)
     s = c.add_parser("add"); s.add_argument("--title", required=True); s.add_argument("--start", required=True, help="YYYY-MM-DD HH:MM")
-    s.add_argument("--minutes", type=int, default=60); s.add_argument("--calendar", default="Work"); s.add_argument("--notes")
+    s.add_argument("--minutes", type=int, default=60); s.add_argument("--calendar", default=None, help="macOS default: Work; Linux: Google calendar id"); s.add_argument("--notes")
     s.set_defaults(fn=cmd_cal_add)
     c.add_parser("calendars").set_defaults(fn=cmd_cal_list)
 
@@ -334,6 +349,12 @@ def main():
     s = w.add_parser("tabs"); s.add_argument("--browser", default="Google Chrome"); s.set_defaults(fn=cmd_web_tabs)
 
     a = p.parse_args()
+    if sys.platform != "darwin":
+        name = getattr(getattr(a, "fn", None), "__name__", "cmd_cal" if a.top == "cal" else "")
+        if a.top == "cal" and not hasattr(a, "fn"):
+            a.days, a.past = 14, 0
+        if name in ("cmd_mail_list", "cmd_mail_show", "cmd_mail_send", "cmd_cal", "cmd_cal_add", "cmd_cal_list"):
+            return getattr(linux(), name)(a)
     if not hasattr(a, "fn"):
         if a.top == "cal":
             a.days, a.past = 14, 0

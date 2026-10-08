@@ -1,0 +1,13 @@
+{
+  "accounts": [
+    {"name": "gmail", "user": "you@gmail.com", "password": "xxxx xxxx xxxx xxxx"},
+    {"name": "math", "user": "you@dept.example.edu", "password": "...",
+     "imap_host": "imap.dept.example.edu", "imap_port": 993,
+     "smtp_host": "smtp.dept.example.edu", "smtp_port": 465,
+     "sent_folder": "Sent"}
+  ],
+  "calendars": [
+    {"name": "gmail", "ics_url": "https://calendar.google.com/calendar/ical/you%40gmail.com/private-XXXX/basic.ics"}
+  ],
+  "oauth": {"client_id": "", "client_secret": "", "refresh_token": "", "calendar_id": "primary"}
+}

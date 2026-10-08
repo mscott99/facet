@@ -73,11 +73,34 @@ single-user box):
 Reach it the same way as the Mac — `tailscale serve`/`tailscale cert` for the TLS-terminated
 URLs (see **routes**, below); Tailscale's Linux client does `serve`/`cert` the same as macOS.
 
-What does not work here: `bin/life` end to end, so Telegram's `/cal` and `/mail` fail loudly
-(mail/calendar are Mail.app/Calendar.app and their local SQLite stores, Mac-only by
-construction, not reimplemented); `life web`'s `js`/`open`/`tabs` (AppleScript browser
-control) fail the same way. `life web get` (plain `curl`, used for logged-out page fetches)
-still works.
+What does not work here: `life web`'s `js`/`open`/`tabs` (AppleScript browser control) fail
+loudly. `life web get` (plain `curl`) works. `bin/life` mail/calendar have a Linux backend, below.
+
+### life on Linux
+
+`bin/life` on Linux runs `bin/life_linux.py` (stdlib only; keep both files together): IMAP/SMTP
+for mail, secret iCal URLs for the calendar. Same commands (`mail inbox|search|show|send`,
+`cal next|add|calendars`). Config: `~/.config/life/accounts.json` (`chmod 600`; or `$LIFE_CONFIG`);
+copy `bin/life.accounts.example.json`.
+
+- **Gmail app password**: Google Account → Security → turn on 2-Step Verification → App passwords
+  → create one → paste the 16 characters as `password`. Gmail needs no host fields
+  (`imap.gmail.com:993`, `smtp.gmail.com:465`); sent mail is filed by Gmail itself. Search uses
+  `X-GM-RAW`, so Gmail search syntax works.
+- **Other account** (math/Exchange): give `imap_host`, `smtp_host` (+ ports) and an app password if
+  the host offers one. Add `"sent_folder": "Sent"` to have a copy appended after sending. Plain
+  password login only; hosts that insist on OAuth2 (e.g. Microsoft 365) won't work.
+- **Calendar read**: Google Calendar on the web → Settings → your calendar → *Integrate calendar* →
+  *Secret address in iCal format* → put it in `calendars[].ics_url`. Handles RRULE
+  (DAILY/WEEKLY/MONTHLY/YEARLY, INTERVAL, COUNT, UNTIL, BYDAY, BYMONTHDAY), EXDATE, modified
+  instances and time zones. Anyone with that URL can read the calendar; treat it as a secret.
+- **Calendar add** (optional): create an OAuth client (Google Cloud Console, Calendar API enabled,
+  "Desktop app"), obtain a refresh token for scope `https://www.googleapis.com/auth/calendar.events`
+  (e.g. via the OAuth Playground with your own client id/secret), then fill the `oauth` block.
+  Without it `life cal add` exits saying so.
+- Mail ids are `<account>:<uid>` (`:a` suffix for All Mail with `--everywhere`); pass them to
+  `life mail show`. `life mail send` is a dry run unless `--send`; `--from <account>` picks the sender.
+- Tests: `python3 tests/life_test.py` (fake ICS, fake IMAP/SMTP; no network).
 
 A Linux box (the Hetzner one this branch was built against: Ubuntu 24.04 x86, cloned at
 `/root/facet`) is meant to become the main host — source of truth for `~/.optchat`, run
