@@ -73,7 +73,7 @@ def accounts(cfg=None):
         a.setdefault("imap_host", "imap.gmail.com" if gm else None)
         a.setdefault("smtp_host", "smtp.gmail.com" if gm else None)
         a.setdefault("imap_port", 993)
-        a.setdefault("smtp_port", 587)
+        a.setdefault("smtp_port", 465)
         if not a["imap_host"]:
             sys.exit(f"life: account {a['name']} needs 'imap_host' (and 'smtp_host') in {config_path()}")
         out.append(a)
