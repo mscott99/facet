@@ -1,0 +1,15 @@
+# mailwatch --idle: push-on-receipt for always-senders (see README "mailwatch"). Install:
+#   cp systemd/mailwatch* ~/.config/systemd/user/ && systemctl --user daemon-reload
+#   systemctl --user enable --now mailwatch-idle.service
+[Unit]
+Description=mailwatch --idle: IMAP IDLE, push mail from important senders at once
+
+[Service]
+ExecStart=%h/facet/bin/mailwatch --idle
+Environment=HOME=%h PYTHONUNBUFFERED=1
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=20
+
+[Install]
+WantedBy=default.target

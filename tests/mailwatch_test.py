@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Tests for bin/mailwatch: rules, quiet hours, triage via fake claude, one notification per run. No network."""
-import importlib.util, importlib.machinery, os, sys, json, tempfile, unittest, stat
+import importlib.util, importlib.machinery, os, sys, json, tempfile, unittest, stat, threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -217,6 +217,109 @@ class Mark(unittest.TestCase):
         W.new_mail = lambda L, acct, st, back=0: (W._headers(L, FakeBox(), acct, [1, 2, 4, 5]), {"uv": 7, "last": 9}, False)
         W.run(False, out=lambda l: None)
         self.assertEqual(self.marked(), {2, 5})
+
+
+class FakeIdleConn:
+    """Fake raw IMAP connection: scripted server lines; a None line simulates the read timeout."""
+    def __init__(self, lines):
+        self.lines, self.sent = list(lines), []
+        self.sock = type("S", (), {"settimeout": lambda s, v: None})()
+    def _new_tag(self): return b"A1"
+    def send(self, b): self.sent.append(b)
+    def readline(self):
+        l = self.lines.pop(0)
+        if l is None: raise TimeoutError()
+        return l
+
+
+class Idle(unittest.TestCase):
+    def test_idle_wait_exists(self):
+        c = FakeIdleConn([b"+ idling\r\n", b"* 3 RECENT\r\n", b"* 7 EXISTS\r\n", b"A1 OK done\r\n"])
+        self.assertTrue(W.idle_wait(c, 5))
+        self.assertEqual(c.sent, [b"A1 IDLE\r\n", b"DONE\r\n"])
+
+    def test_idle_wait_timeout_sends_done(self):
+        c = FakeIdleConn([b"+ idling\r\n", None])
+        self.assertFalse(W.idle_wait(c, 5))
+        self.assertEqual(c.sent[-1], b"DONE\r\n")
+
+    def test_idle_refused(self):
+        with self.assertRaises(RuntimeError):
+            W.idle_wait(FakeIdleConn([b"A1 NO nope\r\n"]), 5)
+
+    def setUp(self):
+        os.makedirs(W.STATE_DIR, exist_ok=True)
+        json.dump(dict(W.DEFAULTS), open(W.CONF, "w"))
+        self.sent = os.path.join(tmp, "isent.txt")
+        if os.path.exists(self.sent): os.remove(self.sent)
+        W.FACET = script(f"open({self.sent!r},'a').write(' '.join(sys.argv[1:]).replace(chr(10),'|')+chr(10))")
+        W.CLAUDE = script("print(json.dumps({'is_error':False,'result':json.dumps([{'id':'a:1','attention':True,'why':'asks you'},{'id':'a:2','attention':True,'why':'x'}])}))")
+        W.fulltext = lambda L, acct, uid, cap=6000: "full"
+        W.snippet = lambda L, a, u: "body"
+        self.acct = {"name": "a"}
+        self.L = type("L", (), {"accounts": staticmethod(lambda: [self.acct])})
+        self.quiet_now = False
+        W.quiet = lambda c, now=None: self.quiet_now
+        self.mails = [msg(1, "Michael", "hi", "michael.friedlander@ubc.ca"), msg(2, "Bob", "lunch?")]
+        W.new_mail = lambda L, a, st, back=0: (list(self.mails), {"uv": 1, "last": 2}, False)
+        json.dump({"a": {"uv": 1, "last": 0}}, open(W.STATE_DIR + "/state.json", "w"))
+
+    def pushes(self):
+        return open(self.sent).read().splitlines() if os.path.exists(self.sent) else []
+
+    def test_idle_pushes_always_only_and_once(self):
+        self.assertEqual(W.idle_handle(self.L, self.acct, lambda l: None), 1)
+        self.assertEqual(len(self.pushes()), 1); self.assertIn("a:1", self.pushes()[0]); self.assertNotIn("a:2", self.pushes()[0])
+        st = json.load(open(W.STATE_DIR + "/state.json"))
+        self.assertEqual(st["a"]["last"], 0)                       # cursor belongs to the timer
+        self.assertEqual(st["_idle"]["a"], [1])
+        self.assertEqual(W.idle_handle(self.L, self.acct, lambda l: None), 0)     # not again
+        self.assertEqual(len(self.pushes()), 1)
+
+    def test_timer_skips_what_idle_pushed(self):
+        W.idle_handle(self.L, self.acct, lambda l: None)
+        W.load_life = lambda: self.L
+        W.run(False, out=lambda l: None)
+        self.assertEqual(len(self.pushes()), 1)                    # timer: mail 1 skipped, mail 2 is triage-only
+        st = json.load(open(W.STATE_DIR + "/state.json"))
+        self.assertEqual(st["a"]["last"], 2); self.assertEqual(st["_idle"]["a"], [])
+
+    def test_quiet_hours_hold_then_timer_catches_up(self):
+        self.quiet_now = True
+        self.assertEqual(W.idle_handle(self.L, self.acct, lambda l: None), 0)
+        self.assertEqual(self.pushes(), [])
+        self.quiet_now = False
+        W.load_life = lambda: self.L
+        W.run(False, out=lambda l: None)
+        self.assertEqual(len(self.pushes()), 1); self.assertIn("a:1", self.pushes()[0])
+
+    def test_no_cursor_does_nothing(self):
+        os.remove(W.STATE_DIR + "/state.json")
+        self.assertEqual(W.idle_handle(self.L, self.acct, lambda l: None), 0)
+        self.assertEqual(self.pushes(), [])
+
+    def test_account_loop_reconnects_with_backoff_and_handles_event(self):
+        stop = threading.Event()
+        conns = []
+        def connect(a):
+            conns.append(1)
+            if len(conns) == 1: raise OSError("down")
+            return type("C", (), {"select": lambda s, *a, **k: ("OK", []), "logout": lambda s: None})()
+        self.L.imap_connect = staticmethod(connect)
+        calls = []
+        def waits(c, secs):
+            calls.append(1)
+            if len(calls) == 2: stop.set()
+            return True
+        real_wait = W.idle_wait; W.idle_wait = waits
+        orig = threading.Event.wait
+        threading.Event.wait = lambda self_, t=None: True      # skip the real backoff sleep
+        try:
+            W.idle_account(self.L, self.acct, stop, lambda l: None)
+        finally:
+            threading.Event.wait = orig; W.idle_wait = real_wait
+        self.assertEqual(len(conns), 2); self.assertEqual(len(calls), 2)
+        self.assertEqual(len(self.pushes()), 1)                    # event handled once; second event: already done
 
 
 def email_addr(h):

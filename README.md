@@ -765,6 +765,18 @@ on a `Re:`/`Fwd:` subject. Every mark is appended to `~/.local/state/mailwatch/m
 - `bin/mailwatch --unmark [acct:uid ...] [--since DAYS]` puts logged messages back to unread (everything logged if
   no selector); undone entries are recorded in the log and skipped next time.
 
+**Push on receipt** (`bin/mailwatch --idle`, `systemd/mailwatch-idle.service`, `Restart=always`). One IMAP IDLE
+connection per account (threads; raw IDLE commands since imaplib has none), renewed every 25 minutes, reconnect with
+5 s..5 min backoff. Idle costs no model calls. On a new-mail event it reads headers only (PEEK, never marks read) and,
+for mail from an `always` sender (not bulk), runs the same Sonnet read -> `facet push --log` path immediately for just
+those mails. Everything else waits for the 20-minute timer, which stays as the backstop (and catches up after
+disconnects). Shared state: both take an exclusive file lock (`~/.local/state/mailwatch/lock`); the timer owns the
+UID cursor, idle records what it pushed in `state.json` under `_idle` (per account), the timer skips those uids and
+prunes them once the cursor passes. So nothing is notified twice. Quiet hours are never broken: idle does nothing
+then, and the first timer run after 07:00 handles the held mail. Install: `cp systemd/mailwatch* ~/.config/systemd/user/
+&& systemctl --user daemon-reload && systemctl --user enable --now mailwatch-idle.service`; log: `journalctl --user -u
+mailwatch-idle` ("[acct] idle: connected").
+
 `bin/mailwatch --dry-run [--last N]` prints decisions, sends nothing, leaves the cursor alone (`--last N`
 pretends the cursor is N messages back per account, and ignores quiet hours). Install:
 `cp systemd/mailwatch.* ~/.config/systemd/user/ && systemctl --user daemon-reload &&

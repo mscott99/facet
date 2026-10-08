@@ -8,9 +8,10 @@ Tiers (cheapest first): (1) list new INBOX mail per account via IMAP PEEK, no LL
 (straight to Telegram, and a `note` in the chat log, no Opus turn).
 Never replies, never deletes or moves mail, never logs bodies. The only write it makes is the \\Seen flag on mail
 that is obviously not worth reading (mute rule, or a confident "skip" from the triage); every such change is logged
-in ~/.local/state/mailwatch/marked.jsonl and can be undone (--unmark). See README "mailwatch".
+in ~/.local/state/mailwatch/marked.jsonl and can be undone (--unmark). `--idle` keeps one IMAP IDLE connection per
+account and pushes mail from always-senders as it arrives (never in quiet hours). See README "mailwatch".
 """
-import email, email.utils, fnmatch, importlib.util, json, os, re, subprocess, sys, time
+import contextlib, email, email.utils, fcntl, fnmatch, importlib.util, json, os, re, socket, subprocess, sys, threading, time
 from datetime import datetime, timedelta
 from email import policy
 from zoneinfo import ZoneInfo
@@ -426,7 +427,21 @@ def notify_text(L, notify, conf, dry, out):
     return compose(keep, "sonnet") if keep else None
 
 
+@contextlib.contextmanager
+def locked():
+    """Exclusive lock shared by the timer run and the --idle handlers, so state and notifications never race."""
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(os.path.join(STATE_DIR, "lock"), "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
 def run(dry=False, out=print, back=0):
+    with locked():
+        return _run(dry, out, back)
+
+
+def _run(dry=False, out=print, back=0):
     L = load_life()
     conf = load_conf()
     if quiet(conf) and not dry:
@@ -445,6 +460,8 @@ def run(dry=False, out=print, back=0):
             out(f"[{acct['name']}] first run: recording cursor {cur['last']}, nothing notified")
             newst[acct["name"]] = cur
             continue
+        done = set(st.get("_idle", {}).get(acct["name"], []))      # already notified by --idle
+        msgs = [m for m in msgs if m["uid"] not in done]
         msgs.sort(key=lambda m: m["uid"])
         cap = conf["max_batch"] * 2
         if len(msgs) > cap:       # keep cursor just behind the cut so the rest comes next run
@@ -453,6 +470,8 @@ def run(dry=False, out=print, back=0):
             m["acct"] = acct
         found += msgs
         newst[acct["name"]] = cur
+        if done:
+            newst.setdefault("_idle", {})[acct["name"]] = [u for u in done if u > cur["last"]]
     if not found:
         if not dry and newst != st:
             save_state(newst)
@@ -549,6 +568,112 @@ def unmark(ids=None, days=None, out=print):
     return n
 
 
+# ---- --idle: push-on-receipt -------------------------------------------------------------------------------
+# One IMAP IDLE connection per account. While idle: no model calls. On new mail, headers only (PEEK); mail from
+# an `always` sender gets the Sonnet read + Telegram push at once (never in quiet hours); everything else is left
+# for the timer's batch. The UID cursor belongs to the timer; uids pushed here are remembered in state["_idle"]
+# (per account) so the timer skips them, and pruned once the cursor passes them. Both share the `locked()` lock.
+IDLE_SECS = 25 * 60
+
+
+def idle_wait(c, secs=IDLE_SECS):
+    """Issue IDLE on connection c (raw commands; imaplib has none) and block until the server reports EXISTS (True)
+    or `secs` pass (False). Ends IDLE with DONE. After a timeout the buffered reader is unusable: caller reconnects."""
+    tag = c._new_tag()
+    c.send(tag + b" IDLE\r\n")
+    line = c.readline()
+    if not line.startswith(b"+"):
+        raise RuntimeError("IDLE refused: " + line[:60].decode("ascii", "replace"))
+    c.sock.settimeout(secs)
+    hit = False
+    try:
+        while True:
+            if b" EXISTS" in c.readline():
+                hit = True
+                break
+    except (socket.timeout, TimeoutError):
+        c.send(b"DONE\r\n")
+        return False
+    c.sock.settimeout(60)
+    c.send(b"DONE\r\n")
+    while True:                                   # swallow untagged lines until the tagged completion
+        line = c.readline()
+        if not line:
+            raise RuntimeError("connection closed")
+        if line.startswith(tag):
+            break
+    return hit
+
+
+def idle_handle(L, acct, out=print):
+    """Notify (Sonnet-read -> push) the new `always` mail of one account. -> number of mails handled."""
+    with locked():
+        conf = load_conf()
+        if quiet(conf):
+            return 0                                   # held: the first timer run after quiet hours catches up
+        st = load_state()
+        if not st.get(acct["name"]):
+            return 0                                   # no cursor yet: the timer records it first
+        msgs, cur, first = new_mail(L, acct, st[acct["name"]])
+        done = set(st.get("_idle", {}).get(acct["name"], []))
+        cand = []
+        for m in sorted(msgs, key=lambda m: m["uid"]):
+            if m["uid"] not in done and classify(m, conf) == "always":
+                m["acct"] = acct
+                cand.append((m, "matches always-rule"))
+        if first or not cand:
+            return 0
+        out(f"[{acct['name']}] idle: {len(cand)} from always-senders")
+        text = notify_text(L, cand, conf, False, out)
+        if text:
+            out("PUSH:\n" + text)
+            subprocess.run([FACET, "push", "--log", text], check=True, timeout=60)
+        st.setdefault("_idle", {})[acct["name"]] = sorted(done | {m["uid"] for m, _ in cand})
+        save_state(st)
+        return len(cand)
+
+
+def idle_account(L, acct, stop=None, out=print, idle_secs=IDLE_SECS):
+    """Forever: connect, catch up, IDLE, handle. Reconnect with backoff (5s .. 5min) on errors."""
+    name, back = acct["name"], 5
+    while not (stop and stop.is_set()):
+        c = None
+        try:
+            c = L.imap_connect(acct)
+            c.select("INBOX", readonly=True)
+            out(f"[{name}] idle: connected")
+            idle_handle(L, acct, out)                  # anything that arrived while disconnected
+            back = 5
+            while not (stop and stop.is_set()):
+                if idle_wait(c, idle_secs):
+                    idle_handle(L, acct, out)
+                else:
+                    break                              # 25 min elapsed: fresh connection
+        except Exception as e:
+            out(f"[{name}] idle error: {type(e).__name__}: {str(e)[:100]}; retry in {back}s")
+            if stop:
+                stop.wait(back)
+            else:
+                time.sleep(back)
+            back = min(back * 2, 300)
+        finally:
+            try:
+                if c: c.logout()
+            except Exception:
+                pass
+
+
+def idle_main(out=None):
+    def out(l, _p=print):
+        _p(l, flush=True)
+    L = load_life()
+    ts = [threading.Thread(target=idle_account, args=(L, a, None, out), daemon=True) for a in L.accounts()]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     dry = "--dry-run" in a
@@ -556,7 +681,9 @@ if __name__ == "__main__":
         print(__doc__); sys.exit(0)
     def opt(name, default=None):
         return a[a.index(name) + 1] if name in a else default
-    if "--unmark" in a:
+    if "--idle" in a:
+        idle_main()
+    elif "--unmark" in a:
         rest = [x for x in a[a.index("--unmark") + 1:] if not x.startswith("--") and re.match(r"^[\w.-]+:\d+$", x)]
         d = opt("--since")
         unmark(rest or None, float(d) if d else None)
