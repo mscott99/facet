@@ -93,12 +93,12 @@ footer{position:fixed;bottom:0;left:0;right:0;background:var(--bg);
  padding:.6rem 1.1rem env(safe-area-inset-bottom)}
 footer form{max-width:var(--measure);margin:0 auto;display:flex;gap:.8rem;align-items:center}
 textarea{flex:1;resize:none;background:#101115;color:var(--fg);border:0;border-radius:4px;
- padding:.6rem .8rem;font:15px/1.5 var(--serif);max-height:40vh}
+ padding:.6rem .8rem;font:16px/1.5 var(--serif);max-height:40vh}
 textarea:focus{outline:1px solid var(--line)}
 /* A comment card reads like the comments do: a coloured edge under the line, the quote dim
    at the top, the thread under it in order, and the composer always last. No frame. A card
    only waiting for its answer is just its quote, its thread and a status line. */
-.say{margin:.5rem 0 1.2rem;padding-left:1.1rem;border-left:2px solid #8fa8c880}
+.say{box-sizing:border-box;max-width:100%;margin:.5rem 0 1.2rem;padding-left:1.1rem;border-left:2px solid #8fa8c880}
 .say .hd{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.35rem}
 .say .hd .q{flex:1;font:11.5px/1.5 var(--mono);color:var(--dim);
  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -112,7 +112,7 @@ textarea:focus{outline:1px solid var(--line)}
 .say .cmp{display:flex;gap:.7rem;align-items:flex-end;margin-top:.6rem}
 .say .th:empty+.cmp{margin-top:0}
 .say .cmp textarea{flex:1;min-width:0;max-height:40vh;overflow-y:auto}
-.say .cmp .go{flex:none;padding:.5rem .1rem;font:12px var(--mono);color:var(--acc)}
+.say .cmp .go{flex:none;padding:.5rem .1rem;font:14px var(--mono);color:var(--acc)}
 .say .cmp.bad textarea{outline:1px solid #c88}
 .say .t.pend{opacity:.4}
 form.busy textarea,form.busy button{opacity:.45}
