@@ -429,7 +429,7 @@ try:
 
     # what the chat venue shows (the web chat page and Telegram share `Msg::in_chat`; Telegram
     # pushes kind chat alone, unit-tested in log.rs): the real binary's page, served against D
-    import random, urllib.request
+    import random, urllib.request, urllib.parse
     home = os.path.join(D, "home"); os.makedirs(os.path.join(home, ".config/facet"))
     port = random.randint(20000, 40000)
     json.dump({"store": D, "port": port, "token": "tk"}, open(os.path.join(home, ".config/facet/facet.json"), "w"))
@@ -444,6 +444,15 @@ try:
         check("said it" not in page and "noted" not in page, "the chat page hides the agent's plain text")
         check("card answer" not in page and "CARD c2" not in page, "the chat page hides card comments and card answers")
         check("send_chat failed" not in page and "seed message" not in page, "the chat page hides steps and notes")
+        # a card's answers, as its page asks for them: by id, saying where they start; and the
+        # whole card, thread and all, as a reload puts it back
+        get = lambda u: urllib.request.urlopen("http://127.0.0.1:%d/tk%s" % (port, u), timeout=5).read().decode()
+        rp = get("/f/reply?id=c2&since=0")
+        check('data-from="0" data-high="1"' in rp and "card answer" in rp, "a card's answers come by id, from where it asked: %r" % rp)
+        check("card answer" not in get("/f/reply?id=c2&since=1"), "an answer already shown is not sent again")
+        cs = json.loads(get("/f/cards?notes=" + urllib.parse.quote(json.dumps(["Other Note"]))))
+        check(len(cs) == 1 and cs[0]["id"] == "c2" and cs[0]["n"] == 1 and "card answer" in cs[0]["thread"],
+              "a reload puts the card back with its thread: %r" % cs)
     finally:
         srv.kill()
 

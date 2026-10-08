@@ -157,9 +157,14 @@ its own Python server on 127.0.0.1:8765/tailnet :9443 — is retired (archived a
     venues**, below): it is logged into the stream as kind `answer`, so the memory has it, but
     never reaches Telegram or the chat page; the comment that asked is hidden from the chat
     page too, and a turn started by card comments alone gets no fallback reply in the chat.
-    Every card keeps a quiet `remove`, sent or not; once answered, a further line opens
-    inside it to reply back, carrying the same id, so the thread stays attached to where it
-    started. `--apply <replacement>` on the answer, given only when there truly is one to
+    A card is one component wherever it appears (a new comment, a reply inside one, one put
+    back on reload): the quote and a quiet `remove`, then the thread — what was said and what
+    was answered, in order — then the composer, always last (Enter or its `send` button
+    sends, Shift-Enter is a new line), then a status line (sending / queued / not sent). A
+    card nothing was said in goes on Escape or a click away; a sent card shows no composer
+    until its first answer comes, and every reply carries the same id, so the thread
+    stays attached to where it started. `cards.json` counts a card's sends and records with
+    each answer how many it came after, so a reload rebuilds the thread in order. `--apply <replacement>` on the answer, given only when there truly is one to
     offer (never guessed from prose), becomes a diagnostic fix (`diag::propose`) the card can
     then apply, through the same `/x/diag` route and the same stale-text guard a review's fix
     gets.
@@ -208,8 +213,8 @@ Web pages (`facet serve`, all under `/<token>`):
                        then the page asks again; a hidden tab stops asking. The log is parsed
                        once and then only from where it stopped. The memory tree is folded once
                        per change to its files. `/f/cards?notes=[..]` returns a note's sent
-                       comment cards (words from the log, answers from cards.json) so a reload
-                       puts them back; `POST /x/hide` removes one for good.
+                       comment cards (one thread, words from the log and answers from cards.json,
+                       in order) so a reload puts them back; `POST /x/hide` removes one for good.
                        (`/f/reply?id=&since=`: a card's own answers past what it has shown)
 
 Telegram (bot `telegram.username`, polled by `facet serve`; only the paired chat is heard):

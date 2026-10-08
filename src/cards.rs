@@ -23,14 +23,17 @@ fn save(dir: &Path, v: &Value) {
     if std::fs::write(&tmp, v.to_string()).is_ok() { let _ = std::fs::rename(&tmp, file(dir)); }
 }
 
-/// The first send of a card: remembered once, by its id, so the id itself can stay short —
-/// it does not have to carry the note and line, only point at where they are kept. A second
-/// registration (a reply to an answer, through the same card) changes nothing.
+/// Every send through a card: the first remembers it, by its id, so the id itself can stay
+/// short — it does not have to carry the note and line, only point at where they are kept.
+/// Each send (the first comment, every reply after) is counted, so an answer can record how
+/// many of the card's messages it came after and a reloaded card shows the thread in order.
 pub fn register(dir: &Path, id: &str, note: &str, line: i64) {
     let mut data = load(dir);
-    if data.get(id).is_some() { return }
-    if let Some(m) = data.as_object_mut() {
-        m.insert(id.into(), json!({"note": note, "line": line, "answers": []}));
+    match data.get_mut(id) {
+        Some(c) => { let n = c["sent"].as_u64().unwrap_or(1); c["sent"] = json!(n + 1); }
+        None => if let Some(m) = data.as_object_mut() {
+            m.insert(id.into(), json!({"note": note, "line": line, "answers": [], "sent": 1}));
+        },
     }
     save(dir, &data);
 }
@@ -65,8 +68,9 @@ pub fn get(dir: &Path, id: &str) -> Option<Value> { load(dir).get(id).cloned() }
 pub fn answer(dir: &Path, id: &str, text: &str, code: Option<&str>) -> Result<(), String> {
     let mut data = load(dir);
     let Some(card) = data.get_mut(id) else { return Err(format!("no card {}", id)) };
+    let after = card["sent"].clone();
     let answers = card["answers"].as_array_mut().expect("a registered card always has answers: []");
-    answers.push(json!({"text": text, "code": code, "at": crate::optchat::store::now_iso()}));
+    answers.push(json!({"text": text, "code": code, "after": after, "at": crate::optchat::store::now_iso()}));
     save(dir, &data);
     Ok(())
 }
@@ -96,7 +100,7 @@ mod tests {
     fn an_answer_lands_on_the_card_it_was_for() {
         let d = dir("answer");
         register(&d, "c1", "Some Note", 12);
-        register(&d, "c1", "ignored", 999); // a second registration changes nothing
+        register(&d, "c1", "ignored", 999); // a second send keeps who the card is about
         assert!(answer(&d, "unknown", "hi", None).is_err());
         answer(&d, "c1", "looks right", Some("ab12")).unwrap();
         answer(&d, "c1", "a follow-up", None).unwrap();
@@ -109,5 +113,17 @@ mod tests {
         assert_eq!(answers[0]["code"], "ab12");
         assert!(answers[1]["code"].is_null());
         assert!(get(&d, "nope").is_none());
+        assert_eq!(answers[0]["after"], 2); // both sends came before it
+    }
+
+    #[test]
+    fn an_answer_remembers_which_message_it_followed() {
+        let d = dir("after");
+        register(&d, "c2", "N", 1);
+        answer(&d, "c2", "first", None).unwrap();
+        register(&d, "c2", "N", 1);
+        answer(&d, "c2", "second", None).unwrap();
+        let a = get(&d, "c2").unwrap()["answers"].clone();
+        assert_eq!((a[0]["after"].as_u64(), a[1]["after"].as_u64()), (Some(1), Some(2)));
     }
 }
