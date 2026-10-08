@@ -721,7 +721,8 @@ on purpose: delete this program and nothing is lost but a port number.
 
 `bin/mailwatch` runs every 20 minutes from a systemd `--user` timer (`systemd/mailwatch.{service,timer}`,
 `Persistent=true`) and wakes OptChat only when something deserves attention. Read-only: IMAP PEEK, never
-replies, never marks read, never prints message bodies.
+replies, never deletes or moves mail, never prints message bodies. Its one write is the `\Seen` flag on mail
+that is obviously not worth reading (see "Marking read" below).
 
 1. **No LLM.** For each account in `~/.config/life/accounts.json`, list INBOX mail with UID above the cursor in
    `~/.local/state/mailwatch/state.json` (per account: UIDVALIDITY + last UID). The first run only records
@@ -738,6 +739,20 @@ replies, never marks read, never prints message bodies.
 
 If anything qualifies, one `facet send --later "[mailwatch] N new: id | from | subject | why; ..."`. Ids work
 with `life mail show/thread`.
+
+**Marking read** (config `mark_read`, default true). Set `\Seen` only on (a) mail matching a `mute` rule or
+carrying bulk headers, and (b) mail the triage returns as `skip`. The triage verdict is 3-way
+(`notify` / `skip` / `unsure`); `skip` is for confident cases only, anything else, a triage failure, or a missing
+verdict leaves the mail unread. Never marked, whatever else matches: `always`-rule matches, notified mail, `unsure`
+mail, senders/subjects matching `never_mark` (default: siam, yaniv, friedlander, nserc, editorialmanager, fogs,
+grad@ubc.ca, manuscript, submission, springer, elsevier, referee; extend it in `mailwatch.json`), and a triage `skip`
+on a `Re:`/`Fwd:` subject. Every mark is appended to `~/.local/state/mailwatch/marked.jsonl`
+(`ts, account, uid, uv, sender, subject, reason`).
+
+- `bin/mailwatch --sweep [--days N] [--dry-run]` (default 30 days): same decisions over mail that is already unread;
+  never notifies; prints a summary grouped by reason. Always dry-run first.
+- `bin/mailwatch --unmark [acct:uid ...] [--since DAYS]` puts logged messages back to unread (everything logged if
+  no selector); undone entries are recorded in the log and skipped next time.
 
 `bin/mailwatch --dry-run [--last N]` prints decisions, sends nothing, leaves the cursor alone (`--last N`
 pretends the cursor is N messages back per account, and ignores quiet hours). Install:
