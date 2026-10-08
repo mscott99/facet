@@ -3,7 +3,7 @@
 Stdlib only. Config: ~/.config/life/accounts.json (override with $LIFE_CONFIG), chmod 600.
 Loaded by bin/life when not on macOS; the macOS paths live in bin/life itself.
 """
-import email, imaplib, json, os, re, smtplib, ssl, sys, urllib.parse, urllib.request
+import email, imaplib, json, os, re, smtplib, ssl, subprocess, sys, urllib.parse, urllib.request
 from datetime import date, datetime, timedelta, timezone
 from email import policy
 from email.message import EmailMessage
@@ -547,18 +547,51 @@ def event_body(a):
     return body
 
 
+SA_MINT = """import sys
+from google.oauth2 import service_account
+from google.auth.transport.requests import Request
+c = service_account.Credentials.from_service_account_file(sys.argv[1], scopes=["https://www.googleapis.com/auth/calendar"])
+c.refresh(Request())
+print(c.token)
+"""
+
+
+def google_auth(cfg):
+    """(access token, default calendar id) from a service account or an OAuth block, else None."""
+    g = cfg.get("google") or {}
+    if g.get("service_account_file"):
+        key = os.path.join(os.path.dirname(config_path()), os.path.expanduser(g["service_account_file"]))
+        py = os.path.expanduser(g.get("python", sys.executable))
+        r = subprocess.run([py, "-I", "-c", SA_MINT, key], capture_output=True, text=True, timeout=60)
+        if r.returncode:
+            sys.exit("life: service account token failed: " + (r.stderr.strip().splitlines() or ["?"])[-1])
+        return r.stdout.strip(), g.get("calendar_id") or "primary"
+    o = cfg.get("oauth")
+    if o and all(o.get(k) for k in ("client_id", "client_secret", "refresh_token")):
+        return access_token(o), o.get("calendar_id") or "primary"
+    return None
+
+
+def google_get(token, url):
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)
+
+
 def cmd_cal_add(a):
     cfg = load_config()
-    o = cfg.get("oauth")
-    if not o or not all(o.get(k) for k in ("client_id", "client_secret", "refresh_token")):
-        sys.exit(f"life: adding events on Linux needs a Google OAuth block in {config_path()}:\n"
-                 '  "oauth": {"client_id": "...", "client_secret": "...", "refresh_token": "...", "calendar_id": "primary"}\n'
-                 "See README 'life on Linux' for how to get these. (Reading the calendar needs only the iCal URL.)")
-    cal = a.calendar or o.get("calendar_id") or "primary"
+    auth = google_auth(cfg)
+    if not auth:
+        sys.exit(f"life: adding events on Linux needs Google access in {config_path()}, either\n"
+                 '  "google": {"service_account_file": "...json", "python": "<venv with google-auth>", "calendar_id": "you@gmail.com"}\n'
+                 '  or "oauth": {"client_id": "...", "client_secret": "...", "refresh_token": "...", "calendar_id": "primary"}\n'
+                 "See README 'life on Linux'. (Reading the calendar needs only the iCal URL.)")
+    token, cal = auth
+    cal = a.calendar or cal
     req = urllib.request.Request(
         f"https://www.googleapis.com/calendar/v3/calendars/{urllib.parse.quote(cal)}/events",
         data=json.dumps(event_body(a)).encode(),
-        headers={"Authorization": "Bearer " + access_token(o), "Content-Type": "application/json"})
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=30) as r:
         res = json.load(r)
     print(f"added: {a.title} {a.start} ({res.get('htmlLink', '')})")
@@ -567,11 +600,8 @@ def cmd_cal_add(a):
 def cmd_cal_list(a):
     cfg = load_config()
     for c in cfg.get("calendars") or []:
-        print(c.get("name", c.get("ics_url", "?")[:40]))
-    o = cfg.get("oauth")
-    if o and all(o.get(k) for k in ("client_id", "client_secret", "refresh_token")):
-        req = urllib.request.Request("https://www.googleapis.com/calendar/v3/users/me/calendarList",
-                                     headers={"Authorization": "Bearer " + access_token(o)})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            for it in json.load(r).get("items", []):
-                print(f"{it.get('summary')}  (id: {it.get('id')})")
+        print(c.get("name", "?") + "  (iCal, read)")
+    auth = google_auth(cfg)
+    if auth:
+        for it in google_get(auth[0], "https://www.googleapis.com/calendar/v3/users/me/calendarList").get("items", []):
+            print(f"{it.get('summary')}  (id: {it.get('id')}, {it.get('accessRole')})")

@@ -94,10 +94,15 @@ copy `bin/life.accounts.example.json`.
   *Secret address in iCal format* → put it in `calendars[].ics_url`. Handles RRULE
   (DAILY/WEEKLY/MONTHLY/YEARLY, INTERVAL, COUNT, UNTIL, BYDAY, BYMONTHDAY), EXDATE, modified
   instances and time zones. Anyone with that URL can read the calendar; treat it as a secret.
-- **Calendar add** (optional): create an OAuth client (Google Cloud Console, Calendar API enabled,
-  "Desktop app"), obtain a refresh token for scope `https://www.googleapis.com/auth/calendar.events`
-  (e.g. via the OAuth Playground with your own client id/secret), then fill the `oauth` block.
-  Without it `life cal add` exits saying so.
+- **Calendar add** (optional), two ways. Simplest: a Google Cloud *service account* (Calendar
+  API enabled, JSON key downloaded), share your calendar with its address ("Make changes to
+  events"), install `google-auth` in a venv, and fill
+  `"google": {"service_account_file": "key.json", "python": "<venv>/bin/python", "calendar_id": "you@gmail.com"}`
+  (paths relative to the config dir; `~` allowed). The key never expires, unlike a refresh token
+  from an unpublished OAuth app (7 days). Or: an OAuth client plus refresh token for scope
+  `https://www.googleapis.com/auth/calendar.events` in the `oauth` block.
+  Without either, `life cal add` exits saying so. `life cal calendars` lists what each can see.
+- **Time zone**: a server usually runs in UTC; set `"timezone": "America/Vancouver"` (or yours).
 - Mail ids are `<account>:<uid>` (`:a` suffix for All Mail with `--everywhere`); pass them to
   `life mail show`. `life mail send` is a dry run unless `--send`; `--from <account>` picks the sender.
 - Tests: `python3 tests/life_test.py` (fake ICS, fake IMAP/SMTP; no network).
