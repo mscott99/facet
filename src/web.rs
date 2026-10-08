@@ -49,6 +49,9 @@ p{margin:0 0 1.05em}
 hr{border:0;border-top:1px solid var(--line);margin:2.2rem 0}
 .at{color:var(--dim);font:12.5px/1.6 var(--mono)}
 .msg{margin:1.5rem 0}
+.pend{opacity:.4}
+.pend.bad{opacity:.7;border-left-color:#c88}
+.pend.bad::after{content:' ✕';color:#c88}
 .user{border-left:2px solid #8fa8c84d;padding-left:1.1rem}
 details.step{margin:.5rem 0;font:12.5px/1.6 var(--mono);color:var(--dim)}
 details.step summary{cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -183,7 +186,11 @@ function live(){
         if(nt){nt.remove();tail.dataset.high=nt.dataset.high;tail.dataset.up=nt.dataset.up;
           var dn=document.getElementById('down');if(dn)dn.hidden=nt.dataset.up!='0'}
         var n=w.firstChild,any=false;
-        while(n){var nx=n.nextSibling;tail.parentNode.insertBefore(n,tail);
+        while(n){var nx=n.nextSibling;
+          if(n.nodeType==1&&n.dataset&&n.dataset.t){var ps=document.querySelectorAll('.pend'),q=null;
+            for(var i=0;i<ps.length;i++)if(ps[i].dataset.t==n.dataset.t){q=ps[i];break}
+            if(q)q.remove()}
+          tail.parentNode.insertBefore(n,tail);
           if(n.nodeType==1){any=true;mathify(n);htmx.process(n)}n=nx}
         if(any&&stick&&!window._h)scrollTo(0,1e7);
         go();
@@ -260,14 +267,21 @@ document.addEventListener('htmx:afterRequest',function(e){var l=e.target.element
 // A `/model` reply is not a message, so it goes to the toast and refreshes the header's model.
 document.addEventListener('htmx:beforeRequest',function(e){
   var f=e.target;if(f.id!='compose')return;
-  f.classList.add('busy');document.getElementById('toast').textContent='';});
+  f.classList.add('busy');document.getElementById('toast').textContent='';
+  var ta=f.querySelector('textarea'),tx=ta.value.trim(),tl=document.getElementById('tail');
+  if(!tx||!tl)return;
+  var p=document.createElement('div');p.className='msg user pend';p.dataset.t=tx;p.textContent=tx;
+  tl.parentNode.insertBefore(p,tl);f._p=p;ta.value='';if(stick)scrollTo(0,1e7);});
 document.addEventListener('htmx:afterRequest',function(e){
   var f=e.target;if(f.id!='compose')return;
   f.classList.remove('busy');
   var r=e.detail.xhr.responseText||'',t=document.getElementById('toast');
-  if(!e.detail.successful||/^not sent/.test(r)){t.textContent=r||'not sent';return}
-  f.querySelector('textarea').value='';
+  var p=f._p;f._p=null;
+  if(!e.detail.successful||/^not sent/.test(r)){t.textContent=r||'not sent';
+    if(p){p.classList.add('bad');var ta=f.querySelector('textarea');if(!ta.value)ta.value=p.dataset.t;p.title='not sent'}
+    return}
   var m=/^model: (\S+)/.exec(r);
+  if(m||(p&&r!='sent'&&r!='queued')){if(p)p.remove()}
   if(m){t.textContent=r;var h=document.getElementById('mdl');if(h)h.textContent=m[1]}
   else if(r!='sent')t.textContent=r;});
 // older messages load above, keeping the reader where they were
@@ -480,7 +494,7 @@ fn home_of(d: &doc::Doc) -> String { d.path.file_stem().unwrap_or_default().to_s
 fn msg_html(cfg: &Cfg, m: &log::Msg) -> String {
     let base = note_base(cfg);
     match m.kind.as_str() {
-        "user" => format!("<div class=\"msg user\">{}</div>", md::render(&m.text, &base)),
+        "user" => format!("<div class=\"msg user\" data-t=\"{}\">{}</div>", md::esc(m.text.trim()), md::render(&m.text, &base)),
         "chat" | "talk" | "note" | "work" => format!("<div class=\"msg talk\">{}</div>", md::render(&m.text, &base)),
         _ => {
             let head: String = m.text.lines().next().unwrap_or("").chars().take(110).collect();
