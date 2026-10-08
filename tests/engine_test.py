@@ -373,11 +373,11 @@ try:
     # the chat; a chat message left unanswered in the chat gets the turn's final text (fallback)
     n0 = len(log())
     req({"op": "send", "text": "CHAT hello from the chat tool"})
-    wait(lambda: any(m["kind"] == "talk" and m["text"] == "said it" for m in log()[n0:]), 30, "reply after send_chat")
+    wait(lambda: any(x["ev"] == "recap_dropped" for x in events()), 30, "recap after send_chat dropped")
     wait(idle, 30, "idle after send_chat")
     L = log()[n0:]
-    check([(m["kind"], m["text"]) for m in L] == [("user", "CHAT hello from the chat tool"), ("chat", "hello from the chat tool"), ("talk", "said it")],
-          "send_chat logs kind chat, and its call and result leave no tool/echo lines: %r" % [(m["kind"], m["text"]) for m in L])
+    check([(m["kind"], m["text"]) for m in L] == [("user", "CHAT hello from the chat tool"), ("chat", "hello from the chat tool")],
+          "send_chat logs kind chat, its call and result leave no tool/echo lines, and the recap after it is dropped: %r" % [(m["kind"], m["text"]) for m in L])
     check(not any(x.get("fallback") for x in events() if x["ev"] == "turn" and x["first"] == n0), "a turn that sent to the chat gets no fallback")
 
     n0 = len(log())

@@ -59,8 +59,10 @@ turn whenever it is ready.
 Your text goes to the log, not to the user: they see only what you
 send with send_chat, on Telegram and the chat page alike. Send them
 what they should read, as often as you like; whatever else you write
-stays in the log as your own record. A turn that ends without a send
-after a chat message has its last text sent for you.
+stays in the log as your own record. What you send goes into the log
+too, word for word, so do not restate it in plain text: text after
+your last send is dropped. A turn that ends without a send after a
+chat message has its last text sent for you.
 
 A line-comment from the viewer carries its own id, shaped `[[Note]]
 L<n> #<id>: \"quote\"`; answer it with answer_card, not send_chat:

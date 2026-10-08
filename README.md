@@ -236,7 +236,11 @@ and card answers, chat sends. A **venue** is where some of it is also delivered.
 
 The agent's plain text (kind `talk`) reaches the stream only. A successful `send_chat` or
 `answer_card` call leaves no `tool`/`echo` lines: the `chat` or `answer` message is the record
-(a failed one is logged as an echo, so the failure is remembered). The safety net: when a call
+(a failed one is logged as an echo, so the failure is remembered). One reply, not two: plain
+text written after a `send_chat` is held; if another step follows it is logged as `talk`
+(working notes), but if the call ends on it, it is a recap of what was just sent and is dropped
+(a `recap_dropped` event records its size) — unless no `chat` actually landed, when it is logged
+and the safety net below sends it. The safety net: when a call
 ends (not cancelled) and a user chat message in it — not a card comment, not a "[id] " report —
 has no `chat` after it, the turn's final text (the `talk` lines after its last step, else its
 last `talk`, else a line saying the turn ended without a reply) is logged as `chat`, so it

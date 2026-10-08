@@ -405,6 +405,13 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     let mut meter = Meter::default();
     let mut replays = 0usize;
     let mut deferred: Vec<String> = Vec::new();
+    // Text written after a `send_chat` is held: the chat message already said it and is in
+    // the stream word for word, so a recap of it at the end of the turn is dropped (one reply,
+    // not two). If a step follows, the held text was working notes and is logged as talk.
+    let mut after_send = false;
+    let mut held: Option<String> = None;
+    let chats = |e: &Arc<Engine>| e.mem.lock().unwrap().store.msgs.iter().filter(|x| x.kind == "chat").count();
+    let chats0 = chats(e);
     let mut agents: HashMap<String, Agent> = HashMap::new(); // live subagents, by tool id
     let mut checked_tools = false;
     let mut quiet: HashSet<String> = HashSet::new(); // send_chat / answer_card calls, by tool id
@@ -525,13 +532,18 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                     match b["type"].as_str().unwrap_or("") {
                         "text" => {
                             let s = b["text"].as_str().unwrap_or("");
-                            if !s.trim().is_empty() { e.log("talk", s); }
+                            if s.trim().is_empty() {
+                            } else if after_send {
+                                held = Some(match held.take() { Some(h) => h + "\n\n" + s, None => s.to_string() });
+                            } else { e.log("talk", s); }
                         }
                         "thinking" => e.emit(json!({"ev": "thought", "text": b["thinking"]})),
                         "tool_use" => {
                             let name = b["name"].as_str().unwrap_or("");
                             // an output tool's call is not logged as a step: the `chat` or
                             // `answer` message it logs itself is the record (mcp.rs)
+                            if let Some(h) = held.take() { e.log("talk", &h); }
+                            after_send = name.ends_with("__send_chat");
                             if is_output(name) {
                                 if let Some(id) = b["id"].as_str() { quiet.insert(id.to_string()); }
                             } else {
@@ -603,6 +615,12 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
         }
     }
     for m in deferred.drain(..) { e.log("user", &m); }
+    if let Some(h) = held.take() {
+        // dropped only if the send really landed; otherwise it is the reply the fallback sends
+        let sent = chats(e) > chats0;
+        if sent { super::events::log(&e.dir, "recap_dropped", json!({"turn": tr.first, "bytes": h.len()})); }
+        else { e.log("talk", &h); }
+    }
     if tr.outcome != "cancelled" { fallback(e, tr); }
     // a subagent whose report never came back (the call ended or was killed first) still spent
     let left: Vec<(String, Agent)> = agents.drain().collect();
