@@ -113,8 +113,8 @@ textarea:focus{outline:1px solid var(--line)}
 .say .th:empty+.cmp{margin-top:0}
 .say .cmp textarea{flex:1;min-width:0;max-height:40vh;overflow-y:auto}
 .say .cmp .go{flex:none;padding:.5rem .1rem;font:12px var(--mono);color:var(--acc)}
-.say .st{font:11px var(--mono);text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin-top:.3rem}
-.say .st:empty{display:none}
+.say .cmp.bad textarea{outline:1px solid #c88}
+.say .t.pend{opacity:.4}
 form.busy textarea,form.busy button{opacity:.45}
 #older{min-height:1px}
 body{overflow-anchor:none}
@@ -228,7 +228,6 @@ document.addEventListener('visibilitychange',function(){
 //     .hd   the quote, and `remove`
 //     .th   the thread: what was said (.t) and the answers (.msg.talk), in the order they came
 //     .cmp  the composer — always last, under the whole thread: a box and a `send` button
-//     .st   status: sending / queued / not sent
 // Enter or `send` sends, Shift-Enter is a new line. A card nothing was said in leaves no
 // trace on Escape or a click away. Once sent, the composer waits for an answer before it
 // shows again, so a card that is only waiting stays one quiet line.
@@ -236,8 +235,7 @@ function card(b,o){
   var d=document.createElement('div');d.className='say';
   d.dataset.id=o.id;d.dataset.note=o.note;d.dataset.line=o.line;d.dataset.where=o.where;
   d.innerHTML='<div class=hd><div class=q></div><button class=x type=button title=remove aria-label=remove>&times;</button></div>'+
-    '<div class=th></div><div class=cmp><textarea rows=1></textarea><button class=go type=button>send</button></div>'+
-    '<div class=st></div>';
+    '<div class=th></div><div class=cmp><textarea rows=1></textarea><button class=go type=button>send</button></div>';
   d.querySelector('.q').textContent=o.where;
   d._sent=o.sent||0;d._n=o.n||0;
   var th=d.querySelector('.th'),t=d.querySelector('textarea'),go=d.querySelector('.go');
@@ -268,7 +266,6 @@ function fit(t){t.style.height='auto';t.style.height=t.scrollHeight+'px'}
 function grow(d,f){
   var top=d.getBoundingClientRect().top,h=d.offsetHeight;f();
   if(top<0)scrollBy(0,d.offsetHeight-h)}
-function status(d,s){d.querySelector('.st').textContent=s||''}
 // The one way anything is sent from a card, the first comment or a later reply alike: the id
 // travels every time, so the whole thread stays one card. It shows at once, in place, as what
 // was said; a failure takes it back out and returns the words to the box.
@@ -277,14 +274,14 @@ function submit(d){
   if(!said){if(fresh(d))drop(d);return}
   var k=document.createElement('div');k.className='t';k.textContent=said;
   grow(d,function(){d.querySelector('.th').appendChild(k);t.value='';fit(t)});
-  status(d,'sending');
+  k.classList.add('pend');d.querySelector('.cmp').classList.remove('bad');
   var body='id='+d.dataset.id+'&note='+encodeURIComponent(d.dataset.note)+'&line='+d.dataset.line+
     '&text='+encodeURIComponent(d.dataset.where+'\n'+said)+'&later=1';
   fetch(TOK+'/x/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
     .then(function(r){return r.ok?r.text():Promise.reject(r.status)})
     .then(function(r){if(/^not sent/.test(r))return Promise.reject(r.replace(/^not sent:?\s*/,''))})
-    .then(function(){d._sent++;status(d,'queued');shape(d);watch(d)},
-          function(err){k.remove();if(!t.value)t.value=said;fit(t);status(d,'not sent ('+err+')');shape(d)});
+    .then(function(){d._sent++;k.classList.remove('pend');watch(d)},
+          function(err){k.remove();if(!t.value)t.value=said;fit(t);d.querySelector('.cmp').classList.add('bad');d.querySelector('.cmp').title='not sent: '+err});
 }
 // A card's own remove: a sent one only has to leave the page, not be unsent — the answers it
 // may already carry stay exactly where `facet answer` put them.
@@ -312,7 +309,7 @@ function pull(){
         grow(d,function(){var th=d.querySelector('.th');
           // inserted by hand, an answer's `apply` form needs htmx told about it, as mathify does
           while(rp.firstChild){var n=rp.firstChild;th.appendChild(n);if(n.nodeType==1){mathify(n);htmx.process(n)}}
-          d._n=parseInt(rp.dataset.high,10);status(d,'');shape(d)});
+          d._n=parseInt(rp.dataset.high,10);shape(d)});
       }
       pull();
     },function(e){if(RA!==a)return;RA=null;if(!(e&&e.name=='AbortError'))setTimeout(pull,5000)});
@@ -331,7 +328,7 @@ function cards(){
         var b=document.querySelector('[data-note="'+CSS.escape(c.note)+'"][data-line="'+c.line+'"]:not(.say)');
         if(!b)return;
         c.sent=1;last=card(b,c);
-        if(!c.n)status(last,'queued');});
+        });
       if(last&&(!RC||!document.body.contains(RC)))watch(last);
     },function(){});
 }
