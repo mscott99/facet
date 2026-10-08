@@ -344,6 +344,7 @@ class Digest(unittest.TestCase):
         if os.path.exists(self.sent): os.remove(self.sent)
         W.FACET = script(f"open({self.sent!r},'a').write(' '.join(sys.argv[1:]).replace(chr(10),'|')+chr(10))")
         self.verdicts = {}
+        W.CLAUDE = script("print(json.dumps({'is_error':True,'result':'no model'}))")   # summaries fall back to the list
         W.judge = lambda items, conf: ({m["id"]: self.verdicts.get(m["id"], ("today", False, "w")) for m, _ in items}, None)
         W.fulltext = lambda L, acct, uid, cap=6000: "full"
         W.snippet = lambda L, a, u: "body"
@@ -402,6 +403,59 @@ class Digest(unittest.TestCase):
         CLOCK[0] = at(9); W.new_mail = lambda L, a, st, back=0: (list(self.mails), {"uv": 1, "last": 60}, False)
         CLOCK[0] = at(12, 40); W.run(False, out=lambda l: None)                 # arrives after lunch digest
         self.assertEqual(len(self.pushes()), 2)                                   # after lunch, can_wait False -> pushed
+
+    def stub_summary(self, text):
+        self.prompts = os.path.join(tmp, "prompts.txt")
+        if os.path.exists(self.prompts): os.remove(self.prompts)
+        W.CLAUDE = script(f"p=sys.stdin.read();open({self.prompts!r},'a').write(p+'\\n=====\\n')\n"
+                          f"print(json.dumps({{'is_error':False,'result':{text!r}}}))")
+
+    def test_digest_is_a_summary_from_full_text(self):
+        W.fulltext = lambda L, acct, uid, cap=6000: f"BODY-{uid}"
+        self.L.imap_connect = None
+        self.mails = [self.mail(1), self.mail(2)]
+        CLOCK[0] = at(6, 30); W.run(False, out=lambda l: None)
+        self.stub_summary("- Michael: s -- wants the draft by Fri (a:1)\n- Michael: s -- fyi (a:2)")
+        self.mails = []
+        CLOCK[0] = at(8, 5); W.run(False, out=lambda l: None)
+        p = self.pushes()
+        self.assertEqual(len(p), 1)
+        self.assertTrue(p[0].startswith("push --log [mail digest] 2 to read today|- Michael: s -- wants the draft"))
+        pr = open(self.prompts).read()
+        self.assertIn("BODY-1", pr); self.assertIn("BODY-2", pr)
+        self.assertEqual(self.state()["_digest"]["queue"], [])
+
+    def test_digest_summary_missing_id_is_appended_and_both_fail_gives_list(self):
+        self.mails = [self.mail(1), self.mail(2)]
+        CLOCK[0] = at(6, 30); W.run(False, out=lambda l: None)
+        self.stub_summary("- Michael: s -- only the first (a:1)")
+        self.mails = []
+        CLOCK[0] = at(8, 5); W.run(False, out=lambda l: None)
+        self.assertIn("(a:2, ", self.pushes()[0])             # dropped id came back as a list line
+        self.mails = [self.mail(3)]
+        W.new_mail = lambda L, a, st, back=0: (list(self.mails), {"uv": 1, "last": 70}, False)
+        W.CLAUDE = script("print(json.dumps({'is_error':True,'result':'no model'}))")
+        CLOCK[0] = at(9); W.run(False, out=lambda l: None)
+        self.mails = []
+        CLOCK[0] = at(12, 35); W.run(False, out=lambda l: None)
+        self.assertIn("- Michael: s -- w (a:3, ", self.pushes()[1])   # old list format
+
+    def test_dry_run_shows_summary_and_after_lunch_push_is_summarised(self):
+        self.verdicts = {"a:1": ("today", False, "due tonight")}
+        self.stub_summary("- Michael: s -- due tonight, reply (a:1)")
+        self.mails = [self.mail(1)]
+        CLOCK[0] = at(14); W.run(False, out=lambda l: None)
+        p = self.pushes()
+        self.assertTrue(p[0].startswith("push --log [mailwatch] 1 needs you|- Michael: s -- due tonight, reply"))
+        W.fulltext = lambda L, acct, uid, cap=6000: "x"
+        self.mails = [self.mail(2)]; self.verdicts = {"a:2": ("today", True, "fyi")}
+        W.new_mail = lambda L, a, st, back=0: (list(self.mails), {"uv": 1, "last": 80}, False)
+        out = []
+        CLOCK[0] = at(14, 20); W.run(False, out=lambda l: None)
+        self.stub_summary("- Michael: s -- dry gist (a:2)")
+        self.mails = []
+        CLOCK[0] = at(8, 1, d=9); W.run(True, out=out.append)
+        self.assertTrue(any("dry gist" in l for l in out)); self.assertEqual(len(self.pushes()), 1)
 
     def test_after_lunch_cannot_wait_pushed_can_wait_queued(self):
         self.verdicts = {"a:1": ("today", False, "due tonight"), "a:2": ("today", True, "fyi")}

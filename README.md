@@ -760,8 +760,12 @@ timer and the `--idle` path use it (`tiers()` + `dispatch()` in `bin/mailwatch`)
 - `now`: pushed at once with `facet push --log` (`[mailwatch] N need you`), as before.
 - `today`: appended to a queue in `state.json` under `_digest.queue` (deduped by account:uid, so idle and timer never
   double-queue). Config `digest_times` (default `["08:00","12:30"]`, in the config's `timezone`): the first timer run
-  after each time sends ONE message `[mail digest] N to read today`, one line per mail (sender, subject, id, why), and
-  clears the queue; empty queue sends nothing. `_digest.last` stops a slot firing twice.
+  after each time sends ONE message `[mail digest] N to read today` and clears the queue; empty queue sends nothing.
+  The message is a **summary**: one Sonnet call (`digest_model`, haiku `fallback_digest_model`) over the queued mails' full
+  text (re-fetched with PEEK, never marked read) gives, per mail or thread, sender, subject, 1-2 sentences of what it
+  says and what is asked by when, and the id, most pressing first; a dropped id is appended as a list line; if both
+  models fail the old one-line-per-mail list is sent. The after-lunch "cannot wait" push is summarised the same way.
+  `--dry-run` shows the summary. `_digest.last` stops a slot firing twice.
 - After the day's last digest time, `today` mail with `can_wait` false is pushed at once (together with any `now`
   mail, one message); with `can_wait` true it stays queued for the next morning's digest.
 - Quiet hours (23:00-07:00) stay hard. Nothing runs then: the timer and idle return before touching mail or the
