@@ -634,6 +634,9 @@ cache claim above from request usage; with `ANTHROPIC_BASE_URL` at a logging pro
     facet answer <id> <text> [--apply <replacement>]
                                 a deliberate reply to a line-comment card by id; --apply only
                                   when there is a concrete replacement to offer
+    facet restart [--serve]    queue an engine restart (re-exec of the binary, same pid) for after the
+                                  running reply, once no detached spawn is alive; --serve also
+                                  restarts serve (systemctl --user / launchctl kickstart)
     facet send [--later] <text>  put a message into the conversation (--later: a turn of its own)
     facet push <text>          push to Telegram
     facet spawn [--model M] [--kind general-purpose|explore] [--desc D] <task>

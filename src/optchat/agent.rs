@@ -65,6 +65,7 @@ pub fn spawn(e: &Arc<Engine>, model: &str, kind: &str, desc: &str, task: &str) -
     let content = Value::Array(vec![json!({"type": "text", "text": view}), json!({"type": "text", "text": task})]);
     if let Err(x) = p.send(content) { return Err(x.to_string()) }
 
+    e.spawns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let rec = Rec { id: id.clone(), kind, desc: desc.trim().to_string(), task: task.to_string() };
     let e2 = e.clone();
     std::thread::spawn(move || run(e2, p, rec));
@@ -129,4 +130,7 @@ fn run(e: Arc<Engine>, mut p: Proc, rec: Rec) {
     }));
     let said = if report.is_empty() { format!("(no report; the detached agent ended {})", status) } else { report };
     turn::input(&e, format!("[{}] {}", rec.id, said), true);
+    // after the report is queued (it starts a turn, whose end then fires a queued restart)
+    e.spawns.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    super::engine::restart_if_idle(&e);
 }

@@ -150,6 +150,14 @@ fn main() {
             }
         }
 
+        // queue a restart of the engine (re-exec) for when the reply ends and no spawn is alive
+        "restart" => match optchat::engine::request(&optchat::engine::dir(),
+            serde_json::json!({"op": "restart", "serve": rest.iter().any(|a| a == "--serve")})) {
+            Ok(v) if v["ok"].as_bool() == Some(true) => println!("restart queued"),
+            Ok(v) => die(v["error"].as_str().unwrap_or("refused")),
+            Err(e) => die(&e),
+        },
+
         "diag" => print!("{}", diag::brief(&cfg)),
         // one call, N comments: anchors are verbatim text, the binary finds the lines
         "review" => {
