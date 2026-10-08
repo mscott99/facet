@@ -192,7 +192,9 @@ fn call(e: &Arc<Engine>, blocks: &[(String, bool)], keys: &[u64], name: &str, tr
                 if let Some(o) = claude::outcome(&ev) { break o }
             };
             if out.error { return Err(fail(if out.text.is_empty() { out.subtype } else { out.text })) }
-            let line = out.text.trim().to_string();
+            // the retry note shows the cut ending in "| ← LIMIT"; a model may copy it back
+            let line = out.text.trim();
+            let line = line.strip_suffix("← LIMIT").map(|t| t.trim_end().trim_end_matches('|')).unwrap_or(line).trim().to_string();
             if line.is_empty() { return Err(fail("empty reply")) }
             let n = line.len();
             tr.tries.push(n);
