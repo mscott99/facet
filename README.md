@@ -710,3 +710,31 @@ the rewritten `data-line`) usually comes before it now.
 Settings and secrets in `~/.config/facet/`, the memory in `~/.optchat`, engine state in
 `~/.local/share/facet/` (see **logs**). Everything else lives in the vault or in the memory,
 on purpose: delete this program and nothing is lost but a port number.
+
+## mailwatch (cheap periodic mail check)
+
+`bin/mailwatch` runs every 20 minutes from a systemd `--user` timer (`systemd/mailwatch.{service,timer}`,
+`Persistent=true`) and wakes OptChat only when something deserves attention. Read-only: IMAP PEEK, never
+replies, never marks read, never prints message bodies.
+
+1. **No LLM.** For each account in `~/.config/life/accounts.json`, list INBOX mail with UID above the cursor in
+   `~/.local/state/mailwatch/state.json` (per account: UIDVALIDITY + last UID). The first run only records
+   the cursor. Nothing new: exit silently.
+2. **Rules** (`~/.config/life/mailwatch.json`, written with defaults on first run; case-insensitive globs
+   against `From <addr> | Subject`): `always` (straight to notify), `mute`, plus `bulk_headers_mute`
+   (List-Unsubscribe / List-Id / Precedence bulk / Auto-Submitted ⇒ mute, even if `always` would match) and
+   `skip_seen` (already read elsewhere ⇒ mute). `quiet_hours` (default 23:00-07:00, `timezone`): the run
+   does nothing and leaves the cursor, so the first run afterwards catches up.
+3. **One batched triage** of the remainder: `claude -p --model haiku` (falls back to `fallback_model` sonnet),
+   From/Subject/date + first 600 chars of the unquoted text, max `max_batch` (25) messages; strict JSON
+   `{id, notify, why}`. Token/cost log: `~/.local/state/mailwatch/usage.jsonl`. If triage fails, those
+   messages are reported as "triage unavailable" rather than silently dropped.
+
+If anything qualifies, one `facet send --later "[mailwatch] N new: id | from | subject | why; ..."`. Ids work
+with `life mail show/thread`.
+
+`bin/mailwatch --dry-run [--last N]` prints decisions, sends nothing, leaves the cursor alone (`--last N`
+pretends the cursor is N messages back per account, and ignores quiet hours). Install:
+`cp systemd/mailwatch.* ~/.config/systemd/user/ && systemctl --user daemon-reload &&
+systemctl --user enable --now mailwatch.timer`. Env overrides for tests: `MAILWATCH_{STATE_DIR,CONFIG,CLAUDE,FACET}`.
+Tests: `python3 tests/mailwatch_test.py`. Cost: about $0.0005-0.002 per triage call, none when nothing needs triage.

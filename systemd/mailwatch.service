@@ -1,0 +1,12 @@
+# One mailwatch pass (see README "mailwatch"). Install next to the other units:
+#   cp systemd/mailwatch.* ~/.config/systemd/user/ && systemctl --user daemon-reload
+#   systemctl --user enable --now mailwatch.timer
+[Unit]
+Description=mailwatch: check mail, wake OptChat only if something matters
+
+[Service]
+Type=oneshot
+ExecStart=%h/facet/bin/mailwatch
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+TimeoutStartSec=600
