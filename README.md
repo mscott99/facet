@@ -531,6 +531,15 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     about both paths (12), and which to use for what: a Task call when the result is needed
     inside the turn, `facet spawn` for anything that should still be working after the reply.
 
+    Memory hygiene (all constant per call, so the prompt cache is untouched): the task of a spawn
+    is logged verbatim as a `tool` message "spawn <id> (<model>, <kind>, <desc>): <task>" (a
+    plain log line, no turn), so a task passed by file is not lost; `--add-dir /tmp` on the
+    master's and spawns' calls keeps work in /tmp from resetting the shell's directory, and a
+    trailing "Shell cwd was reset to ..." line is stripped from a tool result before it is logged
+    as `echo`; the compactor's length example (`prompts::SCALE`) is labelled invented, about no
+    real chat, and COMPACT tells it that a summary is never longer than what it stands for and
+    may lean on the lines before it, never the ones after.
+
 Not implemented: computer use, and `tell` — a running `facet spawn` cannot be messaged once
 sent, only awaited for its report (§9); `facet spawn` itself (21) is this engine's answer to
 the gist's `spawn`.

@@ -95,7 +95,7 @@ try:
     # compactor input: no ids in the context; the context's last block marked; </chat> in the step
     c = merges[0]["content"]
     check(all("|" not in b["text"].split("\n")[1][:12] for b in c[:-1] if b["text"].startswith("<chat>\n") and len(b["text"]) > 8), "no ids in compactor context")
-    check(c[-1]["text"].startswith("</chat>\n\nFor scale, this line is exactly 512 bytes:"), "step block opens with </chat> and SCALE")
+    check(c[-1]["text"].startswith("</chat>\n\nFor length only, here is an invented example line about no real chat, exactly 512 bytes;"), "step block opens with </chat> and SCALE")
     check(sum(1 for b in c if "cache_control" in b) <= 4, "at most 4 cache marks per compactor call")
     check(all(x["env"]["DISABLE_PROMPT_CACHING"] == "1" for x in merges), "compactor runs with Claude Code marks off")
     retries = [x for x in fake() if x["kind"] == "compact-retry"]
@@ -328,10 +328,20 @@ try:
     req({"op": "send", "text": "hi again"})
     wait(lambda: any(m["kind"] == "talk" for m in log()[n0:]), 30, "an ordinary turn still runs fine right after a spawn")
     wait(idle, 10, "idle right after that turn, before the spawn has reported")
-    check(not any(sid in m["text"] for m in log()[n0:]), "the spawn's report has not arrived yet at that point")
+    logged = [m for m in log()[n0:] if m["kind"] == "tool" and m["text"].startswith("spawn " + sid)]
+    check(len(logged) == 1 and logged[0]["text"].endswith("(sonnet, general-purpose, test spawn): look into the thing and report back"),
+          "the spawn's task is logged once, verbatim: %r" % (logged,))
+    check(not any(sid in m["text"] for m in log()[n0:] if m["kind"] != "tool"), "the spawn's report has not arrived yet at that point")
     wait(lambda: any(m["kind"] == "user" and m["text"].startswith("[%s] " % sid) for m in log()[n0:]),
          15, "the detached agent's report joins the chat, after the turn that spawned it is long done")
     wait(idle, 30, "idle after the spawn's own turn")
+    # the shell's "cwd was reset" note is not part of what the command printed
+    n1 = len(log())
+    req({"op": "send", "text": "TOOLS 1 CWD"})
+    wait(lambda: any(m["kind"] == "talk" for m in log()[n1:]), 30, "the CWD turn finishes")
+    ec = [m["text"] for m in log()[n1:] if m["kind"] == "echo"]
+    check(ec == ["slept 0"], "the cwd-reset line is stripped from an echo: %r" % (ec,))
+    wait(idle, 30, "idle after the CWD turn")
     L = log()[n0:]
     rep = [m for m in L if m["kind"] == "user" and m["text"].startswith("[%s] " % sid)]
     check(len(rep) == 1 and "SPAWN REPORT" in rep[0]["text"],

@@ -200,7 +200,7 @@ def run_turn(msg):
         tid = "tool%d_%f" % (k, time.time())
         step([{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "sleep %d" % k}}], stop="tool_use")
         time.sleep(0.6)  # the tool runs
-        out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tid, "content": "slept %d" % k}]}})
+        out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tid, "content": "slept %d" % k + ("\nShell cwd was reset to /home/fake" if "CWD" in t else "")}]}})
         # messages that arrived while the tool ran ride on its result
         while not inbox.empty():
             m = inbox.get()

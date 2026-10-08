@@ -72,7 +72,7 @@ pub fn pump(e: &Arc<Engine>) {
 /// closing the chat block, so that one call's chat is a prefix of the next one's.
 fn job(m: &super::engine::Mem, l: usize, i: usize, _name: &str) -> Job {
     let s = &m.store;
-    let head = format!("</chat>\n\nFor scale, this line is exactly {} bytes:\n{}\n\n", NODE, prompts::SCALE);
+    let head = format!("</chat>\n\nFor length only, here is an invented example line about no real chat, exactly {} bytes; never copy or mention its content:\n{}\n\n", NODE, prompts::SCALE);
     if l == 0 {
         let chat = m.view.bare(s, |p| p.end() <= i);
         let msg = &s.msgs[i];

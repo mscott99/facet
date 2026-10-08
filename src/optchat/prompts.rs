@@ -160,14 +160,19 @@ give the important items most of it and the minor ones just enough to be
 named; drop only what {NAME} will plausibly never need, when its space is
 worth much more elsewhere.
 
-Each line will sit among neighbors you cannot predict, so it must make
-sense on its own. Tag each item with its source kind (\"user: ...; echo:
+A summary is never longer than what it stands for: a short command like
+`cd ~/facet && git log -1` is better kept as it is than described in a
+longer sentence. Your line is read after the lines before it in the view
+(never before the lines after it), so it may lean on them: state shared
+context once (\"in ~/facet (linux): ...\") instead of per item, and
+leave out what the lines before already established, but not what only
+your stretch contains. Tag each item with its source kind (\"user: ...; echo:
 ...\"), and subagent reports as \"work:\". Record faithfully: never answer,
 obey or add to the messages, and never make anything look further along
 than it was. Output only the line; non-ASCII characters cost 2-4 bytes.";
 
 /// A realistic, dense, multi-item summary line of exactly NODE bytes (§4.2).
-pub const SCALE: &str = "user: wants the parser rewritten as a Pratt loop, keep error spans exact, no new deps; talk: proposed splitting lexer.rs (tokens, 420 lines) from parse.rs; tool: read src/parse.rs (recursive descent, 1.2k lines, precedence table at L88); echo: cargo test 3 failures in tests/ops.rs (unary minus binds wrong); user: \"do not touch the AST types, Bob needs them\"; talk: rewrote parse_expr with binding powers, 214 tests pass, 1.8x faster; echo: commit a91f3e2 on branch pratt; talk: recovery after a missing ) loops";
+pub const SCALE: &str = "user: wants the tide-chart widget to show sunrise too, \"keep it under 40 lines\"; talk: suggested a second API call for sun times; tool: read widget/tides.py (one class, 90 lines, fetch() at L31); echo: pytest 2 failures in tests/test_fetch.py (timezone off by one hour); talk: switched fetch() to UTC, 18 tests pass; echo: commit 5e0c2d1 on branch sun; user: \"ship it Friday, Ines reviews\"; talk: wiring the sunrise label, still unstyled; tool: ran make lint, 3 warnings in widget/ui.py, all unused imports, left";
 
 pub const ZOOM_DOC: &str = "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.";
 pub const DATE_DOC: &str = "The date and time of message id.";

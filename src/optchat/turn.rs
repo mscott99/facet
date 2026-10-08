@@ -325,7 +325,8 @@ fn args(e: &Engine, view: &str) -> Vec<String> {
     if std::fs::read_to_string(&f).ok().as_deref() != Some(sys.as_str()) { let _ = std::fs::write(&f, &sys); }
     let mut a = claude::base_args(&e.model(), &e.conf.effort, &f.to_string_lossy(), &e.conf.tools);
     let mcp = json!({"mcpServers": {"optchat": {"type": "http", "url": e.mcp_url.get().cloned().unwrap_or_default()}}});
-    a.extend(["--mcp-config".into(), mcp.to_string(), "--permission-mode".into(), e.conf.permission.clone(), "--replay-user-messages".into()]);
+    a.extend(["--mcp-config".into(), mcp.to_string(), "--permission-mode".into(), e.conf.permission.clone(), "--replay-user-messages".into(),
+        "--add-dir".into(), "/tmp".into()]);
     // Subagents run on the cheap model and are sent the view as it stands (§9): they read a
     // lot and write one short report. The view in there costs this call nothing: an agent
     // definition's prompt never enters the master's own request, so it cannot move the marks.
@@ -598,6 +599,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                         Some(a) => { if text.starts_with("Async agent launched") { a.bg = true; } a.bg }
                         None => false,
                     };
+                    let text = strip_cwd_note(&text);
                     let silent = mute.remove(id);
                     let ok = silent || (quiet.remove(id) && (text == super::mcp::SENT || text == super::mcp::ANSWERED));
                     if !bg && !ok {
@@ -742,5 +744,29 @@ mod tests {
         assert!(c.ends_with(&"b".repeat(15_000)));
         assert!(c.contains("[… 10000 characters cut …]"));
         assert_eq!(super::cap("short"), "short");
+    }
+}
+
+/// A Bash result that ends "Shell cwd was reset to <dir>" carries that note only because the
+/// command left the working directory: noise in the log, not something the command printed.
+pub fn strip_cwd_note(t: &str) -> String {
+    let t = t.trim_end();
+    match t.rfind('\n') {
+        Some(i) if t[i + 1..].starts_with("Shell cwd was reset to ") => t[..i].trim_end().to_string(),
+        None if t.starts_with("Shell cwd was reset to ") => String::new(),
+        _ => t.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod cwd_tests {
+    use super::strip_cwd_note;
+    #[test]
+    fn strips_trailing_cwd_note() {
+        assert_eq!(strip_cwd_note("ok\nShell cwd was reset to /home/facet"), "ok");
+        assert_eq!(strip_cwd_note("a\nb\n\nShell cwd was reset to /x\n"), "a\nb");
+        assert_eq!(strip_cwd_note("plain"), "plain");
+        assert_eq!(strip_cwd_note("Shell cwd was reset to /x"), "");
+        assert_eq!(strip_cwd_note("Shell cwd was reset to /x\nmore"), "Shell cwd was reset to /x\nmore");
     }
 }
