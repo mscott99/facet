@@ -102,6 +102,8 @@ textarea:focus{outline:1px solid var(--line)}
    stays as plain text, since a greyed-out textarea reads as discarded. */
 .say.done textarea.say{display:none}
 .say.done .t{white-space:pre-wrap}
+form.busy textarea,form.busy button{opacity:.45}
+#older{min-height:1px}
 #toast{max-width:var(--measure);margin:.3rem auto 0;font:12px var(--mono);color:var(--dim);min-height:1em}
 .katex{font-size:1.03em}.katex-display{overflow-x:auto;overflow-y:hidden;margin:1.3em 0}
 /* The line you can comment on says so only under the pointer, and only on the block a click
@@ -123,7 +125,7 @@ function mathify(r){r.querySelectorAll('span[data-math-style]').forEach(function
 function atEnd(){return innerHeight+scrollY>document.body.scrollHeight-120}
 var stick=true;
 addEventListener('scroll',function(){stick=atEnd()});
-document.addEventListener('htmx:afterSwap',function(e){mathify(e.target);if(stick)scrollTo(0,1e7)});
+document.addEventListener('htmx:afterSwap',function(e){mathify(e.target);if(stick&&!window._h)scrollTo(0,1e7)});
 addEventListener('load',function(){mathify(document);if(location.hash=='')scrollTo(0,1e7)});
 // Enter sends (into the running turn, at its next tool call); Shift-Enter sends for a turn
 // of its own, after the running one; Alt-Enter is a new line
@@ -135,6 +137,25 @@ document.addEventListener('keydown',function(e){
   var f=e.target.form;f.elements.later.value=e.shiftKey?'1':'0';
   htmx.trigger(f,'submit');});
 document.addEventListener('htmx:afterRequest',function(e){var l=e.target.elements&&e.target.elements.later;if(l)l.value='0'});
+// The compose box: dim while the server has it, clear on success, say plainly when it failed.
+// A `/model` reply is not a message, so it goes to the toast and refreshes the header's model.
+document.addEventListener('htmx:beforeRequest',function(e){
+  var f=e.target;if(f.id!='compose')return;
+  f.classList.add('busy');document.getElementById('toast').textContent='';});
+document.addEventListener('htmx:afterRequest',function(e){
+  var f=e.target;if(f.id!='compose')return;
+  f.classList.remove('busy');
+  var r=e.detail.xhr.responseText||'',t=document.getElementById('toast');
+  if(!e.detail.successful||/^not sent/.test(r)){t.textContent=r||'not sent';return}
+  f.querySelector('textarea').value='';
+  var m=/^model: (\S+)/.exec(r);
+  if(m){t.textContent=r;var h=document.getElementById('mdl');if(h)h.textContent=m[1]}
+  else if(r!='sent')t.textContent=r;});
+// older messages load above, keeping the reader where they were
+document.addEventListener('htmx:beforeRequest',function(e){
+  if(e.target.id=='older')window._h=document.body.scrollHeight});
+document.addEventListener('htmx:afterSwap',function(e){
+  if(window._h){scrollBy(0,document.body.scrollHeight-window._h);window._h=0}});
 // Vim keys for reading: d/u a half page, j/k a few lines, gg and G the ends. Every jump is
 // instant — no animation to sit through — and none of them fire while typing somewhere.
 var gg=0;
@@ -289,15 +310,19 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
     if !cfg.vault_phone().is_empty() { nav.push_str(&format!("<a href=\"{}\">vault</a>", cfg.vault_phone())); }
     if !cfg.terminal().is_empty() { nav.push_str(&format!("<a href=\"{}\">term</a>", cfg.terminal())); }
     let n = diag::all(cfg).len();
-    let status = format!("{}{}",
+    let model = if compose {
+        crate::optchat::engine::request(&crate::optchat::engine::dir(), serde_json::json!({"op": "status"}))
+            .ok().and_then(|v| v["model"].as_str().map(String::from)).unwrap_or_default()
+    } else { String::new() };
+    let status = format!("{}{}{}",
+        if model.is_empty() { String::new() } else { format!("<span id=mdl>{}</span> · ", md::esc(&model)) },
         if tell::healthy(cfg) { "" } else { "input down · " },
         if n > 0 { format!("{} comments", n) } else { String::new() });
     // Only the chat has a box standing ready at the bottom. Reading a note, what you want to say
     // is always about a line of it, so the box comes to the line you double-click instead. The
     // toast line stays either way — the comment cards post through it.
     let foot = format!("<footer>{}<div id=toast></div></footer>", if compose {
-        format!("<form hx-post=\"{}/x/send\" hx-target=\"#toast\" hx-swap=innerHTML \
-            hx-on::after-request=\"if(event.detail.successful)this.querySelector('textarea').value=''\">\
+        format!("<form hx-post=\"{}/x/send\" hx-swap=none id=compose>\
             <textarea name=text rows=1 placeholder=\"message\"></textarea><input type=hidden name=later value=0>\
             <button>send</button></form>", t)
     } else { String::new() });
@@ -370,11 +395,32 @@ fn reply_fragment(cfg: &Cfg, id: &str, since: usize) -> String {
     format!("<div class=rp data-high=\"{}\">{}</div>", answers.len(), said)
 }
 
+const PAGE: usize = 40;
+
+/// Older chat messages: the PAGE before `before`, and a sentinel that fetches the PAGE before
+/// those when it scrolls into view, if there are any.
+fn older_fragment(cfg: &Cfg, before: i64) -> String {
+    let all: Vec<log::Msg> = log::since(cfg, -1).into_iter().filter(|m| m.in_chat() && m.i < before).collect();
+    let from = all.len().saturating_sub(PAGE);
+    let mut out = older_sentinel(cfg, &all[from..], from > 0);
+    out.push_str(&all[from..].iter().map(|m| msg_html(cfg, m)).collect::<String>());
+    out
+}
+fn older_sentinel(cfg: &Cfg, shown: &[log::Msg], more: bool) -> String {
+    match (more, shown.first()) {
+        (true, Some(m)) => format!("<div id=older hx-get=\"{}/f/older?before={}\" hx-trigger=revealed hx-swap=outerHTML></div>",
+            cfg.token_path(), m.i),
+        _ => String::new(),
+    }
+}
+
 fn chat_page(cfg: &Cfg) -> String {
-    // the last 40 messages of the chat venue, not of the stream
-    let shown: Vec<i64> = log::since(cfg, -1).into_iter().filter(|m| m.in_chat()).map(|m| m.i).collect();
-    let since = shown.len().checked_sub(40).and_then(|k| shown.get(k)).map(|i| i - 1).unwrap_or(-1);
-    page(cfg, "Facet", "chat", &format!("<div id=log>{}</div>", log_fragment(cfg, since)), true)
+    // the last PAGE messages of the chat venue, not of the stream; earlier ones load on scroll
+    let all: Vec<log::Msg> = log::since(cfg, -1).into_iter().filter(|m| m.in_chat()).collect();
+    let k = all.len().saturating_sub(PAGE);
+    let since = all.get(k).map(|m| m.i - 1).unwrap_or(-1);
+    page(cfg, "Facet", "chat", &format!("<div id=log>{}{}</div>",
+        older_sentinel(cfg, &all[k..], k > 0), log_fragment(cfg, since)), true)
 }
 
 /// A diagnostic as a card: the message, the explanation with real math, and the three things
@@ -589,6 +635,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         [] | ["home"] => html(page(cfg, "Facet", "home", &home(cfg), false), 200),
         ["chat"] => html(chat_page(cfg), 200),
 
+        ["f", "older"] => html(older_fragment(cfg, qnum("before")), 200),
         ["f", "log"] => html(log_fragment(cfg, qnum("since")), 200),
 
         // the answers addressed to one card, for it to show them where it was sent
@@ -647,7 +694,12 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
                 let sd = crate::optchat::engine::state_dir(&crate::optchat::engine::dir());
                 cards::register(&sd, &id, &field(&f, "note"), field(&f, "line").parse().unwrap_or(0));
             }
-            match tell::tell(cfg, &field(&f, "text"), "reader", field(&f, "later") == "1") {
+            let text = field(&f, "text");
+            let t = text.trim();
+            if t == "/model" || t.starts_with("/model ") {
+                return html(md::esc(&crate::tg::model_cmd(&t[6..])), 200);
+            }
+            match tell::tell(cfg, &text, "reader", field(&f, "later") == "1") {
                 Ok(_) => html("sent".into(), 200),
                 Err(e) => html(format!("not sent: {}", md::esc(&e)), 200),
             }
