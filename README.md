@@ -737,8 +737,19 @@ that is obviously not worth reading (see "Marking read" below).
    `{id, notify, why}`. Token/cost log: `~/.local/state/mailwatch/usage.jsonl`. If triage fails, those
    messages are reported as "triage unavailable" rather than silently dropped.
 
-If anything qualifies, one `facet send --later "[mailwatch] N new: id | from | subject | why; ..."`. Ids work
-with `life mail show/thread`.
+4. **One Sonnet judgement** of the candidates (`always` mail plus triage `notify`; `unsure` is never escalated, and
+   stays unread). One `claude -p --model sonnet` (`judge_model`) call reads each candidate's full text (PEEK,
+   text/plain, quotes stripped, 6000 chars each) and says per mail whether it truly needs his attention, with a
+   short why (who, what is asked, deadline). A missing verdict counts as "needs attention". If Sonnet fails, every
+   candidate is pushed with its triage-level reason (`(unjudged)`), so an always-sender mail is never dropped.
+   Mail Sonnet calls not needed is only noted in `~/.local/state/mailwatch/judged.jsonl` (no bodies); it is *not*
+   marked read.
+
+If anything needs him, ONE `facet push --log "[mailwatch] N need you\n- from: subject -- why (id, date)"`:
+straight to Telegram, no Opus turn, and the same text is added to the chat log as a `note` (queued like an import
+while a turn is running, so it never starts a turn but OptChat sees it later). `facet push --log` pushes first;
+if only the logging fails it warns on stderr and still exits 0, so the push is never repeated. `--dry-run` prints
+`WOULD PUSH:` plus the text. Ids work with `life mail show/thread`. Quiet hours hold everything until morning.
 
 **Marking read** (config `mark_read`, default true). Set `\Seen` only on (a) mail matching a `mute` rule or
 carrying bulk headers, and (b) mail the triage returns as `skip`. The triage verdict is 3-way

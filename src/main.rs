@@ -100,10 +100,24 @@ fn main() {
             Ok(line) => println!("{}", line),
             Err(e) => die(&e),
         },
-        "push" => match tg::push(&cfg, &rest.join(" ")) {
-            Ok(()) => println!("pushed"),
-            Err(e) => die(&e),
-        },
+        // to Telegram only; with --log it also lands in the chat log as a `note`, which starts no turn
+        // (queued like an import while a turn runs). A log failure after a good push is a warning, not an
+        // error, so a caller never pushes the same message twice.
+        "push" => {
+            let log = rest.iter().any(|a| a == "--log");
+            let text = rest.iter().filter(|a| *a != "--log").cloned().collect::<Vec<_>>().join(" ");
+            match tg::push(&cfg, &text) {
+                Ok(()) => println!("pushed"),
+                Err(e) => die(&e),
+            }
+            if log {
+                match optchat::engine::request(&optchat::engine::dir(), serde_json::json!({"op": "note", "text": text})) {
+                    Ok(v) if v["ok"].as_bool() == Some(true) => println!("logged"),
+                    Ok(v) => eprintln!("pushed, NOT logged: {}", v["error"].as_str().unwrap_or("refused")),
+                    Err(e) => eprintln!("pushed, NOT logged: {}", e),
+                }
+            }
+        }
 
         // a subagent that outlives this turn (§9, detached): returns at once; its report
         // arrives later, as a message of its own
@@ -210,7 +224,7 @@ facet unpost <slug>         unpublish
 facet docs                  what is published
 facet send [--later] <text> put a message into the conversation (--later: a turn of its own,
                             after the running one, instead of at its next tool call)
-facet push <text>           push a message to Telegram
+facet push [--log] <text>   push a message to Telegram; --log also adds it to the chat log as a note (no turn)
 facet spawn [--model M] [--kind general-purpose|explore] [--desc D] <task>
                             a subagent that outlives this turn: returns its id at once; its
                             report arrives later, as a message of its own starting \"[id] \"

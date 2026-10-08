@@ -55,8 +55,9 @@ class T(unittest.TestCase):
     def run_pass(self, msgs, claude_body, dry=False, first=False):
         sent = os.path.join(tmp, "sent.txt")
         if os.path.exists(sent): os.remove(sent)
-        W.FACET = script(f"open({sent!r},'a').write(' '.join(sys.argv[1:])+chr(10))")
+        W.FACET = script(f"open({sent!r},'a').write(' '.join(sys.argv[1:]).replace(chr(10),'|')+chr(10))")
         W.CLAUDE = script(claude_body)
+        W.fulltext = lambda L, acct, uid, cap=6000: "full text"
         W.load_life = lambda: type("L", (), {"accounts": staticmethod(lambda: [{"name": "a"}])})
         W.new_mail = lambda L, acct, st, back=0: ([] if first else msgs, {"uv": 1, "last": 99}, first)
         W.snippet = lambda L, acct, uid: "body"
@@ -73,7 +74,7 @@ class T(unittest.TestCase):
               msg(4, "Google", "Security alert")]
         sent, out = self.run_pass(ms, self.VERDICT)
         self.assertEqual(len(sent), 1)
-        self.assertTrue(sent[0].startswith("send --later [mailwatch] 2 new"))
+        self.assertTrue(sent[0].startswith("push --log [mailwatch] 2 need"))
         self.assertIn("a:1", sent[0]); self.assertIn("a:2", sent[0])
         self.assertNotIn("a:3", sent[0]); self.assertNotIn("a:4", sent[0])
         self.assertEqual(json.load(open(W.STATE_DIR + "/state.json"))["a"]["last"], 99)
@@ -91,7 +92,32 @@ class T(unittest.TestCase):
 
     def test_triage_failure_still_tells(self):
         sent, out = self.run_pass([msg(2, "Bob", "deadline")], "sys.exit(1)")
-        self.assertEqual(len(sent), 1); self.assertIn("triage unavailable", sent[0])
+        self.assertEqual(len(sent), 1); self.assertIn("triage unavailable", sent[0]); self.assertIn("unjudged", sent[0])
+
+    BOTH = ("req=sys.stdin.read()\n"
+            "r=[{'id':'a:1','attention':False,'why':'fyi'},{'id':'a:2','attention':True,'why':'asks for slides by Fri'}] if 'attention' in req else [{'id':'a:2','verdict':'notify','why':'person'}]\n"
+            "print(json.dumps({'is_error':False,'result':json.dumps(r)}))")
+
+    def test_sonnet_filters_and_summarises(self):
+        ms = [msg(1, "Michael", "hi", "michael.friedlander@ubc.ca"), msg(2, "Bob", "slides")]
+        sent, out = self.run_pass(ms, self.BOTH)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("a:2", sent[0]); self.assertNotIn("a:1", sent[0]); self.assertIn("asks for slides by Fri", sent[0])
+        self.assertTrue(sent[0].startswith("push --log [mailwatch] 1 needs you"))
+
+    def test_sonnet_says_none_pushes_nothing(self):
+        none = ("print(json.dumps({'is_error':False,'result':json.dumps([{'id':'a:1','attention':False,'why':'fyi'}])}))")
+        sent, out = self.run_pass([msg(1, "Michael", "hi", "michael.friedlander@ubc.ca")], none)
+        self.assertEqual(sent, [])
+
+    def test_missing_sonnet_verdict_still_tells(self):
+        sent, out = self.run_pass([msg(1, "Michael", "hi", "michael.friedlander@ubc.ca")],
+                                  "print(json.dumps({'is_error':False,'result':'[]'}))")
+        self.assertEqual(len(sent), 1); self.assertIn("a:1", sent[0])
+
+    def test_dry_run_shows_push(self):
+        sent, out = self.run_pass([msg(2, "Bob", "deadline")], self.BOTH, dry=True)
+        self.assertEqual(sent, []); self.assertTrue(any("WOULD PUSH" in l for l in out))
 
 
 class FakeBox:
@@ -187,6 +213,7 @@ class Mark(unittest.TestCase):
 
     def test_run_marks_new_mail_and_notifies_without_marking(self):
         W.FACET = script("open(%r,'w').write('sent')" % (tmp + "/f.txt"))
+        W.fulltext = lambda L, acct, uid, cap=6000: "full text"
         W.new_mail = lambda L, acct, st, back=0: (W._headers(L, FakeBox(), acct, [1, 2, 4, 5]), {"uv": 7, "last": 9}, False)
         W.run(False, out=lambda l: None)
         self.assertEqual(self.marked(), {2, 5})
