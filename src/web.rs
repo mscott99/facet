@@ -113,7 +113,6 @@ textarea:focus{outline:1px solid var(--line)}
 .say .th:empty+.cmp{margin-top:0}
 .say .cmp textarea{flex:1;min-width:0;max-height:40vh;overflow-y:auto}
 .say .cmp .go{flex:none;padding:.5rem .1rem;font:12px var(--mono);color:var(--acc)}
-.say.wait .cmp{display:none}
 .say .st{font:11px var(--mono);text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin-top:.3rem}
 .say .st:empty{display:none}
 form.busy textarea,form.busy button{opacity:.45}
@@ -237,7 +236,7 @@ function card(b,o){
   var d=document.createElement('div');d.className='say';
   d.dataset.id=o.id;d.dataset.note=o.note;d.dataset.line=o.line;d.dataset.where=o.where;
   d.innerHTML='<div class=hd><div class=q></div><button class=x type=button>remove</button></div>'+
-    '<div class=th></div><div class=cmp><textarea rows=2></textarea><button class=go type=button>send</button></div>'+
+    '<div class=th></div><div class=cmp><textarea rows=1></textarea><button class=go type=button>send</button></div>'+
     '<div class=st></div>';
   d.querySelector('.q').textContent=o.where;
   d._sent=o.sent||0;d._n=o.n||0;
@@ -262,7 +261,7 @@ function card(b,o){
 // nothing has been said in it yet: such a card is only a box, and goes as easily as it came
 function fresh(d){return !d._sent&&!d.querySelector('.th').children.length}
 // the composer shows on a new card and on one with an answer to reply to
-function shape(d){d.classList.toggle('wait',!(fresh(d)||d._n>0))}
+function shape(d){}
 function fit(t){t.style.height='auto';t.style.height=t.scrollHeight+'px'}
 // Whatever grows a card keeps the reader where they were: if the card is above the screen,
 // the page moves by as much as it grew instead of the text jumping under the reader.
