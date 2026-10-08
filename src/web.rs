@@ -592,11 +592,28 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         // the answers addressed to one card, for it to show them where it was sent
         ["f", "reply"] => html(reply_fragment(cfg, &qstr("id"), qnum("since").max(0) as usize), 200),
 
-        // the memory tree (folded from the files: the engine's view is the same fold)
+        // the memory tree (folded from the files: the engine's view is the same fold), the
+        // scaffold down to the view-line frontier only - a stub past that is `/f/node`'s to fetch
         ["tree"] => {
             let s = crate::optchat::store::Store::open(&cfg.store());
             let v = crate::optchat::view::View::fold(&s, crate::optchat::VIEW);
-            html(crate::optchat::browse::html(&s, &v, crate::optchat::VIEW, Some(&format!("{}/", cfg.token_path()))), 200)
+            html(crate::optchat::browse::web(&s, &v, crate::optchat::VIEW, &cfg.token_path()), 200)
+        }
+
+        // a stub's first open: the immediate children of (l, i), themselves stubbed one level
+        // further wherever they still have halves of their own
+        ["f", "node"] => {
+            let (l, i) = (qnum("l").max(0) as usize, qnum("i").max(0) as usize);
+            let s = crate::optchat::store::Store::open(&cfg.store());
+            let v = crate::optchat::view::View::fold(&s, crate::optchat::VIEW);
+            html(crate::optchat::browse::node(&s, &v, l, i), 200)
+        }
+
+        // the memory tree's own search: past what the page ever loaded, since it was never
+        // all shipped up front to begin with
+        ["f", "find"] => {
+            let s = crate::optchat::store::Store::open(&cfg.store());
+            html(crate::optchat::browse::find(&s, &qstr("q")), 200)
         }
 
         ["m"] => html(page(cfg, "Notes", "notes", &format!("<div id=docwrap>{}</div>",
