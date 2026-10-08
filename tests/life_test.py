@@ -262,5 +262,78 @@ class Thread(unittest.TestCase):
         self.assertEqual(L.norm_subject("RE: Fwd: Re: Hello"), "hello")
 
 
+class SecretAndDelete(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.cfgp = os.path.join(self.d, "cfg", "accounts.json")
+        os.makedirs(os.path.dirname(self.cfgp))
+        json.dump({"accounts": [{"name": "g", "user": "x@gmail.com", "password_file": "pw"}]}, open(self.cfgp, "w"))
+        os.environ["LIFE_CONFIG"] = self.cfgp
+        self.home = mock.patch.dict(os.environ, {"HOME": self.d})
+        self.home.start()
+
+    def tearDown(self):
+        self.home.stop()
+
+    def run_secret(self, **kw):
+        ns = dict(name="pw", src=None, nospace=False, check=None); ns.update(kw)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            L.cmd_secret(argparse.Namespace(**ns))
+        return out.getvalue()
+
+    def test_env_saved_shredded_not_printed(self):
+        open(os.path.join(self.d, ".env"), "w").write('  "abcd efgh ijkl"\n')
+        out = self.run_secret(nospace=True)
+        dest = os.path.join(self.d, "cfg", "pw")
+        self.assertEqual(open(dest).read(), "abcdefghijkl")
+        self.assertEqual(oct(os.stat(dest).st_mode & 0o777), "0o600")
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".env")))
+        self.assertIn("saved pw (len 12)", out)
+        self.assertNotIn("abcd", out)
+
+    def test_from_file_kept_and_spaces_kept(self):
+        f = os.path.join(self.d, "in.txt"); open(f, "w").write("a b\n")
+        self.run_secret(src=f)
+        self.assertEqual(open(os.path.join(self.d, "cfg", "pw")).read(), "a b")
+        self.assertTrue(os.path.exists(f))
+
+    def test_check(self):
+        class C:
+            def logout(self): pass
+        with mock.patch.object(L, "imap_connect", return_value=C()) as m:
+            out = self.run_secret(src=None, check="gmail") if False else None
+            f = os.path.join(self.d, "in.txt"); open(f, "w").write("sekret")
+            out = self.run_secret(src=f, check="gmail")
+            self.assertEqual(m.call_args[0][0]["password"], "sekret")
+        self.assertIn("check gmail: OK", out)
+        self.assertNotIn("sekret", out)
+        with mock.patch.object(L, "imap_connect", side_effect=L.imaplib.IMAP4.error("bad sekret")):
+            out = self.run_secret(src=f, check="imap:g")
+        self.assertIn("FAIL error", out)
+        self.assertNotIn("sekret", out)
+
+    def test_delete_dry_and_yes(self):
+        evs = [{"id": "e1", "summary": "Aaronson talk", "start": {"dateTime": "2026-10-08T15:30:00-07:00"}},
+               {"id": "e2", "summary": "other", "start": {"dateTime": "2026-10-09T15:30:00-07:00"}}]
+        ns = dict(match="aaronson", start="2026-10-08", days=3, calendar=None, yes=False)
+        with mock.patch.object(L, "google_auth", return_value=("tok", "cal@x")), \
+             mock.patch.object(L, "google_get", return_value={"items": evs}) as g, \
+             mock.patch.object(L, "google_delete") as dl:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                L.cmd_cal_delete(argparse.Namespace(**ns))
+            self.assertIn("would delete", out.getvalue()); self.assertNotIn("other", out.getvalue())
+            dl.assert_not_called()
+            self.assertIn("q=aaronson", g.call_args[0][1])
+            ns["yes"] = True
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                L.cmd_cal_delete(argparse.Namespace(**ns))
+            self.assertIn("deleted: 2026-10-08T15:30", out.getvalue())
+            dl.assert_called_once()
+            self.assertTrue(dl.call_args[0][1].endswith("/e1"))
+
+
 if __name__ == "__main__":
     unittest.main()

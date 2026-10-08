@@ -828,3 +828,129 @@ def cmd_cal_list(a):
     if auth:
         for it in google_get(auth[0], "https://www.googleapis.com/calendar/v3/users/me/calendarList").get("items", []):
             print(f"{it.get('summary')}  (id: {it.get('id')}, {it.get('accessRole')})")
+
+
+# ------------------------------------------------------------ secrets
+def _shred(path):
+    try:
+        if subprocess.run(["shred", "-u", path], capture_output=True).returncode == 0:
+            return
+    except OSError:
+        pass
+    n = os.path.getsize(path)
+    with open(path, "r+b") as f:
+        f.write(b"\0" * n)
+        f.flush()
+        os.fsync(f.fileno())
+    os.unlink(path)
+
+
+def clean_secret(raw, nospace=False):
+    v = raw.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        v = v[1:-1].strip()
+    return re.sub(r"\s+", "", v) if nospace else v
+
+
+def check_login(cfg, kind, name, value):
+    """OK/FAIL line for an IMAP login with the new secret; never shows the secret."""
+    accts = cfg.get("accounts", [])
+    if kind == "gmail":
+        pick = [x for x in accts if x.get("password_file") == name] or \
+               [x for x in accts if x.get("user", "").lower().endswith(("@gmail.com", "@googlemail.com"))]
+    else:
+        pick = [x for x in accts if x.get("name", x.get("user")) == kind]
+    if not pick:
+        return f"FAIL no matching account ({kind})"
+    a = dict(pick[0])
+    a["password"] = value
+    gm = a["user"].lower().endswith(("@gmail.com", "@googlemail.com"))
+    a.setdefault("imap_host", "imap.gmail.com" if gm else None)
+    a.setdefault("imap_port", 993)
+    try:
+        c = imap_connect(a)
+        try:
+            c.logout()
+        except Exception:
+            pass
+        return "OK"
+    except Exception as e:
+        return "FAIL " + type(e).__name__
+
+
+def cmd_secret(a):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", a.name) or a.name.startswith("."):
+        sys.exit("life: secret NAME must be a plain file name")
+    env = os.path.expanduser("~/.env")
+    src = os.path.expanduser(a.src) if a.src else None
+    if src is None and os.path.exists(env):
+        src = env
+    if src:
+        try:
+            raw = open(src).read()
+        except OSError as e:
+            sys.exit(f"life: cannot read {src}: {e.strerror}")
+    elif sys.stdin.isatty():
+        import getpass
+        raw = getpass.getpass(f"{a.name}: ")
+    else:
+        sys.exit("life: no ~/.env, no --from FILE and no terminal for a hidden prompt")
+    value = clean_secret(raw, a.nospace)
+    if not value:
+        sys.exit("life: secret is empty; nothing written")
+    if a.check and a.check != "gmail" and not a.check.startswith("imap:"):
+        sys.exit("life: --check takes gmail or imap:ACCOUNT")
+    d = os.path.dirname(config_path())
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    dest = os.path.join(d, a.name)
+    old = os.umask(0o077)
+    try:
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(value)
+    finally:
+        os.umask(old)
+    os.chmod(dest, 0o600)
+    print(f"saved {a.name} (len {len(value)})")
+    if src and os.path.realpath(src) == os.path.realpath(env):
+        _shred(src)
+        print("shredded ~/.env")
+    if a.check:
+        kind = a.check[5:] if a.check.startswith("imap:") else "gmail"
+        print("check " + a.check + ": " + check_login(load_config(), kind, a.name, value))
+
+
+# ------------------------------------------------------- calendar delete
+def google_delete(token, url):
+    req = urllib.request.Request(url, method="DELETE", headers={"Authorization": "Bearer " + token})
+    with urllib.request.urlopen(req, timeout=30):
+        pass
+
+
+def cmd_cal_delete(a):
+    if not a.match.strip():
+        sys.exit("life: --match must not be empty")
+    cfg = load_config()
+    auth = google_auth(cfg)
+    if not auth:
+        sys.exit(f"life: deleting events needs Google access in {config_path()} ('google' block); see README")
+    token, cal = auth
+    cal = a.calendar or cal
+    lo = datetime.fromisoformat(a.start).astimezone() if a.start else datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    hi = lo + timedelta(days=a.days)
+    base = f"https://www.googleapis.com/calendar/v3/calendars/{urllib.parse.quote(cal)}/events"
+    q = urllib.parse.urlencode({"timeMin": lo.isoformat(), "timeMax": hi.isoformat(), "singleEvents": "true",
+                                "orderBy": "startTime", "maxResults": 250, "q": a.match})
+    hits = [e for e in google_get(token, base + "?" + q).get("items", [])
+            if a.match.lower() in (e.get("summary") or "").lower()]
+    if not hits:
+        print("(no matching events)")
+        return
+    for e in hits:
+        st = e.get("start", {})
+        when = st.get("dateTime") or st.get("date") or "?"
+        if a.yes:
+            google_delete(token, base + "/" + urllib.parse.quote(e["id"], safe=""))
+        print(("deleted: " if a.yes else "would delete: ") + f"{when}  {e.get('summary') or '(untitled)'}")
+    if not a.yes:
+        print(f"{len(hits)} match(es); dry run, add --yes to delete")

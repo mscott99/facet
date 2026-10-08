@@ -266,6 +266,14 @@ def cmd_cal_add(a):
 end tell'''))
 
 
+def cmd_secret(a):
+    return linux().cmd_secret(a)
+
+
+def cmd_cal_delete(a):
+    sys.exit("life: cal delete needs the Linux backend (Google service account)")
+
+
 def cmd_cal_list(a):
     print(osa('tell application "Calendar" to get name of every calendar').replace(", ", "\n"))
 
@@ -346,6 +354,16 @@ def main():
     s.add_argument("--minutes", type=int, default=60); s.add_argument("--calendar", default=None, help="macOS default: Work; Linux: Google calendar id"); s.add_argument("--notes")
     s.set_defaults(fn=cmd_cal_add)
     c.add_parser("calendars").set_defaults(fn=cmd_cal_list)
+    s = c.add_parser("delete", help="Linux: delete Google events whose title contains TEXT (dry run without --yes)")
+    s.add_argument("--match", required=True); s.add_argument("--from", dest="start", default=None, help="YYYY-MM-DD, default today")
+    s.add_argument("--days", type=int, default=30); s.add_argument("--calendar", default=None); s.add_argument("--yes", action="store_true")
+    s.set_defaults(fn=cmd_cal_delete)
+
+    s = sub.add_parser("secret", help="store a secret in ~/.config/life/NAME from ~/.env, --from FILE or a hidden prompt (never printed)")
+    s.add_argument("name"); s.add_argument("--from", dest="src", default=None, help="default ~/.env (shredded afterwards)")
+    s.add_argument("--nospace", action="store_true", help="strip inner whitespace (app passwords)")
+    s.add_argument("--check", default=None, help="gmail | imap:ACCOUNT: IMAP login, prints OK/FAIL only")
+    s.set_defaults(fn=cmd_secret)
 
     w = sub.add_parser("web").add_subparsers(dest="c", required=True)
     s = w.add_parser("get"); s.add_argument("url"); s.add_argument("--chars", type=int, default=6000)
@@ -357,6 +375,8 @@ def main():
     s = w.add_parser("tabs"); s.add_argument("--browser", default="Google Chrome"); s.set_defaults(fn=cmd_web_tabs)
 
     a = p.parse_args()
+    if sys.platform != "darwin" and getattr(a, "fn", None) is cmd_cal_delete:
+        return linux().cmd_cal_delete(a)
     if sys.platform != "darwin":
         name = getattr(getattr(a, "fn", None), "__name__", "cmd_cal" if a.top == "cal" else "")
         if a.top == "cal" and not hasattr(a, "fn"):

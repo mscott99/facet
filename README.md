@@ -102,6 +102,12 @@ copy `bin/life.accounts.example.json`.
   from an unpublished OAuth app (7 days). Or: an OAuth client plus refresh token for scope
   `https://www.googleapis.com/auth/calendar.events` in the `oauth` block.
   Without either, `life cal add` exits saying so. `life cal calendars` lists what each can see.
+- `life secret NAME [--from FILE] [--nospace] [--check gmail|imap:ACCOUNT]`: stores a secret in
+  `~/.config/life/NAME` (600). Source: `--from FILE`, else `~/.env` (whole content, whitespace and surrounding
+  quotes stripped; `--nospace` also drops inner spaces, for app passwords; `~/.env` is shredded afterwards),
+  else a hidden prompt on a terminal. Prints only `saved NAME (len N)`; `--check` does an IMAP login and prints OK/FAIL + exception type.
+- `life cal delete --match TEXT [--from YYYY-MM-DD] [--days N] [--calendar ID] [--yes]`: events whose title contains TEXT
+  (case-insensitive; default today, 30 days) on the service-account calendar. Lists them; deletes only with `--yes`.
 - **Time zone**: a server usually runs in UTC; set `"timezone": "America/Vancouver"` (or yours).
 - Mail ids are `<account>:<uid>` for the inbox, `:s` for Sent, `:a` for Gmail All Mail (`--everywhere`); all work with
   `life mail show`. Sent/All folders are found by IMAP special-use flags (`\\Sent`, `\\All`), falling back to
