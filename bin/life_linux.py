@@ -93,37 +93,74 @@ def _q(s):
     return b'"' + s.replace("\\", "\\\\").replace('"', '\\"').encode("utf-8") + b'"'
 
 
-def build_criteria(acct, a, everywhere_gmail=False):
-    crit = []
-    if getattr(a, "unread", False):
-        crit.append(b"UNSEEN")
-    if getattr(a, "sender", None):
-        crit += [b"FROM", _q(a.sender)]
-    if getattr(a, "since", None):
-        d = datetime.now() - timedelta(days=int(a.since))
-        crit += [b"SINCE", d.strftime("%d-%b-%Y").encode()]
-    q = getattr(a, "query", None)
-    if q:
-        if acct["gmail"]:
-            crit += [b"X-GM-RAW", _q(q)]
-        else:
-            crit += [b"OR", b"SUBJECT", _q(q), b"OR", b"FROM", _q(q), b"TEXT", _q(q)]
-    return crit or [b"ALL"]
+SENT_NAMES = ["Sent", "Sent Items", "Sent Messages", "Sent Mail", "sent-mail", "INBOX.Sent", "[Gmail]/Sent Mail"]
+_LIST_RE = re.compile(r'\((?P<fl>[^)]*)\)\s+(?:"(?P<d>(?:[^"\\]|\\.)*)"|NIL)\s+(?P<n>"(?:[^"\\]|\\.)*"|\S+)')
 
 
-def _dec(v):
+def special_folders(c, acct):
+    """-> {'s': sent folder name, 'a': all-mail folder name} (either may be missing), via RFC 6154 flags."""
+    if "_special" in acct:
+        return acct["_special"]
+    out, names = {}, []
     try:
-        return str(make_header(decode_header(v or "")))
+        typ, data = c.list()
     except Exception:
-        return v or ""
+        typ, data = "NO", []
+    for item in data or []:
+        if not isinstance(item, (bytes, bytearray)):
+            continue
+        m = _LIST_RE.match(item.decode("utf-8", "replace"))
+        if not m:
+            continue
+        name = m.group("n")
+        if name.startswith('"'):
+            name = re.sub(r"\\(.)", r"\1", name[1:-1])
+        names.append(name)
+        fl = m.group("fl").lower()
+        if "\\sent" in fl:
+            out.setdefault("s", name)
+        if "\\all" in fl:
+            out.setdefault("a", name)
+    if acct.get("sent_folder"):
+        out["s"] = acct["sent_folder"]
+    elif "s" not in out:
+        out["s"] = next((n for n in SENT_NAMES if n in names), None)
+        if out["s"] is None:
+            del out["s"]
+    if "a" not in out and acct["gmail"]:
+        out["a"] = "[Gmail]/All Mail"
+    acct["_special"] = out
+    return out
 
 
-def fetch_headers(c, uids):
-    """-> {uid: (datetime|None, from, subject, seen)}"""
+def select_kind(c, acct, kind):
+    """kind: '' inbox, 's' sent, 'a' all mail. -> True if selected."""
+    name = "INBOX" if kind == "" else special_folders(c, acct).get(kind)
+    if not name:
+        return False
+    typ, _ = c.select('"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"', readonly=True)
+    return typ == "OK"
+
+
+META_FIELDS = "FROM TO CC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES"
+
+
+def _addrs(v):
+    from email.utils import getaddresses
+    return [(_dec(n), a.lower()) for n, a in getaddresses([_dec(str(v or ""))]) if a]
+
+
+def _mid(v):
+    m = re.search(r"<([^>]+)>", str(v or ""))
+    return m.group(1).strip().lower() if m else None
+
+
+def fetch_meta(c, uids):
+    """-> {uid: dict(dt, frm=(name,addr), to=[(name,addr)], subj, seen, mid, irt, refs)}"""
     out = {}
     if not uids:
         return out
-    typ, data = c.uid("fetch", b",".join(uids), "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+    typ, data = c.uid("fetch", b",".join(uids), f"(FLAGS BODY.PEEK[HEADER.FIELDS ({META_FIELDS})])")
     for item in data:
         if not isinstance(item, tuple):
             continue
@@ -136,29 +173,91 @@ def fetch_headers(c, uids):
             dt = parsedate_to_datetime(str(msg["Date"])).astimezone()
         except Exception:
             dt = None
-        name, addr = parseaddr(_dec(str(msg["From"] or "")))
-        out[int(m.group(1))] = (dt, name or addr or "?", _dec(str(msg["Subject"] or "")), "\\Seen" in meta)
+        fr = (_addrs(msg["From"]) or [("?", "?")])[0]
+        irt = re.findall(r"<([^>]+)>", str(msg["In-Reply-To"] or ""))
+        refs = [r.lower() for r in re.findall(r"<([^>]+)>", str(msg["References"] or ""))]
+        out[int(m.group(1))] = dict(
+            dt=dt, frm=fr, to=_addrs(msg["To"]) + _addrs(msg["Cc"]), subj=_dec(str(msg["Subject"] or "")),
+            seen="\\Seen" in meta, mid=_mid(msg["Message-ID"]),
+            irt=[i.lower() for i in irt], refs=refs)
     return out
 
 
-def folder_for(acct, everywhere):
-    return '"[Gmail]/All Mail"' if (everywhere and acct["gmail"]) else "INBOX"
+def my_addrs(accts):
+    s = set()
+    for x in accts:
+        s.add(x["user"].lower())
+        if "@" not in x["user"] and x.get("imap_host", "").count(".") >= 2:   # bare login -> user@domain of the IMAP host
+            s.add(x["user"].lower() + "@" + x["imap_host"].split(".", 1)[1].lower())
+        s.update(y.lower() for y in x.get("aliases", []))
+    return s
+
+
+def build_criteria(acct, a, everywhere_gmail=False):
+    crit = []
+    if getattr(a, "unread", False):
+        crit.append(b"UNSEEN")
+    if getattr(a, "sender", None):
+        crit += [b"FROM", _q(a.sender)]
+    if getattr(a, "since", None):
+        d = datetime.now() - timedelta(days=int(a.since))
+        crit += [b"SINCE", d.strftime("%d-%b-%Y").encode()]
+    q = getattr(a, "query", None) or ""
+    w = getattr(a, "with_", None)
+    if acct["gmail"]:
+        raw = (f"({q})" if q else "") + (f" (from:{w} OR to:{w} OR cc:{w})" if w else "")
+        if raw.strip():
+            crit += [b"X-GM-RAW", _q(raw.strip())]
+    else:
+        if q:
+            crit += [b"OR", b"SUBJECT", _q(q), b"OR", b"FROM", _q(q), b"TEXT", _q(q)]
+        if w:
+            crit += [b"OR", b"FROM", _q(w), b"OR", b"TO", _q(w), b"CC", _q(w)]
+    return crit or [b"ALL"]
+
+
+def _dec(v):
+    try:
+        return str(make_header(decode_header(v or "")))
+    except Exception:
+        return v or ""
+
+
+def fetch_headers(c, uids):
+    """-> {uid: (datetime|None, from, subject, seen)}"""
+    return {u: (m["dt"], m["frm"][0] or m["frm"][1], m["subj"], m["seen"]) for u, m in fetch_meta(c, uids).items()}
 
 
 def mail_rows(a, accts=None):
+    """Rows (dt, id, who, subject, seen). Searches inbox + sent (+ All Mail with --everywhere on Gmail);
+    deduped by Message-ID within an account; `who` is the sender, or 'me→recipient' for sent mail."""
     rows = []
-    for acct in (accts or accounts()):
+    allaccts = accts or accounts()
+    mine = my_addrs(allaccts)
+    for acct in allaccts:
         c = imap_connect(acct)
+        seen_mid = set()
         try:
-            folder = folder_for(acct, a.everywhere)
-            c.select(folder, readonly=True)
-            crit = build_criteria(acct, a)
-            typ, data = c.uid("search", *( [b"CHARSET", b"UTF-8"] + crit))
-            uids = data[0].split() if data and data[0] else []
-            uids = uids[-a.n:]
-            tag = "a" if folder != "INBOX" else ""
-            for uid, (dt, who, subj, seen) in fetch_headers(c, uids).items():
-                rows.append((dt, f"{acct['name']}:{uid}" + (f":{tag}" if tag else ""), who, subj, seen))
+            kinds = [""]
+            if getattr(a, "sent", False):
+                kinds.append("s")
+            if a.everywhere and acct["gmail"]:
+                kinds.append("a")
+            for kind in kinds:
+                if not select_kind(c, acct, kind):
+                    continue
+                typ, data = c.uid("search", *([b"CHARSET", b"UTF-8"] + build_criteria(acct, a)))
+                uids = (data[0].split() if data and data[0] else [])[-a.n:]
+                for uid, mt in fetch_meta(c, uids).items():
+                    if mt["mid"]:
+                        if mt["mid"] in seen_mid:
+                            continue
+                        seen_mid.add(mt["mid"])
+                    who = mt["frm"][0] or mt["frm"][1]
+                    if mt["frm"][1] in mine:
+                        t = mt["to"][0] if mt["to"] else ("?", "?")
+                        who = "me→" + (t[0] or t[1])
+                    rows.append((mt["dt"], f"{acct['name']}:{uid}" + (f":{kind}" if kind else ""), who, mt["subj"], mt["seen"]))
         finally:
             try:
                 c.logout()
@@ -198,21 +297,26 @@ def body_text(msg):
 
 def parse_id(rid, accts):
     parts = str(rid).split(":")
-    if len(parts) < 2 or not parts[1].isdigit():
-        sys.exit(f"life: bad mail id {rid!r}; expected <account>:<uid> as printed by `life mail inbox`")
+    if len(parts) < 2 or not parts[1].isdigit() or (len(parts) > 2 and parts[2] not in ("a", "s")):
+        sys.exit(f"life: bad mail id {rid!r}; expected <account>:<uid>[:s|:a] as printed by `life mail inbox|search`")
     for acct in accts:
         if acct["name"] == parts[0]:
-            return acct, parts[1], (len(parts) > 2 and parts[2] == "a")
+            return acct, parts[1], (parts[2] if len(parts) > 2 else "")
     sys.exit(f"life: no account named {parts[0]!r} in {config_path()}")
 
 
+def fetch_raw(c, acct, kind, uid):
+    if not select_kind(c, acct, kind):
+        return None
+    typ, data = c.uid("fetch", str(uid).encode(), "(BODY.PEEK[])")
+    return next((i[1] for i in data if isinstance(i, tuple)), None)
+
+
 def cmd_mail_show(a):
-    acct, uid, allmail = parse_id(a.id, accounts())
+    acct, uid, kind = parse_id(a.id, accounts())
     c = imap_connect(acct)
     try:
-        c.select(folder_for(acct, allmail), readonly=True)
-        typ, data = c.uid("fetch", uid.encode(), "(BODY.PEEK[])")
-        raw = next((i[1] for i in data if isinstance(i, tuple)), None)
+        raw = fetch_raw(c, acct, kind, uid)
     finally:
         try:
             c.logout()
@@ -232,6 +336,125 @@ def cmd_mail_show(a):
     att = [p.get_filename() for p in msg.walk() if p.get_filename()]
     if att:
         print("\nattachments: " + ", ".join(att))
+
+
+_QUOTE_CUT = re.compile(
+    r"(?mi)^(?:On\b[^\n]{0,300}(?:\n[^\n]{0,200})?\bwrote:[ \t]*$|-{2,}\s*Original Message\s*-{2,}|From:[^\n]*\n(?:Sent|Date):[^\n]*$)")
+
+
+def strip_quotes(t):
+    """Drop 'On ... wrote:' tails, Outlook headers and '>' quoted lines."""
+    t = t.replace("\r", "")
+    m = _QUOTE_CUT.search(t)
+    if m:
+        t = t[:m.start()]
+    t = "\n".join(l for l in t.split("\n") if not l.lstrip().startswith(">"))
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
+def norm_subject(s):
+    s = re.sub(r"\s+", " ", s or "").strip()
+    while True:
+        n = re.sub(r"(?i)^\s*((re|fwd?|aw|sv)\s*(\[\d+\])?\s*:\s*)", "", s)
+        if n == s:
+            return s.lower()
+        s = n
+
+
+def thread_messages(acct, seed_kind, seed_uid, accts):
+    """-> (list of (kind, uid, meta) chronologically, seed meta). Same-account only."""
+    c = imap_connect(acct)
+    try:
+        if not select_kind(c, acct, seed_kind):
+            sys.exit(f"life: cannot open folder for {acct['name']}:{seed_uid}:{seed_kind}")
+        seed = fetch_meta(c, [str(seed_uid).encode()]).get(int(seed_uid))
+        if seed is None:
+            sys.exit(f"life: no message {acct['name']}:{seed_uid}")
+        ns = norm_subject(seed["subj"])
+        cand, seen_mid = [], set()
+        kinds = ["", "s"] + (["a"] if acct["gmail"] else [])
+        for kind in kinds:
+            if not select_kind(c, acct, kind):
+                continue
+            uids = set()
+            if ns:
+                typ, d = c.uid("search", b"CHARSET", b"UTF-8", b"SUBJECT", _q(ns))
+                uids.update(d[0].split() if d and d[0] else [])
+            for m in [seed["mid"]] + seed["irt"] + seed["refs"][-1:]:
+                if m:
+                    mb = b"<" + m.encode() + b">"
+                    typ, d = c.uid("search", b"OR", b"HEADER", b"MESSAGE-ID", mb, b"OR", b"HEADER", b"REFERENCES", mb,
+                                   b"HEADER", b"IN-REPLY-TO", mb)
+                    uids.update(d[0].split() if d and d[0] else [])
+            uids = sorted(uids, key=int)[-300:]
+            for uid, mt in fetch_meta(c, uids).items():
+                if mt["mid"]:
+                    if mt["mid"] in seen_mid:
+                        continue
+                    seen_mid.add(mt["mid"])
+                cand.append((kind, uid, mt))
+    finally:
+        try:
+            c.logout()
+        except Exception:
+            pass
+    mine = my_addrs(accts)
+    def parts(mt):
+        return ({mt["frm"][1]} | {a for _, a in mt["to"]}) - mine
+    par = list(range(len(cand)))
+    def find(i):
+        while par[i] != i:
+            par[i] = par[par[i]]; i = par[i]
+        return i
+    for i, (_, _, x) in enumerate(cand):
+        for j in range(i):
+            y = cand[j][2]
+            xi = ({x["mid"]} | set(x["irt"]) | set(x["refs"])) - {None}
+            yi = ({y["mid"]} | set(y["irt"]) | set(y["refs"])) - {None}
+            linked = (x["mid"] and x["mid"] in yi - {y["mid"]} | set()) or (y["mid"] and y["mid"] in xi - {x["mid"]})
+            if not linked and xi & yi - {None}:
+                # share a reference ancestor (siblings) -> same thread
+                linked = bool((set(x["irt"]) | set(x["refs"])) & (set(y["irt"]) | set(y["refs"])))
+            if not linked and norm_subject(x["subj"]) == norm_subject(y["subj"]) and ns and parts(x) & parts(y):
+                linked = True
+            if linked:
+                par[find(i)] = find(j)
+    si = next((i for i, (k, u, _) in enumerate(cand) if k == seed_kind and u == int(seed_uid)), None)
+    if si is None:   # seed was deduped against another copy
+        si = next((i for i, (_, _, m) in enumerate(cand) if m["mid"] == seed["mid"]), 0)
+    comp = [cand[i] for i in range(len(cand)) if find(i) == find(si)]
+    comp.sort(key=lambda r: r[2]["dt"] or datetime.min.replace(tzinfo=timezone.utc))
+    return comp, seed
+
+
+def cmd_mail_thread(a):
+    accts = accounts()
+    acct, uid, kind = parse_id(a.id, accts)
+    comp, seed = thread_messages(acct, kind, uid, accts)
+    mine = my_addrs(accts)
+    def nm(p):
+        return "me" if p[1] in mine else (p[0] or p[1])
+    print(f"== {seed['subj'] or '(no subject)'} [{len(comp)} msgs, {acct['name']}]")
+    c = imap_connect(acct)
+    try:
+        for k, u, mt in comp:
+            raw = fetch_raw(c, acct, k, u)
+            body = ""
+            if raw:
+                body = body_text(email.message_from_bytes(raw, policy=policy.default))
+                if not a.full:
+                    body = strip_quotes(body)
+                    if a.chars and len(body) > a.chars:
+                        body = body[:a.chars] + f"\n[... {len(body) - a.chars} more chars; mail show {acct['name']}:{u}{':' + k if k else ''}]"
+            when = mt["dt"].strftime("%Y-%m-%d %H:%M") if mt["dt"] else "?"
+            to = ", ".join(nm(p) for p in mt["to"][:4]) + (f" +{len(mt['to']) - 4}" if len(mt["to"]) > 4 else "")
+            print(f"-- {acct['name']}:{u}{':' + k if k else ''} {when} {nm(mt['frm'])} -> {to}")
+            print(body or "(empty)")
+    finally:
+        try:
+            c.logout()
+        except Exception:
+            pass
 
 
 def build_message(acct, a):

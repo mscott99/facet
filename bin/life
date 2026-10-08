@@ -135,6 +135,10 @@ def text_of(msg):
     return re.sub(r"\n{3,}", "\n\n", body).strip()
 
 
+def cmd_mail_thread(a):
+    sys.exit("life: mail thread is only implemented for the Linux backend")
+
+
 def cmd_mail_show(a):
     path = emlx_path(int(a.id))
     if not path:
@@ -321,8 +325,12 @@ def main():
         s.add_argument("--sender")
         s.add_argument("--since", help="only the last N days")
         s.add_argument("--everywhere", action="store_true", help="all mailboxes, not just inboxes")
+        s.add_argument("--with", dest="with_", metavar="ADDR", help="all mail to/from/cc this address")
+        s.add_argument("--no-sent", dest="sent", action="store_false", help="(search) leave sent mail out")
         s.add_argument("-v", "--verbose", action="store_true", help="show snippets")
-        s.set_defaults(fn=cmd_mail_list)
+        s.set_defaults(fn=cmd_mail_list, **({"sent": True} if name == "search" else {"sent": False}))
+    s = m.add_parser("thread"); s.add_argument("id"); s.add_argument("--full", action="store_true", help="keep quoted replies")
+    s.add_argument("--chars", type=int, default=2500, help="per message (0 = no cap)"); s.set_defaults(fn=cmd_mail_thread)
     s = m.add_parser("show"); s.add_argument("id"); s.add_argument("--full", action="store_true")
     s.add_argument("--chars", type=int, default=4000); s.set_defaults(fn=cmd_mail_show)
     s = m.add_parser("send"); s.add_argument("--to", action="append", required=True); s.add_argument("--cc", action="append")
@@ -353,7 +361,7 @@ def main():
         name = getattr(getattr(a, "fn", None), "__name__", "cmd_cal" if a.top == "cal" else "")
         if a.top == "cal" and not hasattr(a, "fn"):
             a.days, a.past = 14, 0
-        if name in ("cmd_mail_list", "cmd_mail_show", "cmd_mail_send", "cmd_cal", "cmd_cal_add", "cmd_cal_list"):
+        if name in ("cmd_mail_list", "cmd_mail_show", "cmd_mail_thread", "cmd_mail_send", "cmd_cal", "cmd_cal_add", "cmd_cal_list"):
             return getattr(linux(), name)(a)
     if not hasattr(a, "fn"):
         if a.top == "cal":

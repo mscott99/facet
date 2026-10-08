@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Tests for bin/life_linux.py: ICS recurrence/tz/exdate, mail via fake IMAP/SMTP. No network."""
-import importlib.util, io, os, sys, json, tempfile, unittest, argparse, contextlib
+import importlib.util, io, re, os, sys, json, tempfile, unittest, argparse, contextlib
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 from zoneinfo import ZoneInfo
@@ -115,6 +115,7 @@ class FakeIMAP:
     def login(self, u, p): FakeIMAP.log.append(("login", self.host, u))
     def select(self, f, readonly=False): FakeIMAP.log.append(("select", f)); return "OK", [b"1"]
     def logout(self): pass
+    def list(self): return "OK", [b'(\\HasNoChildren) "/" "INBOX"', b'(\\HasNoChildren \\Sent) "/" "sent-mail"']
     def uid(self, cmd, *a):
         FakeIMAP.log.append((cmd,) + a)
         if cmd == "search": return "OK", [b"41 42"]
@@ -182,6 +183,83 @@ class Mail(unittest.TestCase):
         with self.assertRaises(SystemExit) as e:
             L.cmd_cal_add(argparse.Namespace(title="t", start="2026-10-10 10:00", minutes=60, calendar=None, notes=None))
         self.assertIn("oauth", str(e.exception))
+
+
+def _msg(frm, to, subj, date, mid, irt=None, body="hi"):
+    h = f"From: {frm}\r\nTo: {to}\r\nSubject: {subj}\r\nDate: {date}\r\nMessage-ID: <{mid}>\r\n"
+    if irt:
+        h += f"In-Reply-To: <{irt}>\r\nReferences: <{irt}>\r\n"
+    return (h + "Content-Type: text/plain\r\n\r\n" + body).encode()
+
+
+QUOTED = ("Sure, 2pm.\n\nOn Wed, 7 Oct 2026 at 11:58, Ann <ann@x.org> wrote:\n> Are you on campus?\n> yes\n")
+BOX = {  # folder -> {uid: raw}
+    "INBOX": {7: _msg("Bob <bob@x.org>", "m@dept.edu", "Re: Plans", "Wed, 07 Oct 2026 13:05:00 -0700", "b1@x", "a1@d", QUOTED),
+              9: _msg("Zed <zed@x.org>", "m@dept.edu", "Unrelated", "Wed, 07 Oct 2026 14:00:00 -0700", "z1@x")},
+    "sent-mail": {3: _msg("m@dept.edu", "Bob <bob@x.org>", "Plans", "Wed, 07 Oct 2026 11:58:00 -0700", "a1@d", None, "Are you around?"),
+                  5: _msg("m@dept.edu", "Bob <bob@x.org>", "Re: Plans", "Wed, 07 Oct 2026 13:38:00 -0700", "a2@d", "b1@x", "OK, 3pm.\n\n> Sure, 2pm.\n")},
+}
+
+
+class BoxIMAP:
+    def __init__(self, host, port): self.cur = None
+    def login(self, u, p): pass
+    def logout(self): pass
+    def list(self): return "OK", [b'(\\HasNoChildren) "/" "INBOX"', b'(\\HasNoChildren \\Sent) "/" "sent-mail"', b'(\\HasNoChildren) "/" "Sent"']
+    def select(self, f, readonly=False):
+        self.cur = f.strip('"'); return ("OK" if self.cur in BOX else "NO"), [b"1"]
+    def uid(self, cmd, *a):
+        box = BOX[self.cur]
+        if cmd == "search":
+            m = re.search(rb"SUBJECT \"([^\"]*)\"", b" ".join(x if isinstance(x, bytes) else x.encode() for x in a))
+            ids = [u for u, r in box.items() if not m or m.group(1).lower() in re.search(rb"Subject: ([^\r]*)", r).group(1).lower()]
+            return "OK", [b" ".join(str(u).encode() for u in ids)]
+        uids = [int(x) for x in a[0].split(b",")] if isinstance(a[0], bytes) else [int(a[0])]
+        out = []
+        for u in uids:
+            raw = box[u]
+            if "HEADER" in a[1]:
+                raw = raw.split(b"\r\n\r\n")[0] + b"\r\n\r\n"
+            out += [(f"1 (UID {u} FLAGS (\\Seen) BODY[] {{1}}".encode(), raw), b")"]
+        return "OK", out
+
+
+class Thread(unittest.TestCase):
+    setUp = Mail.setUp
+
+    def run_cmd(self, fn, **kw):
+        buf = io.StringIO()
+        with mock.patch.object(L.imaplib, "IMAP4_SSL", BoxIMAP), contextlib.redirect_stdout(buf):
+            fn(argparse.Namespace(**kw))
+        return buf.getvalue()
+
+    def test_thread_spans_inbox_and_sent_and_strips_quotes(self):
+        out = self.run_cmd(L.cmd_mail_thread, id="math:7", full=False, chars=2500)
+        self.assertIn("3 msgs", out)
+        self.assertLess(out.index("Are you around?"), out.index("Sure, 2pm"))
+        self.assertLess(out.index("Sure, 2pm"), out.index("OK, 3pm"))
+        self.assertNotIn("Are you on campus", out); self.assertNotIn("wrote:", out)
+        self.assertIn("math:3:s", out); self.assertNotIn("Unrelated", out)
+        self.assertEqual(out.count("Sure, 2pm"), 1)
+
+    def test_thread_from_sent_id_and_full(self):
+        out = self.run_cmd(L.cmd_mail_thread, id="math:5:s", full=True, chars=2500)
+        self.assertIn("math:7 ", out); self.assertIn("> Are you on campus?", out)
+
+    def test_search_includes_sent_and_marks_direction(self):
+        out = self.run_cmd(L.cmd_mail_list, n=10, unread=False, sender=None, since=None, query="Plans", everywhere=False,
+                           verbose=False, sent=True, with_="bob@x.org")
+        self.assertIn("math:3:s", out); self.assertIn("me→Bob", out); self.assertIn("math:7 ", out)
+        out = self.run_cmd(L.cmd_mail_list, n=10, unread=False, sender=None, since=None, query="Plans", everywhere=False,
+                           verbose=False, sent=False)
+        self.assertNotIn(":s", out)
+
+    def test_show_sent_id(self):
+        self.assertIn("OK, 3pm", self.run_cmd(L.cmd_mail_show, id="math:5:s", full=False, chars=4000))
+
+    def test_strip_quotes(self):
+        self.assertEqual(L.strip_quotes("Hi\n\nOn Mon, X <a@b>\nwrote:\n> q\n"), "Hi")
+        self.assertEqual(L.norm_subject("RE: Fwd: Re: Hello"), "hello")
 
 
 if __name__ == "__main__":

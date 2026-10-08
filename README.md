@@ -103,8 +103,16 @@ copy `bin/life.accounts.example.json`.
   `https://www.googleapis.com/auth/calendar.events` in the `oauth` block.
   Without either, `life cal add` exits saying so. `life cal calendars` lists what each can see.
 - **Time zone**: a server usually runs in UTC; set `"timezone": "America/Vancouver"` (or yours).
-- Mail ids are `<account>:<uid>` (`:a` suffix for All Mail with `--everywhere`); pass them to
-  `life mail show`. `life mail send` is a dry run unless `--send`; `--from <account>` picks the sender.
+- Mail ids are `<account>:<uid>` for the inbox, `:s` for Sent, `:a` for Gmail All Mail (`--everywhere`); all work with
+  `life mail show`. Sent/All folders are found by IMAP special-use flags (`\\Sent`, `\\All`), falling back to
+  common names; `"sent_folder"` in an account overrides. `life mail send` is a dry run unless `--send`; `--from <account>` picks the sender.
+- `life mail search <query> [--with ADDR] [--no-sent]` searches inbox **and sent** (deduped by Message-ID); sent rows
+  show `me→recipient`. `--with ADDR` = everything to/from/cc that address (query may be `""`). `inbox` is inbox-only.
+- `life mail thread <id> [--full] [--chars N]`: whole conversation across inbox + sent (+ All Mail on Gmail), linked by
+  Message-ID/In-Reply-To/References, else same normalised subject + shared non-self participant. Output:
+  `== subject [N msgs, account]` then per message `-- <id> <date> <from> -> <to>` and the body with quoted replies
+  (`>` lines, `On ... wrote:` tails, Outlook headers) removed; `--full` keeps them. Bare logins (e.g. `matthewscott`)
+  count as "me" as `login@<imap domain>`; add `"aliases": [...]` to an account for others.
 - Tests: `python3 tests/life_test.py` (fake ICS, fake IMAP/SMTP; no network).
 
 A Linux box (the Hetzner one this branch was built against: Ubuntu 24.04 x86, cloned at
