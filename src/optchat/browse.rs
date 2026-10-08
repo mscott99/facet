@@ -49,6 +49,9 @@ impl B<'_> {
     /// `top` marks a node with no summarized ancestor above it - the frontier a "collapse all"
     /// should land on: closing exactly these nodes still covers the whole chat, maximally summarized.
     fn thread(&mut self, l: usize, i: usize, open: bool, top: bool) {
+        // the frontier is exactly the view's own lines, not whatever built node a walk meets first
+        let _ = top;
+        let top = self.view.contains(&(l, i));
         let top_cls = if top { " top" } else { "" };
         if l == 0 {
             let m = &self.s.msgs[i];
@@ -61,14 +64,22 @@ impl B<'_> {
         }
         let node = self.s.node(l, i).map(String::from);
         let (_, n) = self.reach(l, i);
-        let text = node.clone().unwrap_or_else(|| PLACEHOLDER.into());
+        let above = self.view.iter().any(|&(pl, pi)| pl < l && (pi >> (l - pl)) == i);
+        // an older summary the view has since split is only the way down to the view's lines on
+        // this page: its text is not shipped
+        let text = if self.lazy && above { "(older summary, split in the view)".to_string() }
+            else { node.clone().unwrap_or_else(|| PLACEHOLDER.into()) };
         // In lazy mode every node reached here (anything above a leaf) is where this render
         // pass stops: its halves are left unwritten, fetched later by `/f/node` rather than
         // shipped now. It always renders closed - there is nothing under it yet to show open.
-        let tail = format!("{} · {} messages{}", size(text.len()), n, if self.lazy { " · ···" } else { "" });
-        let cls = format!("{}{}{}", if node.is_some() { "sum" } else { "sum sc" }, top_cls, if self.lazy { " stub" } else { "" });
-        self.head(l, i, &cls, &text, &tail, (open || node.is_none()) && !self.lazy);
-        if self.lazy {
+        let tail = format!("{} · {} messages{}", size(node.as_ref().map(|x| x.len()).unwrap_or(text.len())), n, if self.lazy { " · ···" } else { "" });
+        let cls = format!("{}{}{}", if node.is_some() { "sum" } else { "sum sc" }, top_cls, if self.lazy && !above { " stub" } else { "" });
+        // a built node above the view (older summary the view has since split) has to be walked
+        // through even in lazy mode, or the view lines under it would never be on the page
+        self.head(l, i, &cls, &text, &tail, (open || node.is_none() || above) && (!self.lazy || above));
+        if self.lazy && above {
+            for (a, b) in self.halves(l, i) { self.walk(a, b, false, false); }
+        } else if self.lazy {
             // children left for a fetch to bring in
         } else {
             // Below a node that has its own summary, nothing further is top-level: its ancestor
@@ -104,7 +115,7 @@ pub fn html(s: &Store, v: &View, budget: usize, back: Option<&str>) -> String {
 <h1>{back}Memory</h1>
 <p class=s>{t} messages · {nodes} tree nodes · view {vl} lines, {vb} of {budget} bytes</p>
 <p class=s>one root; each entry opens into the two halves it is (or would be) summarized from, down to the messages; entries with no summary of their own start open</p>
-<div class=bar><input id=q placeholder=\"search summaries and messages (Esc clears)\"><button id=x>expand all</button><button id=c>collapse</button><button id=n>newest</button><span id=h></span></div>
+<div class=bar><input id=q placeholder=\"search summaries and messages (Esc clears)\"><button id=c>view</button><button id=n>newest</button><span id=h></span></div>
 <div id=tree>{tree}</div>
 <script>{JS}</script>
 ", vl = v.parts.len(), vb = v.size(s), tree = b.out)
@@ -128,7 +139,7 @@ pub fn web(s: &Store, v: &View, budget: usize, prefix: &str) -> String {
 <h1><a class=back href=\"{prefix}/\">← home</a> Memory</h1>
 <p class=s>{t} messages · {nodes} tree nodes · view {vl} lines, {vb} of {budget} bytes · loaded as you open it</p>
 <p class=s>one root; each entry opens into the two halves it is (or would be) summarized from, down to the messages; a line ending in <code>···</code> fetches its halves the first time it opens</p>
-<div class=bar><input id=q placeholder=\"search everything, loaded or not (Esc clears)\"><button id=x>expand loaded</button><button id=c>collapse</button><button id=n>newest</button></div>
+<div class=bar><input id=q placeholder=\"search everything, loaded or not (Esc clears)\"><button id=c>view</button><button id=n>newest</button></div>
 <div id=h></div>
 <div id=tree>{tree}</div>
 <script>{js}</script>
@@ -230,7 +241,6 @@ details.tool>summary b{color:#b59566}details.echo>summary b{color:var(--dim)}det
 const JS: &str = "const $=s=>document.querySelectorAll(s),T='#tree details';
 const all=o=>$(T).forEach(d=>d.open=o);
 const up=d=>{for(let p=d;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;};
-document.getElementById('x').onclick=()=>all(true);
 document.getElementById('c').onclick=()=>{all(false);$('.top').forEach(d=>up(d.parentElement));};
 document.getElementById('n').onclick=()=>{const l=document.querySelector('.last');if(l){up(l);l.scrollIntoView({block:'center'});}};
 const q=document.getElementById('q'),h=document.getElementById('h');
@@ -264,8 +274,7 @@ ul.hits li>.m{color:var(--dim)}";
 // The web route's script: a stub fetches its own halves the first time it opens (`load`),
 // `reveal(l,i)` walks down to an arbitrary node fetching along the way (used by both `newest`
 // and a search hit), and search goes to `/f/find` since the page no longer has everything to
-// search client-side. `expand loaded` never fetches - see the comment at its handler - so it
-// can never turn into the same free-for-all `html`'s unrestricted `expand all` was.
+// search client-side. `view` closes everything but the path to the view's lines, fetching nothing.
 const JS_WEB: &str = "const $=s=>document.querySelectorAll(s),T='#tree details',BASE='__BASE__';
 const up=d=>{for(let p=d;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;};
 function wire(root){
@@ -284,9 +293,6 @@ function load(d){
   });
 }
 wire(document);
-document.getElementById('x').onclick=function(){
-  $(T).forEach(function(d){if(d.classList.contains('stub')&&!d.dataset.loaded)return;d.open=true;});
-};
 document.getElementById('c').onclick=function(){
   $(T).forEach(function(d){d.open=false});
   $('.top').forEach(function(d){up(d.parentElement)});
@@ -374,12 +380,31 @@ mod tests {
         let v = crate::optchat::view::View::fold(&s, 20_000);
         let full = super::html(&s, &v, 20_000, None);
         let lazy = super::web(&s, &v, 20_000, "/tok");
-        assert!(lazy.len() * 20 < full.len(), "lazy {} should be far below full {}", lazy.len(), full.len());
+        assert!(lazy.len() * 8 < full.len(), "lazy {} should be far below full {}", lazy.len(), full.len());
         assert_eq!(lazy.matches("<details").count(), lazy.matches("</details>").count());
         assert!(lazy.contains(" stub"));
         assert!(lazy.contains("data-l=\"0\" data-i=\"2999\""), "the last message still rendered in full");
         // untouched: the standalone page for `facet browse` keeps rendering everything
         assert!(!full.contains(" stub"));
+    }
+
+    /// The `view` option lands on the view's own lines: each is on the page marked `top`,
+    /// nothing else is, and there is no expand button.
+    #[test]
+    fn every_view_line_is_top_and_only_they_are() {
+        let s = store(3000);
+        let v = crate::optchat::view::View::fold(&s, 20_000);
+        let lazy = super::web(&s, &v, 20_000, "/tok");
+        for p in &v.parts {
+            let a = format!("data-l=\"{}\" data-i=\"{}\"", p.l, p.i);
+            let at = lazy.find(&a).unwrap_or_else(|| panic!("view line {}.{} missing", p.l, p.i));
+            let head = &lazy[lazy[..at].rfind("<details").unwrap()..at];
+            assert!(head.contains(" top"), "{} not top: {}", a, head);
+        }
+        assert_eq!(lazy.matches("class=\"n ").filter(|_| true).count() > 0, true);
+        let tops = lazy.split("class=\"n ").skip(1).filter(|c| c.split('"').next().unwrap().split(' ').any(|w| w == "top")).count();
+        assert_eq!(tops, v.parts.len());
+        assert!(!lazy.contains("expand"));
     }
 
     /// A stub's fetch (`node`) hands back a balanced fragment, itself stubbed one level

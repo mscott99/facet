@@ -181,6 +181,24 @@ fn life(cfg: &Cfg, args: &[&str]) -> String {
 /// Does a plain message from here wait for the running turn to end, or cut into it?
 pub fn queueing(cfg: &Cfg) -> bool { cfg.get_bool("telegram.queue", true) }
 
+/// `/model` shows the master model, `/model opus|sonnet|…` switches it for the next turns.
+/// The web chat box and Telegram share this; it is the engine's `model` op, not a message.
+pub fn model_cmd(arg: &str) -> String {
+    let dir = crate::optchat::engine::dir();
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return match crate::optchat::engine::request(&dir, json!({"op": "status"})) {
+            Ok(v) => format!("model: {} (/model opus|sonnet to switch)", v["model"].as_str().unwrap_or("?")),
+            Err(e) => format!("engine DOWN: {}", e),
+        };
+    }
+    match crate::optchat::engine::request(&dir, json!({"op": "model", "name": arg})) {
+        Ok(v) if v["ok"] == true => format!("model: {} (from the next turn)", v["model"].as_str().unwrap_or(arg)),
+        Ok(v) => v["error"].as_str().unwrap_or("refused").to_string(),
+        Err(e) => format!("engine DOWN: {}", e),
+    }
+}
+
 /// Returns (reply, remember_it). Meta commands are not worth replaying to the conversation.
 pub fn command(cfg: &Cfg, text: &str) -> (String, bool) {
     let mut it = text.trim_start_matches('/').split_whitespace();
@@ -197,6 +215,7 @@ pub fn command(cfg: &Cfg, text: &str) -> (String, bool) {
                 Err(e) => e,
             }
         }, false),
+        "model" => (model_cmd(tail), false),
         "queue" => (match rest.first().map(|s| s.to_lowercase()).as_deref() {
             Some("on") | Some("off") => {
                 let on = rest[0].eq_ignore_ascii_case("on");
@@ -213,6 +232,7 @@ pub fn command(cfg: &Cfg, text: &str) -> (String, bool) {
             "Facet — your agent on this machine.\n\n\
              Plain text goes into the conversation, waiting for the running turn to end.\n\
              /now <text>  into the running turn   /later <text>  make it wait\n\
+             /model [opus|sonnet]  show or switch the main model\n\
              /queue on|off  which of those is the default\n\n\
              These are answered here instead, and ride along with your next message:\n\
              /diag  open comments      /notes  published notes\n\
