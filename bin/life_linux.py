@@ -41,11 +41,24 @@ def load_config():
         sys.exit(f"life: {p} is not valid JSON: {e}")
 
 
+def _secret(path):
+    """Read a secret kept in its own file, so accounts.json holds no password."""
+    p = os.path.expanduser(path)
+    if not os.path.isabs(p):
+        p = os.path.join(os.path.dirname(config_path()), p)
+    try:
+        return open(p).read().strip()
+    except OSError as e:
+        sys.exit(f"life: cannot read secret {p}: {e}")
+
+
 def accounts(cfg=None):
     cfg = cfg or load_config()
     out = []
     for a in cfg.get("accounts", []):
         a = dict(a)
+        if "password_file" in a and "password" not in a:
+            a["password"] = _secret(a["password_file"])
         if "user" not in a or "password" not in a:
             sys.exit(f"life: account {a.get('name', '?')} in {config_path()} needs 'user' and 'password'")
         a.setdefault("name", a["user"])
@@ -488,7 +501,7 @@ def load_events(cfg=None):
                  '  "calendars": [{"name": "gmail", "ics_url": "https://calendar.google.com/calendar/ical/.../basic.ics"}]')
     evs = []
     for c in cals:
-        evs += parse_ics(fetch_ics(c["ics_url"]), c.get("name", ""))
+        evs += parse_ics(fetch_ics(c["ics_url"] if "ics_url" in c else _secret(c["ics_url_file"])), c.get("name", ""))
     return evs
 
 
@@ -548,7 +561,7 @@ def cmd_cal_add(a):
 def cmd_cal_list(a):
     cfg = load_config()
     for c in cfg.get("calendars") or []:
-        print(c.get("name", c["ics_url"][:40]))
+        print(c.get("name", c.get("ics_url", "?")[:40]))
     o = cfg.get("oauth")
     if o and all(o.get(k) for k in ("client_id", "client_secret", "refresh_token")):
         req = urllib.request.Request("https://www.googleapis.com/calendar/v3/users/me/calendarList",
