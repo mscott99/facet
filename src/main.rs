@@ -24,6 +24,7 @@ mod tg;
 mod web;
 
 use cfg::Cfg;
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 
 fn sh(args: &[&str]) -> String {
@@ -125,16 +126,27 @@ fn main() {
         "spawn" => {
             let (mut model, mut kind, mut desc) = (String::new(), String::new(), String::new());
             let mut words = Vec::new();
+            let mut file = String::new();
             let mut i = 0;
             while i < rest.len() {
                 match rest[i].as_str() {
+                    "--task-file" => { file = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                    "-" => { file = "-".into(); i += 1; }
                     "--model" => { model = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                     "--kind" => { kind = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                     "--desc" => { desc = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                     w => { words.push(w.to_string()); i += 1; }
                 }
             }
-            let task = words.join(" ");
+            // the task from a file or stdin keeps a shell from running its backticks and $(...)
+            let from_stdin = file == "-" || (file.is_empty() && words.is_empty() && !std::io::stdin().is_terminal());
+            let task = if from_stdin {
+                let mut t = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut t) { die(&format!("reading the task from stdin: {}", e)) }
+                t
+            } else if !file.is_empty() {
+                std::fs::read_to_string(&file).unwrap_or_else(|e| die(&format!("{}: {}", file, e)))
+            } else { words.join(" ") };
             match optchat::engine::request(&optchat::engine::dir(),
                 serde_json::json!({"op": "spawn", "model": model, "kind": kind, "desc": desc, "task": task})) {
                 Ok(v) if v["ok"].as_bool() == Some(true) => println!("{}", v["id"].as_str().unwrap_or("")),
@@ -226,7 +238,9 @@ facet docs                  what is published
 facet send [--later] <text> put a message into the conversation (--later: a turn of its own,
                             after the running one, instead of at its next tool call)
 facet push [--log] <text>   push a message to Telegram; --log also adds it to the chat log as a note (no turn)
-facet spawn [--model M] [--kind general-purpose|explore] [--desc D] <task>
+facet spawn [--model M] [--kind general-purpose|explore] [--desc D] <task> | --task-file PATH | -
+                            (the task from a file, or from stdin with `-`: a quoted heredoc keeps
+                            the shell from running backticks in it)
                             a subagent that outlives this turn: returns its id at once; its
                             report arrives later, as a message of its own starting \"[id] \"
 facet review <note> [--replace] < spec

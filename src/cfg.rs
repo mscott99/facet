@@ -78,7 +78,12 @@ pub fn put_state(v: &Value) {
     let _ = std::fs::create_dir_all(dir());
     let _ = std::fs::write(dir().join("state.json"), serde_json::to_string_pretty(v).unwrap());
 }
-pub fn data_dir() -> PathBuf { home().join(".local/share/facet") }
+/// Engine state and logs. FACET_DATA_DIR moves it (the e2e harness uses this so its engines do
+/// not leave an `engine-<hash>/` behind in the real one for every run).
+pub fn data_dir() -> PathBuf {
+    std::env::var("FACET_DATA_DIR").ok().filter(|s| !s.is_empty()).map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".local/share/facet"))
+}
 
 impl Cfg {
     /// The token as a path prefix: every URL in every page starts with this.

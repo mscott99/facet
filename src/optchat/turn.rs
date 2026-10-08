@@ -170,6 +170,12 @@ impl Agent {
 /// starting | queued (a turn is getting ready) | held (the call is replying; next tool call
 /// or next turn) | delivered (a tool is running; the call sees it after the tool) |
 /// later (`later` was asked and a turn is running: it gets a turn of its own after it).
+/// An incoming message in the log: the user's own words, or a detached agent's report
+/// ("[id] ..."), which is `work` like an in-turn subagent's and not the user's.
+fn log_in(e: &Arc<Engine>, text: &str) {
+    e.log(if crate::log::is_report(text) { "work" } else { "user" }, text);
+}
+
 pub fn input(e: &Arc<Engine>, text: String, later: bool) {
     let mut t = e.turn.lock().unwrap();
     let how = if later && t.running {
@@ -237,7 +243,7 @@ fn run(e: &Arc<Engine>) {
             let notes = std::mem::take(&mut t.notes);
             let later: Vec<String> = t.later.drain(..).collect();
             drop(t);
-            for x in texts.iter().chain(&later) { e.log("user", x); }
+            for x in texts.iter().chain(&later) { log_in(e, x); }
             log_notes(e, notes);
             { let t = e.turn.lock().unwrap(); save(e, &t); }
             e.notice("cancelled");
@@ -247,7 +253,7 @@ fn run(e: &Arc<Engine>) {
         // the view is rendered BEFORE the new messages are logged (§7)
         let (view, parts, first) = { let m = e.mem.lock().unwrap(); (m.view.render(&m.store), m.view.parts.len(), m.store.t()) };
         let vstats = super::events::view_stats(&view, parts);
-        for x in &texts { e.log("user", x); }
+        for x in &texts { log_in(e, x); }
         { let t = e.turn.lock().unwrap(); save(e, &t); }
         let tc = Instant::now();
         let mut tr = Trace { first, ..Default::default() };
@@ -271,7 +277,7 @@ fn run(e: &Arc<Engine>) {
             t.running = false; t.phase = "idle".into();
             let notes = std::mem::take(&mut t.notes);
             drop(t);
-            for x in &left { e.log("user", x); }
+            for x in &left { log_in(e, x); }
             log_notes(e, notes);
             { let t = e.turn.lock().unwrap(); save(e, &t); }
             e.notice("cancelled");
@@ -406,9 +412,10 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     let mut meter = Meter::default();
     let mut replays = 0usize;
     let mut deferred: Vec<String> = Vec::new();
-    // Text written after a `send_chat` is held: the chat message already said it and is in
-    // the stream word for word, so a recap of it at the end of the turn is dropped (one reply,
-    // not two). If a step follows, the held text was working notes and is logged as talk.
+    // Text is held until the next step (then logged as talk) or the end of the turn. After a
+    // `send_chat` the chat message already said it and is in the stream word for word, so a
+    // recap of it at the end is dropped (one reply, not two); with no send, the end text is
+    // sent to the chat by `fallback` and logged only there.
     let mut after_send = false;
     let mut held: Option<String> = None;
     let chats = |e: &Arc<Engine>| e.mem.lock().unwrap().store.msgs.iter().filter(|x| x.kind == "chat").count();
@@ -535,9 +542,9 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                         "text" => {
                             let s = b["text"].as_str().unwrap_or("");
                             if s.trim().is_empty() {
-                            } else if after_send {
+                            } else {
                                 held = Some(match held.take() { Some(h) => h + "\n\n" + s, None => s.to_string() });
-                            } else { e.log("talk", s); }
+                            }
                         }
                         "thinking" => e.emit(json!({"ev": "thought", "text": b["thinking"]})),
                         "tool_use" => {
@@ -556,7 +563,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                             } else if is_output(name) {
                                 if let Some(id) = b["id"].as_str() { quiet.insert(id.to_string()); }
                             } else {
-                                e.log("tool", &format!("{} {}", name, b["input"]));
+                                e.log("tool", &logged_call(name, &b["input"]));
                             }
                             if name == "Task" || name == "Agent" {
                                 if let Some(id) = b["id"].as_str() { agents.insert(id.to_string(), Agent::new(&b["input"])); }
@@ -578,7 +585,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                 };
                 if let Some(m) = msg {
                     tr.delivered += 1;
-                    if busy { deferred.push(m) } else { e.log("user", &m) }
+                    if busy { deferred.push(m) } else { log_in(e, &m) }
                     // a deferred one is in neither list for a moment: keep it in the file
                     let t = e.turn.lock().unwrap();
                     let mut keep = State::default();
@@ -612,7 +619,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                     if !id.is_empty() { e.turn.lock().unwrap().pending.remove(id); }
                 }
                 if e.turn.lock().unwrap().pending.is_empty() {
-                    for m in deferred.drain(..) { e.log("user", &m); }
+                    for m in deferred.drain(..) { log_in(e, &m); }
                 }
             }
             "result" => {
@@ -625,14 +632,19 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
             _ => {}
         }
     }
-    for m in deferred.drain(..) { e.log("user", &m); }
-    if let Some(h) = held.take() {
-        // dropped only if the send really landed; otherwise it is the reply the fallback sends
-        let sent = chats(e) > chats0;
-        if sent { super::events::log(&e.dir, "recap_dropped", json!({"turn": tr.first, "bytes": h.len()})); }
-        else { e.log("talk", &h); }
+    for m in deferred.drain(..) { log_in(e, &m); }
+    // The text after the last step is held to the end, so that it is logged once: dropped if
+    // it only recaps a send_chat that landed; else it is the reply the fallback sends (as
+    // `chat`, not also as `talk`); else (a chat landed earlier in the turn) it is plain talk.
+    let mut last = held.take();
+    if let Some(h) = &last {
+        if after_send && chats(e) > chats0 {
+            super::events::log(&e.dir, "recap_dropped", json!({"turn": tr.first, "bytes": h.len()}));
+            last = None;
+        }
     }
-    if tr.outcome != "cancelled" { fallback(e, tr); }
+    if tr.outcome != "cancelled" { fallback(e, tr, last); }
+    else if let Some(h) = last { e.log("talk", &h); }
     // a subagent whose report never came back (the call ended or was killed first) still spent
     let left: Vec<(String, Agent)> = agents.drain().collect();
     for (id, a) in left { done(e, &a, &id, "", tr); }
@@ -653,6 +665,23 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     if let Some(r) = meter.take() { e.spend("turn", &r); }
 }
 
+/// What a tool call is logged as. A `facet spawn` Bash call carries its whole task, which
+/// `agent::spawn` logs verbatim as its own entry: the call is cut to its first line (the
+/// command and flags, up to the heredoc) so the task is not in the stream three times. Only
+/// the log is shortened, not the command that runs.
+fn logged_call(name: &str, input: &Value) -> String {
+    if name == "Bash" {
+        if let Some(cmd) = input["command"].as_str() {
+            if cmd.contains("facet spawn") && (cmd.contains('\n') || cmd.len() > 160) {
+                let first = cmd.lines().next().unwrap_or("");
+                let head: String = first.chars().take(160).collect();
+                return format!("Bash {}", json!({"command": format!("{}… (task: see the spawn entry)", head)}));
+            }
+        }
+    }
+    format!("{} {}", name, input)
+}
+
 fn is_output(name: &str) -> bool { name.ends_with("__send_chat") || name.ends_with("__answer_card") }
 
 /// The safety net for the chat venue (README, "Stream and venues"): the agent's plain text
@@ -661,16 +690,21 @@ fn is_output(name: &str) -> bool { name.ends_with("__send_chat") || name.ends_wi
 /// last step) goes to the chat as it stands, as kind `chat`, and an event records the
 /// fallback; with no text at all, one line saying the turn ended without a reply. Card
 /// comments and subagent reports are not owed a chat reply, so a turn of only those gets none.
-fn fallback(e: &Arc<Engine>, tr: &mut Trace) {
+fn fallback(e: &Arc<Engine>, tr: &mut Trace, last: Option<String>) {
+    let keep = |last: Option<String>| if let Some(h) = last { e.log("talk", &h) };
     let pick = {
         let m = e.mem.lock().unwrap();
         let msgs = &m.store.msgs[tr.first.min(m.store.msgs.len())..];
         // the last chat message the user is owed an answer to, and whether one came after it
-        let Some(k) = msgs.iter().rposition(|x| x.kind == "user" && crate::log::wants_chat(&x.text)) else { return };
-        if msgs[k..].iter().any(|x| x.kind == "chat") { return }
+        let Some(k) = msgs.iter().rposition(|x| x.kind == "user" && crate::log::wants_chat(&x.text)) else { drop(m); keep(last); return };
+        if msgs[k..].iter().any(|x| x.kind == "chat") { drop(m); keep(last); return }
         let after = &msgs[k + 1..];
         let tail = after.iter().rev().take_while(|x| x.kind == "talk").collect::<Vec<_>>();
-        let text = if !tail.is_empty() {
+        let text = if let Some(h) = &last {
+            let mut v: Vec<&str> = tail.iter().rev().map(|x| x.text.trim()).collect();
+            v.push(h.trim());
+            v.join("\n\n")
+        } else if !tail.is_empty() {
             tail.iter().rev().map(|x| x.text.trim()).collect::<Vec<_>>().join("\n\n")
         } else {
             after.iter().rev().find(|x| x.kind == "talk").map(|x| x.text.trim().to_string())
@@ -755,6 +789,19 @@ pub fn strip_cwd_note(t: &str) -> String {
         Some(i) if t[i + 1..].starts_with("Shell cwd was reset to ") => t[..i].trim_end().to_string(),
         None if t.starts_with("Shell cwd was reset to ") => String::new(),
         _ => t.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod logged_call_tests {
+    use super::logged_call;
+    use serde_json::json;
+    #[test]
+    fn spawn_task_is_not_repeated_in_the_tool_entry() {
+        let c = logged_call("Bash", &json!({"command": "facet spawn --model sonnet --desc D - <<'EOF'\nSECRET TASK BODY\nEOF"}));
+        assert!(c.contains("--desc D") && !c.contains("SECRET"), "{}", c);
+        let c = logged_call("Bash", &json!({"command": "ls -la"}));
+        assert_eq!(c, "Bash {\"command\":\"ls -la\"}");
     }
 }
 

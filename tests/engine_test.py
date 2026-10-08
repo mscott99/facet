@@ -7,7 +7,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "target", "debug", "facet")
 D = tempfile.mkdtemp(prefix="facet-e2e-")
 FAKE_LOG = os.path.join(D, "fake.jsonl")
-env = dict(os.environ, OPTCHAT_DIR=D, FACET_CLAUDE=os.path.join(HERE, "fake_claude.py"), FAKE_LOG=FAKE_LOG)
+DATA = os.path.join(D, "data")  # engine state lives here, not in the real ~/.local/share/facet
+env = dict(os.environ, OPTCHAT_DIR=D, FACET_DATA_DIR=DATA, FACET_CLAUDE=os.path.join(HERE, "fake_claude.py"), FAKE_LOG=FAKE_LOG)
 fails = []
 REPORT = "BG REPORT: the thing is in three files"  # what the fake's backgrounded subagent says
 
@@ -40,7 +41,7 @@ def events():
     """The engine's introspection log: its state directory is named by a hash of D, so it is
     found by the `engine` record that names the directory it was started for."""
     import glob
-    for p in glob.glob(os.path.join(os.environ["HOME"], ".local/share/facet/engine-*/events.jsonl")):
+    for p in glob.glob(os.path.join(DATA, "engine-*/events.jsonl")):
         for line in open(p):
             v = json.loads(line)
             if v.get("ev") != "engine": continue
@@ -52,7 +53,7 @@ def state_dir():
     """Same lookup as `events()`, but the directory itself — for files beside events.jsonl
     (cards.json, limits.json, ...) that nothing else exposes a path to."""
     import glob
-    for p in glob.glob(os.path.join(os.environ["HOME"], ".local/share/facet/engine-*/events.jsonl")):
+    for p in glob.glob(os.path.join(DATA, "engine-*/events.jsonl")):
         for line in open(p):
             v = json.loads(line)
             if v.get("ev") != "engine": continue
@@ -108,10 +109,10 @@ try:
     # A: a plain turn, primed
     n0 = len(log())
     req({"op": "send", "text": "hello"})
-    wait(lambda: any(m["kind"] == "talk" for m in log()[n0:]), 30, "reply to hello")
+    wait(lambda: any(m["kind"] in ("talk", "chat") for m in log()[n0:]), 30, "reply to hello")
     wait(idle, 30, "idle after hello")
     L = log()[n0:]
-    check([m["kind"] for m in L[:2]] == ["user", "talk"] and L[0]["text"] == "hello" and L[1]["text"] == "ok", "turn: user, talk")
+    check([m["kind"] for m in L[:2]] == ["user", "chat"] and L[0]["text"] == "hello" and L[1]["text"] == "ok", "turn: user, chat")
     F = fake()
     primes = [x for x in F if x["kind"] == "prime"]
     turns = [x for x in F if x["kind"] == "turn"]
@@ -141,7 +142,7 @@ try:
     mid = L.index(("user", "MID during tool"))
     check(ki[mid - 1] == "echo" and ki[mid - 2] == "tool", "mid-run message logged right after the tool result it rode on")
     late = L.index(("user", "LATE during reply"))
-    check(("talk", "done") in L[:late] and L[late + 1:] and L[late + 1] == ("talk", "ok"), "a message during the final reply starts a fresh call")
+    check(("chat", "done") in L[:late] and L[late + 1:] and L[late + 1] == ("chat", "ok"), "a message during the final reply starts a fresh call")
     F = fake()
     check(not any(x["kind"] == "followup" for x in F), "no follow-up turn in a stale conversation")
     check(any(x["kind"] == "midrun" and x["text"] == "MID during tool" for x in F), "mid-run message was delivered to the running call")
@@ -203,7 +204,7 @@ try:
     wait(idle, 60, "idle after restart")
     L = [(m["kind"], m["text"]) for m in log()[n0:]]
     k = L.index(("user", "SURVIVOR"))
-    check(L[k + 1:k + 2] == [("talk", "ok")], "a message accepted before a crash is answered after the restart")
+    check(L[k + 1:k + 2] == [("chat", "ok")], "a message accepted before a crash is answered after the restart")
 
     # G: /model and /zoom
     r = req({"op": "model", "name": "sonnet"})
@@ -213,7 +214,7 @@ try:
     check(z.startswith("3+0|note: seed message 3 "), "/zoom gives a message whole")
     check(req({"op": "zoom", "id": 1, "n": 2})["text"] == "No line 1+2.", "/zoom refuses an unaligned line")
     n0 = len(log()); req({"op": "send", "text": "after switch"})
-    wait(lambda: any(m["kind"] == "talk" for m in log()[n0:]), 30, "turn after model switch")
+    wait(lambda: any(m["kind"] in ("talk", "chat") for m in log()[n0:]), 30, "turn after model switch")
     last = [x for x in fake() if x["kind"] == "turn"][-1]
     check(last["argv"][last["argv"].index("--model") + 1] == "sonnet", "the next turn runs on the new model")
     wait(idle, 60, "idle after model switch")
@@ -248,7 +249,7 @@ try:
     # G: a subagent: its steps stay out of the chat, its cost does not stay out of the log
     n0 = len(log())
     req({"op": "send", "text": "AGENT please"})
-    wait(lambda: any(m["kind"] == "talk" for m in log()[n0:]), 30, "reply after the subagent")
+    wait(lambda: any(m["kind"] in ("talk", "chat") for m in log()[n0:]), 30, "reply after the subagent")
     wait(idle, 60, "idle after the subagent turn")
     L = log()[n0:]
     work = [m for m in L if m["kind"] == "work"]
@@ -291,18 +292,18 @@ try:
     # turn's: it comes in as a message of its own and starts another turn (§9)
     n0 = len(log())
     req({"op": "send", "text": "BGAGENT please"})
-    wait(lambda: any(m["kind"] == "user" and m["text"].startswith("[task_fake_bg]") for m in log()[n0:]),
+    wait(lambda: any(m["kind"] == "work" and m["text"].startswith("[task_fake_bg]") for m in log()[n0:]),
          30, "the background report joins the chat")
     wait(idle, 60, "idle after the background report's turn")
     L = log()[n0:]
-    rep = [m for m in L if m["kind"] == "user" and m["text"].startswith("[task_fake_bg]")]
+    rep = [m for m in L if m["kind"] == "work" and m["text"].startswith("[task_fake_bg]")]
     check(len(rep) == 1 and REPORT in rep[0]["text"],
           "a backgrounded subagent's report joins the chat as one message starting \"[id] \"")
     check(not any("Async agent launched" in m["text"] for m in L),
           "the launch receipt is not logged as a report")
     check(not any("STALE FOLLOW-UP" in m["text"] for m in L),
           "nothing the follow-up turn says is logged")
-    check(any(m["kind"] == "talk" and m["i"] > rep[0]["i"] for m in L), "the report starts a turn")
+    check(any(m["kind"] in ("talk", "chat") and m["i"] > rep[0]["i"] for m in L), "the report starts a turn")
     turns = [v for v in fake() if v.get("kind") == "turn"]
     said = turns[-1]["content"][-1]["text"] if turns else ""
     check(said.startswith("[task_fake_bg]"), "that turn is a fresh call, with the report as its message")
@@ -326,27 +327,27 @@ try:
     # a normal turn, started right after the spawn, runs and finishes well inside the 1s the
     # fake's detached agent sleeps before it reports: proof the engine does not wait on it
     req({"op": "send", "text": "hi again"})
-    wait(lambda: any(m["kind"] == "talk" for m in log()[n0:]), 30, "an ordinary turn still runs fine right after a spawn")
+    wait(lambda: any(m["kind"] in ("talk", "chat") for m in log()[n0:]), 30, "an ordinary turn still runs fine right after a spawn")
     wait(idle, 10, "idle right after that turn, before the spawn has reported")
     logged = [m for m in log()[n0:] if m["kind"] == "tool" and m["text"].startswith("spawn " + sid)]
     check(len(logged) == 1 and logged[0]["text"].endswith("(sonnet, general-purpose, test spawn): look into the thing and report back"),
           "the spawn's task is logged once, verbatim: %r" % (logged,))
     check(not any(sid in m["text"] for m in log()[n0:] if m["kind"] != "tool"), "the spawn's report has not arrived yet at that point")
-    wait(lambda: any(m["kind"] == "user" and m["text"].startswith("[%s] " % sid) for m in log()[n0:]),
+    wait(lambda: any(m["kind"] == "work" and m["text"].startswith("[%s] " % sid) for m in log()[n0:]),
          15, "the detached agent's report joins the chat, after the turn that spawned it is long done")
     wait(idle, 30, "idle after the spawn's own turn")
     # the shell's "cwd was reset" note is not part of what the command printed
     n1 = len(log())
     req({"op": "send", "text": "TOOLS 1 CWD"})
-    wait(lambda: any(m["kind"] == "talk" for m in log()[n1:]), 30, "the CWD turn finishes")
+    wait(lambda: any(m["kind"] in ("talk", "chat") for m in log()[n1:]), 30, "the CWD turn finishes")
     ec = [m["text"] for m in log()[n1:] if m["kind"] == "echo"]
     check(ec == ["slept 0"], "the cwd-reset line is stripped from an echo: %r" % (ec,))
     wait(idle, 30, "idle after the CWD turn")
     L = log()[n0:]
-    rep = [m for m in L if m["kind"] == "user" and m["text"].startswith("[%s] " % sid)]
+    rep = [m for m in L if m["kind"] == "work" and m["text"].startswith("[%s] " % sid)]
     check(len(rep) == 1 and "SPAWN REPORT" in rep[0]["text"],
           "the detached agent's report starts a turn of its own, the same shape as a backgrounded Task agent's")
-    check(any(m["kind"] == "talk" and m["i"] > rep[0]["i"] for m in L), "that turn replies")
+    check(any(m["kind"] in ("talk", "chat") and m["i"] > rep[0]["i"] for m in L), "that turn replies")
     ev = events()
     asp = [x for x in ev if x["ev"] == "agent" and x.get("tool_use_id") == sid]
     check(len(asp) == 1 and asp[0]["status"] == "done" and asp[0]["reqs"] >= 1 and asp[0]["eq"] > 0
@@ -395,7 +396,7 @@ try:
     wait(lambda: any(m["kind"] == "chat" for m in log()[n0:]), 30, "fallback chat")
     wait(idle, 30, "idle after fallback")
     L = [(m["kind"], m["text"]) for m in log()[n0:]]
-    check(L == [("user", "plain question"), ("talk", "ok"), ("chat", "ok")], "with no send, the final text goes to the chat as kind chat: %r" % L)
+    check(L == [("user", "plain question"), ("chat", "ok")], "with no send, the final text goes to the chat as kind chat: %r" % L)
     check(any(x["ev"] == "fallback" and x["turn"] == n0 for x in events()) and
           any(x["ev"] == "turn" and x["first"] == n0 and x["fallback"] for x in events()), "the fallback is recorded")
 
@@ -410,7 +411,7 @@ try:
     json.dump({"c2": {"note": "Other Note", "line": 7, "answers": []}}, open(cards_f, "w"))
     n0 = len(log())
     req({"op": "send", "text": '[[Other Note]] L7 #c2: "a line" CARD c2 please', "later": True})
-    wait(lambda: any(m["kind"] == "talk" and m["text"] == "noted" for m in log()[n0:]), 30, "reply after answer_card")
+    wait(lambda: any(m["kind"] in ("talk", "chat") and m["text"] == "noted" for m in log()[n0:]), 30, "reply after answer_card")
     wait(idle, 30, "idle after answer_card")
     L = [(m["kind"], m["text"]) for m in log()[n0:]]
     check(L == [("user", '[[Other Note]] L7 #c2: "a line" CARD c2 please'), ("answer", "#c2 on [[Other Note]] L7: card answer"), ("talk", "noted")],
@@ -460,7 +461,7 @@ try:
     n0 = len(log())
     req({"op": "send", "text": "after restart"})
     wait(idle, 30, "turn after restart")
-    check(any(m["kind"] == "talk" for m in log()[n0:]), "a turn works after the restart")
+    check(any(m["kind"] in ("talk", "chat") for m in log()[n0:]), "a turn works after the restart")
     check(req({"op": "restart"})["ok"] is True and not (time.sleep(3) or eng.poll()), "a second restart works too")
 
     check(os.path.isdir(os.path.join(D, ".git")), "chat directory committed after turns")
