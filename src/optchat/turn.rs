@@ -414,6 +414,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     let chats0 = chats(e);
     let mut agents: HashMap<String, Agent> = HashMap::new(); // live subagents, by tool id
     let mut checked_tools = false;
+    let mut mute: HashSet<String> = HashSet::new(); // zoom / date calls, by tool id: no result logged
     let mut quiet: HashSet<String> = HashSet::new(); // send_chat / answer_card calls, by tool id
     let mut killed = false;
     let mut stale = false; // a follow-up turn of this conversation has started (see `init`)
@@ -542,9 +543,16 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                             let name = b["name"].as_str().unwrap_or("");
                             // an output tool's call is not logged as a step: the `chat` or
                             // `answer` message it logs itself is the record (mcp.rs)
-                            if let Some(h) = held.take() { e.log("talk", &h); }
-                            after_send = name.ends_with("__send_chat");
-                            if is_output(name) {
+                            // zoom and date leave no trace: their content is already memory, and
+                            // they are no step either, so a recap held after a send stays held
+                            let silent = name.ends_with("__zoom") || name.ends_with("__date");
+                            if !silent {
+                                if let Some(h) = held.take() { e.log("talk", &h); }
+                                after_send = name.ends_with("__send_chat");
+                            }
+                            if silent {
+                                if let Some(id) = b["id"].as_str() { mute.insert(id.to_string()); }
+                            } else if is_output(name) {
                                 if let Some(id) = b["id"].as_str() { quiet.insert(id.to_string()); }
                             } else {
                                 e.log("tool", &format!("{} {}", name, b["input"]));
@@ -590,7 +598,8 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                         Some(a) => { if text.starts_with("Async agent launched") { a.bg = true; } a.bg }
                         None => false,
                     };
-                    let ok = quiet.remove(id) && (text == super::mcp::SENT || text == super::mcp::ANSWERED);
+                    let silent = mute.remove(id);
+                    let ok = silent || (quiet.remove(id) && (text == super::mcp::SENT || text == super::mcp::ANSWERED));
                     if !bg && !ok {
                         // a subagent's report is the one thing it leaves behind: its own kind (§9)
                         let sent = agents.remove(id);

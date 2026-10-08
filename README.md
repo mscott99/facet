@@ -241,6 +241,7 @@ own `claude` calls and the subagents they spawn only. The master's path (`/<secr
 `zoom`, `date`, `send_chat {text}` and `answer_card {id, text, apply?}`; a detached subagent
 (`facet spawn`) is given `/<secret>/agent`, which lists and serves `zoom` and `date` only, and
 Task subagents' definitions leave the two output tools out of their tool lists.
+Zoom and date leave no trace in the stream (no step, no result): their content is already memory.
 
 ### stream and venues
 
