@@ -290,6 +290,7 @@ fn run(e: &Arc<Engine>) {
     else { e.notice(&format!("done · {}", line.replacen(" · ", &format!("{} · ", took), 1))) }
     e.emit(json!({"ev": "state", "busy": false, "queued": 0}));
     commit(e);
+    super::engine::restart_if_idle(e);
 }
 
 /// §6: wait until every line of the view is a summary. False if cancelled.

@@ -10,6 +10,9 @@
 //   -> {"op":"answer","id":..,"text":..,"apply":..}  a deliberate reply to a line-comment card
 //                                     (never a talk reply its poll happens to catch); "apply",
 //                                     if given, becomes a fix the card can apply (diag::propose)
+//   -> {"op":"restart","serve":bool}  queue a restart of this engine (and of serve, if asked) for
+//                                     when the running turn has ended and no detached spawn is
+//                                     alive; returns at once ("restart queued")
 //   -> {"op":"resume"}                lift a compactor pause
 //   -> {"op":"view"} / {"op":"status"} / {"op":"zoom","id":..,"n":..}
 //   -> {"op":"model","name":..}       the master model for the next turns
@@ -135,6 +138,10 @@ pub struct Engine {
     pub util_mark: Mutex<Option<f64>>,
     /// the master model, switchable at runtime (/model); starts as chat.model
     model: Mutex<String>,
+    /// a restart queued by `facet restart`: Some(also_serve); fires when idle (see `restart_if_idle`)
+    pub restart: Mutex<Option<bool>>,
+    /// detached subagents alive (agent.rs): a restart waits for them, their readers are threads of this process
+    pub spawns: std::sync::atomic::AtomicUsize,
 }
 
 pub fn dir() -> PathBuf {
@@ -290,6 +297,7 @@ pub fn serve() -> ! {
             .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null)),
         util_mark: Mutex::new(None),
         model: Mutex::new(String::new()),
+        restart: Mutex::new(None), spawns: Default::default(),
     });
     *e.model.lock().unwrap() = std::fs::read_to_string(sd.join("model")).ok().map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty()).unwrap_or_else(|| e.conf.model.clone());
@@ -379,6 +387,14 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
                     }
                 }
             }
+            "restart" => {
+                *e.restart.lock().unwrap() = Some(v["serve"].as_bool().unwrap_or(false));
+                e.notice("restart queued: after the running reply, once no detached agent is alive");
+                // idle already (called from a shell, not from a turn): go now
+                let e2 = e.clone();
+                std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(300)); restart_if_idle(&e2); });
+                json!({"ok": true, "queued": true})
+            }
             "resume" => {
                 let mut m = e.mem.lock().unwrap();
                 m.pause = None;
@@ -426,6 +442,55 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
         };
         if writeln!(w, "{}", reply).is_err() { return }
     }
+}
+
+/// Fire a queued restart if there is one and nothing would be lost: no turn running, no
+/// detached subagent alive (each has a reader thread in this process that exec would end).
+/// Called when a turn ends and when a detached agent ends. Re-execs this binary with the same
+/// arguments and environment: same pid (so systemd/launchd see no exit), picks up a rebuilt
+/// binary. The socket and the MCP listener are close-on-exec, so the new process finds the old
+/// lock refusing connections, calls it stale, removes it and binds afresh.
+pub fn restart_if_idle(e: &Arc<Engine>) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let Some(serve) = *e.restart.lock().unwrap() else { return };
+    if e.turn.lock().unwrap().running { return }
+    let n = e.spawns.load(SeqCst);
+    if n > 0 {
+        if !e.restart.lock().unwrap().is_some() { return }
+        e.notice(&format!("restart waits for {} detached agent(s)", n));
+        return;
+    }
+    // let in-flight compaction finish rather than kill it mid-spend (at most 30 s)
+    for _ in 0..60 {
+        if e.mem.lock().unwrap().busy.is_empty() { break }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    {
+        // claim the restart exactly once; a turn that started meanwhile postpones it
+        let mut r = e.restart.lock().unwrap();
+        if r.is_none() || e.turn.lock().unwrap().running || e.spawns.load(SeqCst) > 0 { return }
+        *r = None;
+    }
+    e.log("echo", "(engine restarting on request: re-exec of the facet binary)");
+    super::events::log(&e.dir, "restart", json!({"pid": std::process::id(), "serve": serve}));
+    if serve {
+        let ok = if cfg!(target_os = "macos") {
+            let uid = std::process::Command::new("id").arg("-u").output().ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+            std::process::Command::new("launchctl").args(["kickstart", "-k", &format!("gui/{}/com.facet", uid)]).status()
+        } else {
+            std::process::Command::new("systemctl").args(["--user", "restart", "facet.service"]).status()
+        };
+        if !ok.is_ok_and(|s| s.success()) { e.notice("serve restart failed (no service manager?); restart it by hand") }
+    }
+    use std::os::unix::process::CommandExt;
+    let mut exe = std::env::current_exe().unwrap_or_else(|_| "facet".into());
+    // a rebuilt binary replaces the file: /proc/self/exe then reads "<path> (deleted)"
+    if let Some(p) = exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) { exe = p.into(); }
+    let err = std::process::Command::new(&exe).args(std::env::args().skip(1)).exec();
+    // exec failed: the old engine goes on; say so
+    *e.restart.lock().unwrap() = None;
+    e.notice(&format!("restart failed ({}): {}; engine keeps running", exe.display(), err));
 }
 
 /// One request to a running engine, one reply.

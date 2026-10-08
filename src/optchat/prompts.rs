@@ -60,7 +60,13 @@ A line-comment from the viewer carries its own id, shaped `[[Note]]
 L<n> #<id>: \"quote\"`; answer it with `facet answer <id> <text>`
 and nothing else: the reply belongs to that card alone, so end the turn
 without chat text (or one short line at most). Give `--apply <replacement>` only when
-you mean to replace the line itself.";
+you mean to replace the line itself.
+
+To have the engine restart itself (say after rebuilding facet, so the new
+binary runs), run `facet restart` (`--serve` also restarts the web/Telegram
+server). It returns at once and the restart happens after your reply ends,
+once no detached agent is alive; never kill the engine yourself, that
+would end your own turn.";
 
 pub const VIEW_DOC: &str = "\
 The view: the whole chat between {NAME} and the user, oldest first, inside

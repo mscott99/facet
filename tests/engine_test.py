@@ -366,6 +366,23 @@ try:
     r3 = req({"op": "answer", "id": "c1", "text": ""})
     check(r3["ok"] is False, "an empty answer is refused")
 
+    # K: a queued restart re-execs the engine (same pid) once idle, taking the lock over again
+    ne0 = sum(1 for x in events() if x["ev"] == "engine")
+    n0 = len(log())
+    r = req({"op": "restart"})
+    check(r["ok"] is True and r.get("queued") is True, "restart is queued at once: %r" % r)
+    wait(lambda: sum(1 for x in events() if x["ev"] == "engine") > ne0, 30, "engine re-execs")
+    wait(lambda: os.path.exists(os.path.join(D, "lock")) and req({"op": "status"}) is not None, 10, "engine back up")
+    check(eng.poll() is None, "same process (pid %d) after the restart" % eng.pid)
+    ev = events()
+    check(any(x["ev"] == "restart" and x["pid"] == eng.pid for x in ev), "restart recorded in events.jsonl")
+    check(any(m["kind"] == "echo" and "restarting" in m["text"] for m in log()[n0:]), "restart noted in the chat log")
+    n0 = len(log())
+    req({"op": "send", "text": "after restart"})
+    wait(idle, 30, "turn after restart")
+    check(any(m["kind"] == "talk" for m in log()[n0:]), "a turn works after the restart")
+    check(req({"op": "restart"})["ok"] is True and not (time.sleep(3) or eng.poll()), "a second restart works too")
+
     check(os.path.isdir(os.path.join(D, ".git")), "chat directory committed after turns")
 finally:
     eng.kill()
