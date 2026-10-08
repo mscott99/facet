@@ -59,13 +59,17 @@ pub fn spawn(e: &Arc<Engine>, model: &str, kind: &str, desc: &str, task: &str) -
     // the read-only path: zoom and date, never the master's send_chat / answer_card
     let url = super::mcp::agent_url(&e.mcp_url.get().cloned().unwrap_or_default());
     let mcp = json!({"mcpServers": {"optchat": {"type": "http", "url": url}}});
-    args.extend(["--mcp-config".into(), mcp.to_string(), "--permission-mode".into(), e.conf.permission.clone()]);
+    args.extend(["--mcp-config".into(), mcp.to_string(), "--permission-mode".into(), e.conf.permission.clone(),
+        "--add-dir".into(), "/tmp".into()]);
 
     let mut p = Proc::spawn_detached(&args, &[("FACET_SPAWN", "1")], &e.conf.cwd).map_err(|x| x.to_string())?;
     let content = Value::Array(vec![json!({"type": "text", "text": view}), json!({"type": "text", "text": task})]);
     if let Err(x) = p.send(content) { return Err(x.to_string()) }
 
     e.spawns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // the task verbatim, as the log's only record of it (the master may have passed it by file);
+    // a plain log line, which starts no turn
+    e.log("tool", &format!("spawn {} ({}, {}, {}): {}", id, model, kind, desc.trim(), task));
     let rec = Rec { id: id.clone(), kind, desc: desc.trim().to_string(), task: task.to_string() };
     let e2 = e.clone();
     std::thread::spawn(move || run(e2, p, rec));
