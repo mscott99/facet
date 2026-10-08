@@ -104,6 +104,7 @@ textarea:focus{outline:1px solid var(--line)}
 .say.done .t{white-space:pre-wrap}
 form.busy textarea,form.busy button{opacity:.45}
 #older{min-height:1px}
+body{overflow-anchor:none}
 #toast{max-width:var(--measure);margin:.3rem auto 0;font:12px var(--mono);color:var(--dim);min-height:1em}
 .katex{font-size:1.03em}.katex-display{overflow-x:auto;overflow-y:hidden;margin:1.3em 0}
 /* The line you can comment on says so only under the pointer, and only on the block a click
@@ -155,7 +156,11 @@ document.addEventListener('htmx:afterRequest',function(e){
 document.addEventListener('htmx:beforeRequest',function(e){
   if(e.target.id=='older')window._h=document.body.scrollHeight});
 document.addEventListener('htmx:afterSwap',function(e){
-  if(window._h){scrollBy(0,document.body.scrollHeight-window._h);window._h=0}});
+  if(window._h){scrollBy(0,document.body.scrollHeight-window._h);window._h=0;setTimeout(nearTop,50)}});
+// fetch the next page early: once the reader is in the top quarter, not only at the very top
+function nearTop(){var o=document.getElementById('older');
+  if(o&&!window._h&&scrollY<document.body.scrollHeight/4)htmx.trigger(o,'more')}
+addEventListener('scroll',nearTop,{passive:true});
 // Vim keys for reading: d/u a half page, j/k a few lines, gg and G the ends. Every jump is
 // instant — no animation to sit through — and none of them fire while typing somewhere.
 var gg=0;
@@ -408,7 +413,7 @@ fn older_fragment(cfg: &Cfg, before: i64) -> String {
 }
 fn older_sentinel(cfg: &Cfg, shown: &[log::Msg], more: bool) -> String {
     match (more, shown.first()) {
-        (true, Some(m)) => format!("<div id=older hx-get=\"{}/f/older?before={}\" hx-trigger=revealed hx-swap=outerHTML></div>",
+        (true, Some(m)) => format!("<div id=older hx-get=\"{}/f/older?before={}\" hx-trigger=\"revealed, more\" hx-swap=outerHTML></div>",
             cfg.token_path(), m.i),
         _ => String::new(),
     }
