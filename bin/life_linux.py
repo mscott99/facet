@@ -291,7 +291,7 @@ def split_prop(line):
 
 
 def unescape(v):
-    return v.replace("\\n", "\n").replace("\\N", "\n").replace("\\,", ",").replace("\;", ";").replace("\\\\", "\\")
+    return v.replace("\\n", "\n").replace("\\N", "\n").replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
 
 
 def parse_dt(params, val):
