@@ -49,6 +49,14 @@ pub fn from_card(text: &str) -> Option<&str> {
     if n == 0 { None } else { Some(&t[..n]) }
 }
 
+pub fn all(dir: &Path) -> Value { load(dir) }
+
+/// Take a card off its page for good; its answers stay (a later `facet answer` still lands).
+pub fn hide(dir: &Path, id: &str) {
+    let mut data = load(dir);
+    if let Some(c) = data.get_mut(id) { c["hidden"] = json!(true); save(dir, &data); }
+}
+
 pub fn get(dir: &Path, id: &str) -> Option<Value> { load(dir).get(id).cloned() }
 
 /// The answer, with the code of the fix it offered, if it offered one. An id this file has

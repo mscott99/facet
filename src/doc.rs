@@ -18,7 +18,6 @@ pub struct Doc {
     pub title: String,
     pub path: PathBuf,
     pub text: String,
-    pub mtime: u64,
 }
 
 pub fn mtime(p: &Path) -> u64 {
@@ -162,14 +161,14 @@ pub fn find(cfg: &Cfg, name: &str) -> Option<PathBuf> {
 pub fn get(cfg: &Cfg, slug: &str) -> Option<Doc> {
     let (_, path) = table(cfg).into_iter().find(|(s, _)| s == slug)?;
     let text = std::fs::read_to_string(&path).ok()?;
-    Some(Doc { slug: slug.into(), title: title_of(&path, &text), mtime: mtime(&path), path, text })
+    Some(Doc { slug: slug.into(), title: title_of(&path, &text), path, text })
 }
 
 /// Any note of the vault, by name rather than by slug: what a wikilink points at, read-only.
 pub fn note(cfg: &Cfg, name: &str) -> Option<Doc> {
     let path = find(cfg, name)?;
     let text = std::fs::read_to_string(&path).ok()?;
-    Some(Doc { slug: String::new(), title: title_of(&path, &text), mtime: mtime(&path), path, text })
+    Some(Doc { slug: String::new(), title: title_of(&path, &text), path, text })
 }
 
 /// Publish: write `facet: <slug>` into the note's own frontmatter.
@@ -232,7 +231,7 @@ pub fn index(cfg: &Cfg) -> Doc {
         md.push_str(&format!("- [{}]({}/m/{}) · {} kB · {}{}\n",
             title, cfg.token_path(), slug, (size + 512) / 1024, crate::when(*mt), marks));
     }
-    Doc { slug: String::new(), title: "Notes".into(), path: cfg.vault(), text: md, mtime: 0 }
+    Doc { slug: String::new(), title: "Notes".into(), path: cfg.vault(), text: md }
 }
 
 // ---- sections and embeds: reading a longform ---------------------------------------------

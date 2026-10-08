@@ -4,7 +4,18 @@
 // never by a regex.
 use crate::cfg::Cfg;
 use crate::{cards, diag, doc, log, md, tell};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tiny_http::{Header, Request, Response, Server};
+
+/// How long a waiting request (`?wait=1`) holds before it answers "nothing yet". Short enough
+/// that a dead connection frees its thread soon; the page just asks again.
+const LONG: Duration = Duration::from_secs(25);
+
+/// Every POST takes this for its whole run: they read-modify-write small files (cards.json,
+/// diagnostics.json) that two simultaneous requests could otherwise clobber.
+static POSTING: Mutex<()> = Mutex::new(());
 
 const SHELL: &str = r#"<!DOCTYPE html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -106,6 +117,8 @@ form.busy textarea,form.busy button{opacity:.45}
 #older{min-height:1px}
 body{overflow-anchor:none}
 #toast{max-width:var(--measure);margin:.3rem auto 0;font:12px var(--mono);color:var(--dim);min-height:1em}
+.kx span[data-math-style]:not([data-r]){opacity:0}
+.kx span[data-math-style=display]:not([data-r]){display:block;min-height:2.6em}
 .katex{font-size:1.03em}.katex-display{overflow-x:auto;overflow-y:hidden;margin:1.3em 0}
 /* The line you can comment on says so only under the pointer, and only on the block a click
    would land on — never on touch, where there is no hover and every tap would light up. */
@@ -119,15 +132,120 @@ body{overflow-anchor:none}
 {{FOOT}}
 <script>
 var TOK="{{TOK}}";
-function mathify(r){r.querySelectorAll('span[data-math-style]').forEach(function(s){
-  if(s.dataset.k)return; s.dataset.k=1;
+// Math is rendered where the reader is, not all at once: whatever is within a few screens of
+// the viewport first (an IntersectionObserver), the rest in idle moments, top to bottom. A
+// formula not yet rendered is hidden rather than shown as raw TeX, and holds the room it will
+// need; `data-r` marks one that is done.
+var MO=null,MQ=[],MI=0;
+function mrender(s){
+  if(s.dataset.r||typeof katex=='undefined')return;
+  s.dataset.r=1;
   try{katex.render(s.textContent,s,{displayMode:s.dataset.mathStyle=='display',throwOnError:false})}
-  catch(e){}});}
+  catch(e){}}
+function idle(){
+  if(MI)return;MI=1;
+  var ric=window.requestIdleCallback||function(f){return setTimeout(function(){f({timeRemaining:function(){return 8}})},80)};
+  ric(function pump(dl){
+    var n=0;
+    while(MQ.length&&n<12&&dl.timeRemaining()>3){var s=MQ.shift();if(!s.dataset.r){if(MO)MO.unobserve(s);mrender(s)}n++}
+    if(MQ.length)ric(pump);else MI=0;});}
+function mathify(r){
+  if(typeof katex=='undefined')return;
+  document.documentElement.classList.add('kx');
+  var ss=r.querySelectorAll('span[data-math-style]:not([data-q])');
+  if(!ss.length)return;
+  if(!window.IntersectionObserver){ss.forEach(mrender);return}
+  if(!MO)MO=new IntersectionObserver(function(es){es.forEach(function(e){
+    if(e.isIntersecting){MO.unobserve(e.target);mrender(e.target)}})},{rootMargin:'1500px 0px'});
+  ss.forEach(function(s){s.dataset.q=1;MQ.push(s);MO.observe(s)});
+  idle();}
 function atEnd(){return innerHeight+scrollY>document.body.scrollHeight-120}
 var stick=true;
 addEventListener('scroll',function(){stick=atEnd()});
 document.addEventListener('htmx:afterSwap',function(e){mathify(e.target);if(stick&&!window._h)scrollTo(0,1e7)});
-addEventListener('load',function(){mathify(document);if(location.hash=='')scrollTo(0,1e7)});
+addEventListener('load',function(){mathify(document);if(location.hash=='')scrollTo(0,1e7);start()});
+// A page keeps itself current by asking the server for news and being answered when there is
+// some (the request is held up to ~25s): a chat message shows as it lands, an edited note
+// refreshes, with no poll every few seconds. A hidden tab stops asking and catches up when
+// it is shown again; a dropped connection is retried slowly.
+var LS=0,LC=null,DL=0,DC=null;
+function live(){
+  var gen=++LS;if(LC)LC.abort();
+  (function go(){
+    var tail=document.getElementById('tail');
+    if(gen!=LS||!tail)return;
+    LC=new AbortController();
+    fetch(TOK+'/f/log?wait=1&since='+tail.dataset.high,{signal:LC.signal})
+      .then(function(r){return r.ok?r.text():Promise.reject(r.status)}).then(function(h){
+        if(gen!=LS)return;
+        var w=document.createElement('div');w.innerHTML=h;
+        var nt=w.querySelector('#tail');
+        if(nt){nt.remove();tail.dataset.high=nt.dataset.high;tail.dataset.up=nt.dataset.up;
+          var dn=document.getElementById('down');if(dn)dn.hidden=nt.dataset.up!='0'}
+        var n=w.firstChild,any=false;
+        while(n){var nx=n.nextSibling;tail.parentNode.insertBefore(n,tail);
+          if(n.nodeType==1){any=true;mathify(n);htmx.process(n)}n=nx}
+        if(any&&stick&&!window._h)scrollTo(0,1e7);
+        go();
+      },function(e){if(gen==LS&&!(e&&e.name=='AbortError'))setTimeout(go,5000)});
+  })();
+}
+function docLive(){
+  var gen=++DL;if(DC)DC.abort();
+  (function go(){
+    var w=document.getElementById('docwrap');
+    if(gen!=DL||!w||!w.dataset.live)return;
+    var u=w.dataset.live;
+    DC=new AbortController();
+    fetch(u+(u.indexOf('?')<0?'?':'&')+'wait=1&v='+w.dataset.v,{signal:DC.signal})
+      .then(function(r){return r.status==200?r.text():r.status==204?'':Promise.reject(r.status)}).then(function(h){
+        if(gen!=DL)return;
+        // a box being typed in would be lost to the swap: wait it out
+        if(h&&document.querySelector('.say:not(.done)'))return setTimeout(go,3000);
+        if(h){w.outerHTML=h;var nw=document.getElementById('docwrap');mathify(nw);htmx.process(nw);cards()}
+        go();
+      },function(e){if(gen==DL&&!(e&&e.name=='AbortError'))setTimeout(go,5000)});
+  })();
+}
+function start(){
+  if(document.hidden)return;
+  if(document.getElementById('tail'))live();
+  if(document.getElementById('docwrap')){docLive();cards()}
+}
+document.addEventListener('visibilitychange',function(){
+  if(!document.hidden)wait();
+  if(document.hidden){LS++;DL++;if(LC)LC.abort();if(DC)DC.abort()}else start()});
+// Cards (the comment boxes) outlive the page: a sent one comes back from the server - the
+// words from the log, the answers from cards.json - under the line it was about.
+function cards(){
+  var ns={};
+  document.querySelectorAll('[data-note]').forEach(function(e){if(!e.closest('.say'))ns[e.dataset.note]=1});
+  var k=Object.keys(ns);if(!k.length)return;
+  fetch(TOK+'/f/cards?notes='+encodeURIComponent(JSON.stringify(k)))
+    .then(function(r){return r.json()}).then(function(cs){
+      var last=null;
+      cs.forEach(function(c){var d=restore(c);if(d)last=d});
+      if(last&&(!RCARD||!document.body.contains(RCARD.d||RCARD)))listen(last.d,last.n);
+    },function(){});
+}
+function restore(c){
+  if(document.querySelector('.say[data-id="'+c.id+'"]'))return null;
+  var b=document.querySelector('[data-note="'+CSS.escape(c.note)+'"][data-line="'+c.line+'"]:not(.say)');
+  if(!b)return null;
+  var d=document.createElement('div');d.className='say done';
+  d.dataset.id=c.id;d.dataset.note=c.note;d.dataset.line=c.line;d.dataset.where=c.where;
+  d.innerHTML='<div class=hd><div class=q></div><button class=x type=button>remove</button></div><div class=st>queued</div>';
+  d.querySelector('.q').textContent=c.where;
+  d.querySelector('.x').addEventListener('click',function(){del(d)});
+  var st=d.querySelector('.st');
+  c.said.forEach(function(t){var k=document.createElement('div');k.className='t';k.textContent=t;d.insertBefore(k,st)});
+  var w=document.createElement('div');w.innerHTML=c.reply;
+  var rp=w.firstElementChild,n=rp?parseInt(rp.dataset.high,10):0;
+  while(rp&&rp.firstChild){var x=rp.firstChild;d.insertBefore(x,st);if(x.nodeType==1){mathify(x);htmx.process(x)}}
+  b.parentNode.insertBefore(d,b.nextSibling);
+  if(n)reply(d);
+  return {d:d,n:n};
+}
 // Enter sends (into the running turn, at its next tool call); Shift-Enter sends for a turn
 // of its own, after the running one; Alt-Enter is a new line
 document.addEventListener('keydown',function(e){
@@ -186,6 +304,10 @@ document.addEventListener('keydown',function(e){
 // A quote therefore comes off a clone whose rendered math is put back as its own TeX source.
 function quoted(b){
   var c=b.cloneNode(true);
+  // a formula not rendered yet is still its own TeX source
+  Array.prototype.forEach.call(c.querySelectorAll('span[data-math-style]:not([data-r])'),function(k){
+    k.parentNode.replaceChild(document.createTextNode('$'+k.textContent+'$'),k);
+  });
   Array.prototype.forEach.call(c.querySelectorAll('.katex'),function(k){
     var a=k.querySelector('annotation');
     k.parentNode.replaceChild(document.createTextNode(a?'$'+a.textContent+'$':''),k);
@@ -231,7 +353,11 @@ function say(b,where,id,note,line){
 }
 // A card's own remove: a sent one only has to leave the page, not be unsent — the answer it
 // may already carry stays exactly where `facet answer` put it.
-function del(d){if(d===RCARD)RCARD=null;if(RT){clearTimeout(RT);RT=null}d.remove()}
+function del(d){
+  if(d===RCARD)RCARD=null;if(RT){clearTimeout(RT);RT=null}
+  if(d.classList.contains('done'))
+    fetch(TOK+'/x/hide',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+d.dataset.id});
+  d.remove()}
 // The one POST every card's textarea sends through, first message or a later reply alike: the
 // id travels with it every time, so the whole thread stays one card no matter how it grows.
 function send(d,where,said,after){
@@ -252,12 +378,14 @@ function send(d,where,said,after){
 // what was said; a reply box then opens so answering back stays inside the same card. The
 // newest card is the one being watched — an older one keeps what it already has.
 var RCARD=null,RCOUNT=0,RT=null;
-function listen(d){RCARD=d;RCOUNT=0;wait()}
-function wait(){if(!RT&&RCARD)RT=setTimeout(poll,2500)}
+function listen(d,n){RCARD=d;RCOUNT=n||0;wait()}
+function wait(){if(!RT&&RCARD&&!document.hidden)RT=setTimeout(poll,0)}
+function later(){setTimeout(wait,5000)}
 function poll(){
   RT=null;if(!RCARD)return;
   var d=RCARD;
-  fetch(TOK+'/f/reply?id='+d.dataset.id+'&since='+RCOUNT).then(function(r){return r.text()}).then(function(h){
+  // held by the server until the card has a new answer (or ~25s): no poll every few seconds
+  fetch(TOK+'/f/reply?wait=1&id='+d.dataset.id+'&since='+RCOUNT).then(function(r){return r.text()}).then(function(h){
     var w=document.createElement('div');w.innerHTML=h;
     var rp=w.firstElementChild;
     if(rp&&rp.children.length){
@@ -269,7 +397,7 @@ function poll(){
       reply(d);
     }
     wait();
-  },wait);
+  },later);
 }
 // Once a card has an answer in it, a further reply goes out the same way the comment did,
 // still carrying the same id, so the thread stays attached to it.
@@ -312,7 +440,6 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
     nav.push_str(&item("/m/", "notes", "notes"));
     nav.push_str(&item("/d/", "comments", "diag"));
     nav.push_str(&item("/tree", "memory", "tree"));
-    if !cfg.vault_phone().is_empty() { nav.push_str(&format!("<a href=\"{}\">vault</a>", cfg.vault_phone())); }
     if !cfg.terminal().is_empty() { nav.push_str(&format!("<a href=\"{}\">term</a>", cfg.terminal())); }
     let n = diag::all(cfg).len();
     let model = if compose {
@@ -363,18 +490,27 @@ fn msg_html(cfg: &Cfg, m: &log::Msg) -> String {
     }
 }
 
-/// The chat fragment: new messages, then a fresh poller carrying the new cursor. The cursor
-/// lives in the DOM; there is no client-side state to get out of step.
+/// The chat fragment: new messages, then the `#tail` marker carrying the new cursor (and whether
+/// the engine is up). The cursor lives in the DOM; there is no client-side state to get out of
+/// step. With `wait` the request holds until the chat has something new, or `LONG` is up: the
+/// page asks again at once, so a message shows as it lands without a poll every few seconds.
 /// Only the chat venue is shown (`Msg::in_chat`): the user's chat messages and the agent's
 /// `send_chat`s. The rest of the stream (plain talk, steps, card traffic) is the memory's, and
 /// the tree view (/tree) is where to read it.
-fn log_fragment(cfg: &Cfg, since: i64) -> String {
-    let msgs = log::since(cfg, since);
-    let high = msgs.last().map(|m| m.i).unwrap_or(since);
+fn log_fragment(cfg: &Cfg, since: i64, wait: bool) -> String {
+    let t0 = Instant::now();
+    let mut cur = since;
+    let (msgs, high) = loop {
+        let msgs = log::since(cfg, cur);
+        let high = msgs.last().map(|m| m.i).unwrap_or(cur);
+        // a step or a card comment only moves the cursor: it is not worth waking the page for
+        if !wait || msgs.iter().any(|m| m.in_chat()) || t0.elapsed() >= LONG { break (msgs, high) }
+        cur = high;
+        std::thread::sleep(Duration::from_millis(250));
+    };
     let mut out: String = msgs.iter().filter(|m| m.in_chat()).map(|m| msg_html(cfg, m)).collect();
-    out.push_str(&format!(
-        "<div id=tail hx-get=\"{}/f/log?since={}\" hx-trigger=\"load delay:2s\" hx-swap=outerHTML></div>",
-        cfg.token_path(), high));
+    out.push_str(&format!("<div id=tail data-high=\"{}\" data-up={} hidden></div>",
+        high, if tell::healthy(cfg) { 1 } else { 0 }));
     out
 }
 
@@ -405,7 +541,7 @@ const PAGE: usize = 40;
 /// Older chat messages: the PAGE before `before`, and a sentinel that fetches the PAGE before
 /// those when it scrolls into view, if there are any.
 fn older_fragment(cfg: &Cfg, before: i64) -> String {
-    let all: Vec<log::Msg> = log::since(cfg, -1).into_iter().filter(|m| m.in_chat() && m.i < before).collect();
+    let all: Vec<log::Msg> = log::since_by(cfg, -1, |m| m.in_chat() && m.i < before);
     let from = all.len().saturating_sub(PAGE);
     let mut out = older_sentinel(cfg, &all[from..], from > 0);
     out.push_str(&all[from..].iter().map(|m| msg_html(cfg, m)).collect::<String>());
@@ -421,11 +557,13 @@ fn older_sentinel(cfg: &Cfg, shown: &[log::Msg], more: bool) -> String {
 
 fn chat_page(cfg: &Cfg) -> String {
     // the last PAGE messages of the chat venue, not of the stream; earlier ones load on scroll
-    let all: Vec<log::Msg> = log::since(cfg, -1).into_iter().filter(|m| m.in_chat()).collect();
+    let all: Vec<log::Msg> = log::since_by(cfg, -1, |m| m.in_chat());
     let k = all.len().saturating_sub(PAGE);
     let since = all.get(k).map(|m| m.i - 1).unwrap_or(-1);
-    page(cfg, "Facet", "chat", &format!("<div id=log>{}{}</div>",
-        older_sentinel(cfg, &all[k..], k > 0), log_fragment(cfg, since)), true)
+    page(cfg, "Facet", "chat", &format!("<p id=down class=at style=\"color:var(--err)\"{}>the engine is not running: \
+        nothing will answer until it is restarted</p><div id=log>{}{}</div>",
+        if tell::healthy(cfg) { " hidden" } else { "" },
+        older_sentinel(cfg, &all[k..], k > 0), log_fragment(cfg, since, false)), true)
 }
 
 /// A diagnostic as a card: the message, the explanation with real math, and the three things
@@ -518,17 +656,70 @@ fn note_page(cfg: &Cfg, name: &str, h: &str) -> Response<std::io::Cursor<Vec<u8>
             &format!("<h1>no such note</h1><p class=at>{} is not in {}</p>",
                 md::esc(name), md::esc(&cfg.vault().to_string_lossy())), false), 404);
     };
-    let body = if h.is_empty() { note_html(cfg, &d) } else { section_html(cfg, &d, h) };
-    html(page(cfg, &d.title, "notes",
-        &format!("<h1>{}</h1>{}", md::esc(&d.title), body), false), 200)
+    html(page(cfg, &d.title, "notes", &note_fragment(cfg, &d, name, h), false), 200)
 }
 
-fn doc_version(cfg: &Cfg, d: &doc::Doc) -> u64 { d.mtime.max(doc::mtime(&diag::file(cfg))) }
+
+fn mtime_us(p: &Path) -> u64 {
+    std::fs::metadata(p).ok().and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_micros() as u64).unwrap_or(0)
+}
+
+/// Every file a page is made of: the note, and each note it embeds, however deep (the embeds
+/// of an embed count too).
+fn doc_files(cfg: &Cfg, d: &doc::Doc) -> Vec<PathBuf> {
+    let mut seen = vec![d.path.clone()];
+    let mut todo = vec![d.text.clone()];
+    while let Some(t) = todo.pop() {
+        for l in t.lines() {
+            let Some(e) = doc::embed(l) else { continue };
+            let Some(p) = doc::find(cfg, &e.note) else { continue };
+            if seen.contains(&p) { continue }
+            if let Ok(tx) = std::fs::read_to_string(&p) { todo.push(tx) }
+            seen.push(p);
+        }
+    }
+    seen
+}
+
+/// Changes when anything on the page does: the note, a note it embeds, or a comment on it.
+fn doc_version(cfg: &Cfg, d: &doc::Doc) -> u64 {
+    doc_files(cfg, d).iter().map(|p| mtime_us(p)).chain(std::iter::once(mtime_us(&diag::file(cfg)))).max().unwrap_or(0)
+}
+
+/// A page that keeps itself current: `live` is the route that answers for it, `v` the version
+/// the markup was made from. The page asks `live?v=..&wait=1`, which holds until the version
+/// differs (then answers with the new markup) or `LONG` is up (204, ask again).
+fn live_wrap(live: &str, v: u64, inner: String) -> String {
+    format!("<div id=docwrap data-live=\"{}\" data-v=\"{}\">{}</div>", md::esc(live), v, inner)
+}
 
 fn doc_fragment(cfg: &Cfg, d: &doc::Doc) -> String {
-    format!("<div id=docwrap><h1>{}</h1>{}<div hx-get=\"{}/f/doc/{}?v={}\" \
-        hx-trigger=\"every 4s\" hx-target=\"#docwrap\" hx-swap=outerHTML style=display:none></div></div>",
-        md::esc(&d.title), note_html(cfg, d), cfg.token_path(), md::urlenc(&d.slug), doc_version(cfg, d))
+    let v = doc_version(cfg, d);
+    live_wrap(&format!("{}/f/doc/{}", cfg.token_path(), md::urlenc(&d.slug)), v,
+        format!("<h1>{}</h1>{}", md::esc(&d.title), note_html(cfg, d)))
+}
+
+fn note_fragment(cfg: &Cfg, d: &doc::Doc, name: &str, h: &str) -> String {
+    let v = doc_version(cfg, d);
+    let body = if h.is_empty() { note_html(cfg, d) } else { section_html(cfg, d, h) };
+    let live = format!("{}/f/note/{}{}", cfg.token_path(), md::urlenc(name),
+        if h.is_empty() { String::new() } else { format!("?h={}", md::urlenc(h)) });
+    live_wrap(&live, v, format!("<h1>{}</h1>{}", md::esc(&d.title), body))
+}
+
+/// The answer to a live page's question: the new markup if its version moved on, else nothing
+/// (204) once `LONG` has passed, or at once when not asked to wait.
+fn live_doc(cfg: &Cfg, get: impl Fn() -> Option<doc::Doc>, v: i64, wait: bool,
+            render: impl Fn(&doc::Doc) -> String) -> Response<std::io::Cursor<Vec<u8>>> {
+    let t0 = Instant::now();
+    loop {
+        let Some(d) = get() else { return html(String::new(), 204) };
+        if doc_version(cfg, &d) as i64 != v { return html(render(&d), 200) }
+        if !wait || t0.elapsed() >= LONG { return html(String::new(), 204) }
+        std::thread::sleep(Duration::from_millis(1500));
+    }
 }
 
 fn diag_page(cfg: &Cfg) -> String {
@@ -567,7 +758,6 @@ fn home(cfg: &Cfg) -> String {
         (format!("{}/d/", t), "Comments", format!("{} open", comments)),
     ];
     if !cfg.terminal().is_empty() { rows.push((cfg.terminal(), "Terminal", "the chat in a terminal (facet chat)".into())); }
-    if !cfg.vault_phone().is_empty() { rows.push((cfg.vault_phone(), "Vault", "notes viewer and editor".into())); }
     if let Some(u) = cfg.opt("telegram.username") { rows.push((format!("https://t.me/{}", u), "Telegram", format!("@{} · /ping, /last, /help", u))); }
     // No cards, despite the class name: a list of names, each with its line of state under it.
     let mut b = String::from("<style>.home a.card{display:block;padding:.8rem 0;border:0;color:inherit}\
@@ -603,11 +793,79 @@ pub fn serve(cfg: Cfg) {
     let server = Server::http(&addr).unwrap_or_else(|e| { eprintln!("bind {}: {}", addr, e); std::process::exit(1) });
     println!("facet on {} ({})", cfg.url("/"), addr);
     crate::tg::spawn(&cfg);
+    // A thread to a request: a page waiting for news (`?wait=1`) holds its thread for up to
+    // `LONG`, and nothing else should queue behind it. A panic in a handler ends its own
+    // connection and nothing more.
     for mut rq in server.incoming_requests() {
-        let cfg = Cfg::load();
-        let res = route(&cfg, &mut rq);
-        let _ = rq.respond(res);
+        std::thread::spawn(move || {
+            let cfg = Cfg::load();
+            let res = route(&cfg, &mut rq);
+            let _ = rq.respond(res);
+        });
     }
+}
+
+// ---- the memory tree, folded once per change ---------------------------------------------
+
+struct Tree { s: crate::optchat::store::Store, v: crate::optchat::view::View, page: Mutex<Option<String>> }
+
+/// The store as it is now, folded into a view, shared by every request until a file under
+/// `chat/` grows or changes. What changes it is the signature of those files (name, size,
+/// mtime) - a `stat` each, not a parse of the whole store.
+fn tree(cfg: &Cfg) -> Arc<Tree> {
+    static C: OnceLock<Mutex<Option<(String, Arc<Tree>)>>> = OnceLock::new();
+    let mut sig = format!("{}|", cfg.store().display());
+    for sub in ["chat/main", "chat/tree"] {
+        let mut fs: Vec<_> = std::fs::read_dir(cfg.store().join(sub)).into_iter().flatten().flatten().collect();
+        fs.sort_by_key(|e| e.file_name());
+        for e in fs {
+            let m = e.metadata().ok();
+            sig.push_str(&format!("{:?}:{}:{};", e.file_name(), m.as_ref().map(|m| m.len()).unwrap_or(0),
+                m.map(|m| mtime_us_meta(&m)).unwrap_or(0)));
+        }
+    }
+    let mut g = C.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((k, t)) = g.as_ref() { if k == &sig { return t.clone() } }
+    let s = crate::optchat::store::Store::open(&cfg.store());
+    let v = crate::optchat::view::View::fold(&s, crate::optchat::VIEW);
+    let t = Arc::new(Tree { s, v, page: Mutex::new(None) });
+    *g = Some((sig, t.clone()));
+    t
+}
+fn mtime_us_meta(m: &std::fs::Metadata) -> u64 {
+    m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_micros() as u64).unwrap_or(0)
+}
+
+/// Every card of these notes still on the page: who it was about, what was said (from the log,
+/// where the message already is), and the answers it has - the same markup a live card shows.
+fn cards_json(cfg: &Cfg, notes: &[String]) -> String {
+    let sd = crate::optchat::engine::state_dir(&crate::optchat::engine::dir());
+    let all = cards::all(&sd);
+    let msgs = log::since_by(cfg, -1, |m| m.kind == "user" && cards::from_card(&m.text).is_some());
+    let mut out: Vec<(i64, serde_json::Value)> = Vec::new();
+    for (id, c) in all.as_object().into_iter().flatten() {
+        if c["hidden"] == true || !notes.iter().any(|n| Some(n.as_str()) == c["note"].as_str()) { continue }
+        let mine: Vec<&log::Msg> = msgs.iter().filter(|m| cards::from_card(&m.text) == Some(id.as_str())).collect();
+        let Some(first) = mine.first() else { continue };
+        let body = |m: &log::Msg| -> (String, String) {
+            let t = m.text.find("[end prior context]\n\n").map(|k| &m.text[k + 21..]).unwrap_or(&m.text).trim_start();
+            let (w, r) = t.split_once('\n').unwrap_or((t, ""));
+            (w.to_string(), r.trim().to_string())
+        };
+        out.push((first.i, serde_json::json!({
+            "id": id, "note": c["note"], "line": c["line"], "where": body(first).0,
+            "said": mine.iter().map(|m| body(m).1).collect::<Vec<_>>(),
+            "reply": reply_fragment(cfg, id, 0),
+        })));
+    }
+    out.sort_by_key(|(i, _)| *i);
+    serde_json::Value::Array(out.into_iter().map(|(_, v)| v).collect()).to_string()
+}
+
+/// A page for something that is not there, in the same dark look as everything else.
+fn gone(cfg: &Cfg, what: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    html(page(cfg, "Not found", "", &format!("<h1>Not found</h1><p class=at>{}</p>", md::esc(what)), false), 404)
 }
 
 fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -619,7 +877,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
     // WebSocket upgrade can decline to carry.
     let tok = cfg.token();
     if tok.is_empty() || segs.first().map(|s| s != &tok).unwrap_or(true) {
-        return html("<h1>404</h1>".into(), 404);
+        return html("<!DOCTYPE html><meta charset=utf-8><body style=\"background:#15161a;color:#75767a;font:14px monospace;padding:2rem\">not found</body>".into(), 404);
     }
     let rest: Vec<&str> = segs[1..].iter().map(|s| s.as_str()).collect();
     let qnum = |k: &str| -> i64 {
@@ -631,6 +889,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
             .map(md::urldec).unwrap_or_default()
     };
     let post = rq.method() == &tiny_http::Method::Post;
+    let _posting = if post { Some(POSTING.lock().unwrap_or_else(|e| e.into_inner())) } else { None };
     let mut body = String::new();
     if post { let _ = rq.as_reader().read_to_string(&mut body); }
     let f = form(&body);
@@ -641,33 +900,48 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         ["chat"] => html(chat_page(cfg), 200),
 
         ["f", "older"] => html(older_fragment(cfg, qnum("before")), 200),
-        ["f", "log"] => html(log_fragment(cfg, qnum("since")), 200),
+        ["f", "log"] => html(log_fragment(cfg, qnum("since"), qnum("wait") > 0), 200),
 
         // the answers addressed to one card, for it to show them where it was sent
-        ["f", "reply"] => html(reply_fragment(cfg, &qstr("id"), qnum("since").max(0) as usize), 200),
+        ["f", "reply"] => {
+            // with `wait`, held until the card has more answers than the page has shown
+            let (id, seen) = (qstr("id"), qnum("since").max(0) as usize);
+            let t0 = Instant::now();
+            let sd = crate::optchat::engine::state_dir(&crate::optchat::engine::dir());
+            while qnum("wait") > 0 && t0.elapsed() < LONG
+                && cards::get(&sd, &id).map(|c| c["answers"].as_array().map(|a| a.len()).unwrap_or(0)).unwrap_or(0) <= seen {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            html(reply_fragment(cfg, &id, seen), 200)
+        }
+
+        // the cards of the notes on a page, so a reload (or a refresh) puts them back
+        ["f", "cards"] => {
+            let notes: Vec<String> = serde_json::from_str(&qstr("notes")).unwrap_or_default();
+            html(cards_json(cfg, &notes), 200)
+        }
 
         // the memory tree (folded from the files: the engine's view is the same fold), the
         // scaffold down to the view-line frontier only - a stub past that is `/f/node`'s to fetch
         ["tree"] => {
-            let s = crate::optchat::store::Store::open(&cfg.store());
-            let v = crate::optchat::view::View::fold(&s, crate::optchat::VIEW);
-            html(crate::optchat::browse::web(&s, &v, crate::optchat::VIEW, &cfg.token_path()), 200)
+            let t = tree(cfg);
+            let mut pg = t.page.lock().unwrap_or_else(|e| e.into_inner());
+            let body = pg.get_or_insert_with(|| crate::optchat::browse::web(&t.s, &t.v, crate::optchat::VIEW, &cfg.token_path())).clone();
+            html(body, 200)
         }
 
         // a stub's first open: the immediate children of (l, i), themselves stubbed one level
         // further wherever they still have halves of their own
         ["f", "node"] => {
             let (l, i) = (qnum("l").max(0) as usize, qnum("i").max(0) as usize);
-            let s = crate::optchat::store::Store::open(&cfg.store());
-            let v = crate::optchat::view::View::fold(&s, crate::optchat::VIEW);
-            html(crate::optchat::browse::node(&s, &v, l, i), 200)
+            let t = tree(cfg);
+            html(crate::optchat::browse::node(&t.s, &t.v, l, i), 200)
         }
 
         // the memory tree's own search: past what the page ever loaded, since it was never
         // all shipped up front to begin with
         ["f", "find"] => {
-            let s = crate::optchat::store::Store::open(&cfg.store());
-            html(crate::optchat::browse::find(&s, &qstr("q")), 200)
+            html(crate::optchat::browse::find(&tree(cfg).s, &qstr("q")), 200)
         }
 
         ["m"] => html(page(cfg, "Notes", "notes", &format!("<div id=docwrap>{}</div>",
@@ -676,18 +950,17 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         ["m", slug] => match doc::get(cfg, slug) {
             Some(d) => { let t = d.title.clone();
                          html(page(cfg, &t, "notes", &doc_fragment(cfg, &d), false), 200) }
-            None => html("<h1>no such note</h1>".into(), 404),
+            None => gone(cfg, &format!("no published note called {}", slug)),
         },
 
         // a vault note by its own name, which is what a wikilink carries; `?h=` is one section
         ["n", name] => note_page(cfg, name, &qstr("h")),
 
-        ["f", "doc", slug] => match doc::get(cfg, slug) {
-            // unchanged -> 204, and HTMX leaves the DOM and your scroll position alone
-            Some(d) if doc_version(cfg, &d) as i64 == qnum("v") => html(String::new(), 204),
-            Some(d) => html(doc_fragment(cfg, &d), 200),
-            None => html(String::new(), 204),
-        },
+        // unchanged -> 204 (after holding, when asked to wait): the page keeps its DOM and its place
+        ["f", "doc", slug] => live_doc(cfg, || doc::get(cfg, slug), qnum("v"), qnum("wait") > 0,
+            |d| doc_fragment(cfg, d)),
+        ["f", "note", name] => { let h = qstr("h");
+            live_doc(cfg, || doc::note(cfg, name), qnum("v"), qnum("wait") > 0, |d| note_fragment(cfg, d, name, &h)) }
 
         ["d"] => html(diag_page(cfg), 200),
 
@@ -708,6 +981,12 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
                 Ok(_) => html("sent".into(), 200),
                 Err(e) => html(format!("not sent: {}", md::esc(&e)), 200),
             }
+        }
+
+        // taking a card off the page for good (its answers stay where `facet answer` put them)
+        ["x", "hide"] if post => {
+            cards::hide(&crate::optchat::engine::state_dir(&crate::optchat::engine::dir()), &field(&f, "id"));
+            html(String::new(), 204)
         }
 
         ["x", "diag"] if post => {
@@ -733,6 +1012,31 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
             .with_header(Header::from_bytes(&b"Content-Type"[..], &b"text/javascript"[..]).unwrap())
             .with_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=86400"[..]).unwrap()),
 
-        _ => html("<h1>404</h1>".into(), 404),
+        _ => gone(cfg, &format!("nothing at /{}", rest.join("/"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_page_changes_version_when_a_note_it_embeds_does() {
+        let d = std::env::temp_dir().join(format!("facet-docver-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("a.md"), "---\nfacet: t\n---\ntext\n\n![[b]]\n").unwrap();
+        std::fs::write(d.join("b.md"), "lemma\n\n![[c]]\n").unwrap();
+        std::fs::write(d.join("c.md"), "deep\n").unwrap();
+        let cfg = Cfg(serde_json::json!({"vault": d.to_string_lossy(), "store": d.join("s").to_string_lossy()}));
+        doc::forget();
+        let page = doc::get(&cfg, "t").unwrap();
+        let files: Vec<_> = doc_files(&cfg, &page).iter().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+        assert_eq!(files, ["a.md", "b.md", "c.md"], "the embeds of an embed count");
+        let v0 = doc_version(&cfg, &page);
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(d.join("c.md"), "deeper\n").unwrap();
+        assert!(doc_version(&cfg, &page) > v0);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

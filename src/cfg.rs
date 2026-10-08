@@ -64,7 +64,6 @@ impl Cfg {
         let b = if b.is_empty() { format!("http://{}:{}", self.host(), self.port()) } else { b };
         format!("{}/{}{}", b, self.token(), tail)
     }
-    pub fn vault_phone(&self) -> String { self.str("vault_phone", "").trim_end_matches('/').to_string() }
     pub fn terminal(&self) -> String { self.str("terminal_url", "").trim_end_matches('/').to_string() }
 }
 

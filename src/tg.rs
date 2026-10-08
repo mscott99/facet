@@ -260,7 +260,7 @@ pub fn command(cfg: &Cfg, text: &str) -> (String, bool) {
                    else { life(cfg, &["mail", "search", &rest.join(" "), "-n", "8"]) }, true),
         "last" => {
             let k = n.unwrap_or(3).clamp(1, 20) as usize;
-            let prose: Vec<log::Msg> = log::since(cfg, -1).into_iter().filter(|m| m.is_prose()).collect();
+            let prose: Vec<log::Msg> = log::since_by(cfg, -1, |m| m.is_prose());
             let msgs: Vec<String> = prose[prose.len().saturating_sub(k)..].iter()
                 .map(|m| format!("[{} {}] {}", m.i, m.kind, m.text.chars().take(600).collect::<String>()))
                 .collect();
