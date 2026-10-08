@@ -1,10 +1,11 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 # ttyd on the tailnet: `facet chat` in a browser terminal, from any logged-in device.
 # No HTTP basic auth: iOS/Safari does not send the Authorization header on the WebSocket upgrade,
 # which made the terminal connect-then-die. The secret is the URL path instead (token file below),
 # and ttyd listens only on the Tailscale IP, so only tailnet devices can reach it at all.
 PORT=${OPTCHAT_WEB_PORT:-8731}
-TOKEN=$(cat "$HOME/.config/optchat-web/token")
+TOKEN=$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.config/facet/facet.json")))["token"])')
+if [ -z "$TOKEN" ]; then echo "facet-term: no token in ~/.config/facet/facet.json" >&2; exit 1; fi
 TTYD=$(command -v ttyd)
 if [ -z "$TTYD" ]; then
   echo "facet-term: ttyd not found on PATH (brew install ttyd / apt install ttyd)" >&2

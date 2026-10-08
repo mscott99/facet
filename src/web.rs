@@ -4,7 +4,6 @@
 // never by a regex.
 use crate::cfg::Cfg;
 use crate::{cards, diag, doc, log, md, tell};
-use std::io::Read;
 use tiny_http::{Header, Request, Response, Server};
 
 const SHELL: &str = r#"<!DOCTYPE html><html><head><meta charset=utf-8>
@@ -417,7 +416,7 @@ fn note_html(cfg: &Cfg, d: &doc::Doc) -> String {
     }
     let mut out = String::new();
     let (mut start, mut fence, mut math) = (skip, false, false);
-    let mut emit = |out: &mut String, a: usize, b: usize| {
+    let emit = |out: &mut String, a: usize, b: usize| {
         if a >= b { return }
         let (text, srcs) = doc::assemble(cfg, &home, &lines[a..b], a);
         out.push_str(&md::render_at(&text, &base, &srcs));

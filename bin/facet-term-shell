@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 # The shell each web-terminal client gets: the chat itself. `facet chat` is a client of the
 # engine's socket, so any number of them (laptop, phone) can be attached at once; closing one
 # stops nothing.

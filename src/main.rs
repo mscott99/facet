@@ -33,7 +33,9 @@ fn sh(args: &[&str]) -> String {
 /// Dates are the one thing not worth a dependency: `date` knows the local zone.
 pub fn when(epoch: u64) -> String {
     if epoch == 0 { return "—".into() }
-    sh(&["/bin/date", "-r", &epoch.to_string(), "+%d %b %H:%M"])
+    // GNU date takes `-d @epoch`; BSD (macOS) does not, and wants `-r epoch`.
+    let gnu = sh(&["/bin/date", "-d", &format!("@{}", epoch), "+%d %b %H:%M"]);
+    if !gnu.is_empty() { gnu } else { sh(&["/bin/date", "-r", &epoch.to_string(), "+%d %b %H:%M"]) }
 }
 pub fn today() -> String { sh(&["/bin/date", "+%Y-%m-%d"]) }
 pub fn stamp() -> String { sh(&["/bin/date", "+%Y%m%d-%H%M%S"]) }

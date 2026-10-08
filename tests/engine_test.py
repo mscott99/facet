@@ -269,13 +269,16 @@ try:
     check(t["agents"] == 1 and t["agent_reqs"] == 2 and t["agent_eq"] > 0 and t["agent_bytes"] == len(work[0]["text"]),
           "the turn record totals what its subagents cost")
     av = [v.get("argv", []) for v in fake()]
-    defs = [json.loads(a[a.index("--agents") + 1]) for a in av if "--agents" in a]
+    # --agents is a path: the view is too big for one argv string on Linux (128 KiB)
+    paths = [a[a.index("--agents") + 1] for a in av if "--agents" in a]
+    check(paths and all(len(x) < 1000 and os.path.isfile(x) for x in paths) and all(len(x) < 100000 for a in av for x in a),
+          "every call names an agents file, and no argument carries the view")
+    defs = [json.load(open(paths[-1]))] if paths else []
     check(defs and all(set(d) == {"general-purpose", "Explore"} for d in defs)
           and all("<chat>" in a["prompt"] and a["model"] for d in defs for a in d.values()),
           "every call defines the subagents, and each definition carries the view")
     p = defs[-1]["general-purpose"]["prompt"] if defs else ""
-    grew = len(p) > len(defs[0]["general-purpose"]["prompt"]) if len(defs) > 1 else False
-    check(p.rstrip().endswith("</chat>") and re.search(r"\n\d+\+\d+\|", p) and grew,
+    check(p.rstrip().endswith("</chat>") and re.search(r"\n\d+\+\d+\|", p),
           "the view in a definition is the whole current one, lines and all")
     check(defs and all({"mcp__optchat__zoom", "mcp__optchat__date"} <= set(a["tools"])
                        for d in defs for a in d.values()),

@@ -9,7 +9,9 @@ the page with:  curl -sX POST --data-binary @- http://127.0.0.1:8765/reply
 import json, os, subprocess, sys
 
 FACET = os.path.expanduser("~/.local/bin/facet")
-VP = "/Users/you/Prog/vault-phone"
+VP = os.environ.get("VAULT_PHONE_DIR", "")
+if not os.path.isdir(VP):
+    sys.exit("facet-vault-bridge: set VAULT_PHONE_DIR to the vault-phone checkout (the viewer is retired)")
 HINT = "(answer the page: curl -sX POST --data-binary @- http://127.0.0.1:8765/reply)"
 
 p = subprocess.Popen([VP + "/.venv/bin/python", "-u", VP + "/server.py",

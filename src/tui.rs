@@ -245,7 +245,10 @@ fn tree(dir: &std::path::Path) -> Result<String, String> {
     let v = View::fold(&s, VIEW);
     let out = engine::state_dir(dir).join("memory.html");
     std::fs::write(&out, browse::html(&s, &v, VIEW, None)).map_err(|e| e.to_string())?;
-    let _ = std::process::Command::new("/usr/bin/open").arg(&out).status();
+    // /usr/bin/open on macOS, xdg-open elsewhere; if neither exists, nothing happens.
+    let opener = if std::path::Path::new("/usr/bin/open").exists() { "/usr/bin/open" } else { "xdg-open" };
+    let _ = std::process::Command::new(opener).arg(&out)
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
     let web = crate::cfg::Cfg::load().url("/tree");
     Ok(format!("{}· opened {} · on the phone: {}{}", DIM, out.display(), web, OFF))
 }

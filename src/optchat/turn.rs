@@ -327,7 +327,11 @@ fn args(e: &Engine, view: &str) -> Vec<String> {
     // lot and write one short report. The view in there costs this call nothing: an agent
     // definition's prompt never enters the master's own request, so it cannot move the marks.
     if e.conf.tools.contains("Task") && !e.conf.agent_model.is_empty() {
-        a.extend(["--agents".into(), prompts::agents(&e.conf.name, &e.conf.agent_model, view)]);
+        // By file, not inline: the view alone can pass Linux's 128 KiB cap on one argv string.
+        let f = sd.join("agents.json");
+        let defs = prompts::agents(&e.conf.name, &e.conf.agent_model, view);
+        if std::fs::read_to_string(&f).ok().as_deref() != Some(defs.as_str()) { let _ = std::fs::write(&f, &defs); }
+        a.extend(["--agents".into(), f.to_string_lossy().into_owned()]);
     }
     if e.conf.safe_mode { a.push("--safe-mode".into()); }
     a
