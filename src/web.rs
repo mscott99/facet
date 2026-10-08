@@ -664,13 +664,13 @@ fn section_html(cfg: &Cfg, d: &doc::Doc, h: &str) -> String {
 
 /// Any note of the vault, read-only, on the same page as a published one. Wikilinks in docs,
 /// notes and messages all land here, so a name that is not in the vault must say so plainly.
-fn note_page(cfg: &Cfg, name: &str, h: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+fn note_page(cfg: &Cfg, name: &str, h: &str, inm: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     let Some(d) = doc::note(cfg, name) else {
         return html(page(cfg, "no such note", "notes",
             &format!("<h1>no such note</h1><p class=at>{} is not in {}</p>",
                 md::esc(name), md::esc(&cfg.vault().to_string_lossy())), false), 404);
     };
-    html(page(cfg, &d.title, "notes", &note_fragment(cfg, &d, name, h), false), 200)
+    html_tagged(page(cfg, &d.title, "notes", &note_fragment(cfg, &d, name, h), false), inm)
 }
 
 
@@ -792,6 +792,23 @@ fn html(body: String, code: u16) -> Response<std::io::Cursor<Vec<u8>>> {
         .with_header(Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap())
 }
 
+/// A page that is a pure function of what it shows: tagged by its own bytes, so a browser that
+/// already holds this exact page gets a 304 with no body. The page is still made every time -
+/// that is a few milliseconds - so nothing can go stale; only the transfer is saved. Never used
+/// for the chat, the log, or anything a POST just changed.
+fn html_tagged(body: String, inm: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut h);
+    let tag = format!("\"{:x}-{:x}\"", h.finish(), body.len());
+    let hdr = |k: &str, v: &str| Header::from_bytes(k.as_bytes(), v.as_bytes()).unwrap();
+    if inm.split(',').any(|t| t.trim() == tag) {
+        return Response::from_string(String::new()).with_status_code(304)
+            .with_header(hdr("ETag", &tag)).with_header(hdr("Cache-Control", "no-cache"));
+    }
+    html(body, 200).with_header(hdr("ETag", &tag)).with_header(hdr("Cache-Control", "no-cache"))
+}
+
 fn form(body: &str) -> Vec<(String, String)> {
     body.split('&').filter(|p| !p.is_empty()).map(|p| {
         let (k, v) = p.split_once('=').unwrap_or((p, ""));
@@ -902,6 +919,8 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         query.split('&').find_map(|p| p.strip_prefix(&format!("{}=", k)))
             .map(md::urldec).unwrap_or_default()
     };
+    let inm = rq.headers().iter().find(|h| h.field.equiv("If-None-Match"))
+        .map(|h| h.value.as_str().to_string()).unwrap_or_default();
     let post = rq.method() == &tiny_http::Method::Post;
     let _posting = if post { Some(POSTING.lock().unwrap_or_else(|e| e.into_inner())) } else { None };
     let mut body = String::new();
@@ -941,7 +960,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
             let t = tree(cfg);
             let mut pg = t.page.lock().unwrap_or_else(|e| e.into_inner());
             let body = pg.get_or_insert_with(|| crate::optchat::browse::web(&t.s, &t.v, crate::optchat::VIEW, &cfg.token_path())).clone();
-            html(body, 200)
+            html_tagged(body, &inm)
         }
 
         // a stub's first open: the immediate children of (l, i), themselves stubbed one level
@@ -949,7 +968,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         ["f", "node"] => {
             let (l, i) = (qnum("l").max(0) as usize, qnum("i").max(0) as usize);
             let t = tree(cfg);
-            html(crate::optchat::browse::node(&t.s, &t.v, l, i), 200)
+            html_tagged(crate::optchat::browse::node(&t.s, &t.v, l, i), &inm)
         }
 
         // the memory tree's own search: past what the page ever loaded, since it was never
@@ -963,12 +982,12 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
 
         ["m", slug] => match doc::get(cfg, slug) {
             Some(d) => { let t = d.title.clone();
-                         html(page(cfg, &t, "notes", &doc_fragment(cfg, &d), false), 200) }
+                         html_tagged(page(cfg, &t, "notes", &doc_fragment(cfg, &d), false), &inm) }
             None => gone(cfg, &format!("no published note called {}", slug)),
         },
 
         // a vault note by its own name, which is what a wikilink carries; `?h=` is one section
-        ["n", name] => note_page(cfg, name, &qstr("h")),
+        ["n", name] => note_page(cfg, name, &qstr("h"), &inm),
 
         // unchanged -> 204 (after holding, when asked to wait): the page keeps its DOM and its place
         ["f", "doc", slug] => live_doc(cfg, || doc::get(cfg, slug), qnum("v"), qnum("wait") > 0,
@@ -1022,9 +1041,15 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
             html(match r { Ok(m) => md::esc(&m), Err(e) => format!("no: {}", md::esc(&e)) }, 200)
         }
 
-        ["static", "htmx.js"] => Response::from_string(include_str!("static/htmx.min.js"))
-            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"text/javascript"[..]).unwrap())
-            .with_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=86400"[..]).unwrap()),
+        // the one bundled script: kept a week, and revalidated by tag after that
+        ["static", "htmx.js"] => {
+            let js = include_str!("static/htmx.min.js");
+            let tag = format!("\"htmx-{}\"", js.len());
+            let hdr = |k: &str, v: &str| Header::from_bytes(k.as_bytes(), v.as_bytes()).unwrap();
+            let r = if inm.split(',').any(|t| t.trim() == tag) { Response::from_string(String::new()).with_status_code(304) }
+                    else { Response::from_string(js).with_header(hdr("Content-Type", "text/javascript")) };
+            r.with_header(hdr("ETag", &tag)).with_header(hdr("Cache-Control", "max-age=604800"))
+        }
 
         _ => gone(cfg, &format!("nothing at /{}", rest.join("/"))),
     }
@@ -1033,6 +1058,15 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tagged_page_is_not_resent_to_a_browser_that_has_it() {
+        let first = html_tagged("<p>hi</p>".into(), "");
+        assert_eq!(first.status_code().0, 200);
+        let tag = first.headers().iter().find(|h| h.field.equiv("ETag")).unwrap().value.as_str().to_string();
+        assert_eq!(html_tagged("<p>hi</p>".into(), &tag).status_code().0, 304);
+        assert_eq!(html_tagged("<p>changed</p>".into(), &tag).status_code().0, 200);
+    }
 
     #[test]
     fn a_page_changes_version_when_a_note_it_embeds_does() {
