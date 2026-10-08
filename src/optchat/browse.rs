@@ -26,7 +26,7 @@ fn local(iso: &str) -> String {
         .unwrap_or_default()
 }
 
-struct B<'a> { s: &'a Store, view: HashSet<(usize, usize)>, t: usize, out: String }
+struct B<'a> { s: &'a Store, view: HashSet<(usize, usize)>, t: usize, out: String, lazy: bool }
 
 impl B<'_> {
     fn reach(&self, l: usize, i: usize) -> (usize, usize) { let id = i << l; (id, (1usize << l).min(self.t - id)) }
@@ -37,11 +37,13 @@ impl B<'_> {
     fn halves(&self, l: usize, i: usize) -> Vec<(usize, usize)> {
         [(l - 1, 2 * i), (l - 1, 2 * i + 1)].into_iter().filter(|&(l, i)| (i << l) < self.t).collect()
     }
+    // `data-l`/`data-i` ride on every node, lazy or not: the lazy page's fetches, and a search
+    // hit's jump to where it was found, both locate a node by exactly this pair.
     fn head(&mut self, l: usize, i: usize, cls: &str, text: &str, tail: &str, open: bool) {
         let (id, n) = self.reach(l, i);
         let when = self.when(id, n);
-        let _ = write!(self.out, "<details{} class=\"n {}\"><summary><code>{}+{}</code> <span class=m>{} · {}</span> <span class=t>{}</span></summary>",
-            if open { " open" } else { "" }, cls, id, n, esc(&when), tail, esc(&flat(text)));
+        let _ = write!(self.out, "<details{} class=\"n {}\" data-l=\"{}\" data-i=\"{}\"><summary><code>{}+{}</code> <span class=m>{} · {}</span> <span class=t>{}</span></summary>",
+            if open { " open" } else { "" }, cls, l, i, id, n, esc(&when), tail, esc(&flat(text)));
     }
     /// A node that has a summary (or is a view line): its line, then what it was made from.
     /// `top` marks a node with no summarized ancestor above it - the frontier a "collapse all"
@@ -60,11 +62,19 @@ impl B<'_> {
         let node = self.s.node(l, i).map(String::from);
         let (_, n) = self.reach(l, i);
         let text = node.clone().unwrap_or_else(|| PLACEHOLDER.into());
-        let tail = format!("{} · {} messages", size(text.len()), n);
-        self.head(l, i, &format!("{}{}", if node.is_some() { "sum" } else { "sum sc" }, top_cls), &text, &tail, open || node.is_none());
-        // Below a node that has its own summary, nothing further is top-level: its ancestor
-        // already covers it, so its halves (even if themselves built) are not the frontier.
-        for (a, b) in self.halves(l, i) { self.walk(a, b, false, false); }
+        // In lazy mode every node reached here (anything above a leaf) is where this render
+        // pass stops: its halves are left unwritten, fetched later by `/f/node` rather than
+        // shipped now. It always renders closed - there is nothing under it yet to show open.
+        let tail = format!("{} · {} messages{}", size(text.len()), n, if self.lazy { " · ···" } else { "" });
+        let cls = format!("{}{}{}", if node.is_some() { "sum" } else { "sum sc" }, top_cls, if self.lazy { " stub" } else { "" });
+        self.head(l, i, &cls, &text, &tail, (open || node.is_none()) && !self.lazy);
+        if self.lazy {
+            // children left for a fetch to bring in
+        } else {
+            // Below a node that has its own summary, nothing further is top-level: its ancestor
+            // already covers it, so its halves (even if themselves built) are not the frontier.
+            for (a, b) in self.halves(l, i) { self.walk(a, b, false, false); }
+        }
         self.out.push_str("</details>");
     }
     fn walk(&mut self, l: usize, i: usize, open: bool, top: bool) {
@@ -82,7 +92,7 @@ impl B<'_> {
 /// The page. `back` is a link shown at the top when served from the web route.
 pub fn html(s: &Store, v: &View, budget: usize, back: Option<&str>) -> String {
     let t = s.t();
-    let mut b = B { s, view: v.parts.iter().map(|p| (p.l, p.i)).collect(), t, out: String::new() };
+    let mut b = B { s, view: v.parts.iter().map(|p| (p.l, p.i)).collect(), t, out: String::new(), lazy: false };
     if t == 0 { b.out.push_str("<p class=s>empty</p>") } else {
         let mut top = 0;
         while (1usize << top) < t { top += 1; }
@@ -98,6 +108,96 @@ pub fn html(s: &Store, v: &View, budget: usize, back: Option<&str>) -> String {
 <div id=tree>{tree}</div>
 <script>{JS}</script>
 ", vl = v.parts.len(), vb = v.size(s), tree = b.out)
+}
+
+/// The web route's own tree: the scaffold down to the view-line frontier (the `top` nodes)
+/// and no further. Everything below a frontier node is a stub - `class=stub`, carrying its
+/// own `data-l`/`data-i` - left for `/f/node` to fetch the first time it is opened. Keeps
+/// `html` above untouched: `facet browse`'s standalone file still renders every message.
+pub fn web(s: &Store, v: &View, budget: usize, prefix: &str) -> String {
+    let t = s.t();
+    let mut b = B { s, view: v.parts.iter().map(|p| (p.l, p.i)).collect(), t, out: String::new(), lazy: true };
+    if t == 0 { b.out.push_str("<p class=s>empty</p>") } else {
+        let mut top = 0;
+        while (1usize << top) < t { top += 1; }
+        b.walk(top, 0, true, true);
+    }
+    let nodes: usize = s.levels.iter().map(|l| l.iter().filter(|x| x.is_some()).count()).sum();
+    let js = JS_WEB.replace("__BASE__", prefix).replace("__T__", &t.to_string());
+    format!("<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Memory</title><style>{CSS}{WEB_CSS}</style>
+<h1><a class=back href=\"{prefix}/\">← home</a> Memory</h1>
+<p class=s>{t} messages · {nodes} tree nodes · view {vl} lines, {vb} of {budget} bytes · loaded as you open it</p>
+<p class=s>one root; each entry opens into the two halves it is (or would be) summarized from, down to the messages; a line ending in <code>···</code> fetches its halves the first time it opens</p>
+<div class=bar><input id=q placeholder=\"search everything, loaded or not (Esc clears)\"><button id=x>expand loaded</button><button id=c>collapse</button><button id=n>newest</button></div>
+<div id=h></div>
+<div id=tree>{tree}</div>
+<script>{js}</script>
+", vl = v.parts.len(), vb = v.size(s), tree = b.out)
+}
+
+/// What a stub's first open fetches: `(l, i)`'s two halves, each stubbed one level further if
+/// it has halves of its own. No page chrome - this is spliced straight inside the stub's own
+/// `<details>`, reusing exactly the rendering `html`/`web` already do.
+pub fn node(s: &Store, v: &View, l: usize, i: usize) -> String {
+    let t = s.t();
+    let mut b = B { s, view: v.parts.iter().map(|p| (p.l, p.i)).collect(), t, out: String::new(), lazy: true };
+    let kids = b.halves(l, i);
+    for (a, bi) in kids { b.walk(a, bi, false, false); }
+    b.out
+}
+
+/// Server-side search: the client only ever has the frontier loaded, so a search has to reach
+/// past that into every message and every built summary, case-insensitively, char by char
+/// (byte offsets drift under `to_lowercase`, so matching stays off `char` vectors throughout).
+/// Capped at 200 hits; each carries the `(l, i)` a click on it hands to `reveal` in `JS_WEB`.
+fn ci_find(hay: &str, needle_lower: &[char]) -> Option<usize> {
+    if needle_lower.is_empty() { return None }
+    let hay_c: Vec<char> = hay.chars().collect();
+    if hay_c.len() < needle_lower.len() { return None }
+    'outer: for start in 0..=(hay_c.len() - needle_lower.len()) {
+        for (k, want) in needle_lower.iter().enumerate() {
+            let have = hay_c[start + k].to_lowercase().next().unwrap_or(hay_c[start + k]);
+            if have != *want { continue 'outer }
+        }
+        return Some(start);
+    }
+    None
+}
+fn snippet(text: &str, at: usize, qlen: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let start = at.saturating_sub(40);
+    let end = (at + qlen + 80).min(chars.len());
+    flat(&chars[start..end].iter().collect::<String>())
+}
+pub fn find(s: &Store, q: &str) -> String {
+    let q_lower: Vec<char> = q.trim().to_lowercase().chars().collect();
+    if q_lower.is_empty() { return String::new() }
+    let mut hits: Vec<(usize, usize, String, String, String)> = Vec::new();
+    for (i, m) in s.msgs.iter().enumerate() {
+        if hits.len() >= 200 { break }
+        if let Some(at) = ci_find(&m.text, &q_lower) {
+            hits.push((0, i, format!("{}+1", i), format!("{} · {}", local(&m.date), m.kind), snippet(&m.text, at, q_lower.len())));
+        }
+    }
+    'levels: for (l, lv) in s.levels.iter().enumerate() {
+        if l == 0 { continue }
+        for (i, slot) in lv.iter().enumerate() {
+            if hits.len() >= 200 { break 'levels }
+            let Some(text) = slot else { continue };
+            if let Some(at) = ci_find(text, &q_lower) {
+                let id = i << l;
+                let n = (1usize << l).min(s.t().saturating_sub(id));
+                hits.push((l, i, format!("{}+{}", id, n), "summary".into(), snippet(text, at, q_lower.len())));
+            }
+        }
+    }
+    if hits.is_empty() { return "<p class=s>no matches</p>".into() }
+    let mut out = String::from("<ul class=hits>");
+    for (l, i, addr, meta, snip) in hits {
+        let _ = write!(out, "<li data-l=\"{}\" data-i=\"{}\"><code>{}</code> <span class=m>{}</span> — {}</li>", l, i, addr, esc(&meta), esc(&snip));
+    }
+    out.push_str("</ul>");
+    out
 }
 
 // Dark and quiet, like the rest of the pages. This one is a dense data view, so it keeps a
@@ -150,6 +250,82 @@ const search=()=>{
 q.oninput=search;
 q.onkeydown=e=>{if(e.key==='Escape'){q.value='';search();}};";
 
+// The one addition over `CSS`: a results list for `/f/find`, and `#h` loosened from the
+// one-line match count it was for `html`'s client-side search into something a list fits in.
+const WEB_CSS: &str = "
+#h{white-space:normal;margin:.2rem 0 .6rem}
+ul.hits{list-style:none;margin:0;padding:0;font:12px var(--mono);max-height:18rem;overflow:auto;border:1px solid var(--line)}
+ul.hits li{padding:.3rem .5rem;cursor:pointer;border-bottom:1px solid var(--line)}
+ul.hits li:last-child{border-bottom:0}
+ul.hits li:hover{background:#ffffff08}
+ul.hits li>code{color:var(--acc)}
+ul.hits li>.m{color:var(--dim)}";
+
+// The web route's script: a stub fetches its own halves the first time it opens (`load`),
+// `reveal(l,i)` walks down to an arbitrary node fetching along the way (used by both `newest`
+// and a search hit), and search goes to `/f/find` since the page no longer has everything to
+// search client-side. `expand loaded` never fetches - see the comment at its handler - so it
+// can never turn into the same free-for-all `html`'s unrestricted `expand all` was.
+const JS_WEB: &str = "const $=s=>document.querySelectorAll(s),T='#tree details',BASE='__BASE__';
+const up=d=>{for(let p=d;p;p=p.parentElement)if(p.tagName==='DETAILS')p.open=true;};
+function wire(root){
+  root.querySelectorAll('.stub').forEach(function(d){
+    if(d.dataset.wired)return;d.dataset.wired='1';
+    d.addEventListener('toggle',function(){if(d.open)load(d)});
+  });
+}
+function load(d){
+  if(d.dataset.loading||d.dataset.loaded)return Promise.resolve();
+  d.dataset.loading='1';
+  return fetch(BASE+'/f/node?l='+d.dataset.l+'&i='+d.dataset.i).then(function(r){return r.text()}).then(function(h){
+    d.insertAdjacentHTML('beforeend',h);
+    d.dataset.loaded='1';delete d.dataset.loading;
+    wire(d);
+  });
+}
+wire(document);
+document.getElementById('x').onclick=function(){
+  $(T).forEach(function(d){if(d.classList.contains('stub')&&!d.dataset.loaded)return;d.open=true;});
+};
+document.getElementById('c').onclick=function(){
+  $(T).forEach(function(d){d.open=false});
+  $('.top').forEach(function(d){up(d.parentElement)});
+};
+function reveal(l,i){
+  return new Promise(function(res){
+    (function step(){
+      var el=document.querySelector('[data-l=\"'+l+'\"][data-i=\"'+i+'\"]');
+      if(el){up(el);el.open=true;el.scrollIntoView({block:'center'});el.classList.add('hit');
+        setTimeout(function(){el.classList.remove('hit')},2000);res(el);return;}
+      var ts=i<<l,te=ts+(1<<l),target=null;
+      $('.stub').forEach(function(d){
+        if(target)return;
+        var L=+d.dataset.l,I=+d.dataset.i,s=I<<L,e=s+(1<<L);
+        if(s<=ts&&te<=e)target=d;
+      });
+      if(!target){res(null);return;}
+      load(target).then(step);
+    })();
+  });
+}
+document.getElementById('n').onclick=function(){reveal(0,__T__-1)};
+var q=document.getElementById('q'),h=document.getElementById('h'),st=null;
+function bindHits(){
+  h.querySelectorAll('li').forEach(function(li){
+    li.addEventListener('click',function(){reveal(+li.dataset.l,+li.dataset.i)});
+  });
+}
+q.oninput=function(){
+  clearTimeout(st);var v=q.value.trim();
+  if(!v){h.innerHTML='';return;}
+  st=setTimeout(function(){
+    fetch(BASE+'/f/find?q='+encodeURIComponent(v)).then(function(r){return r.text()}).then(function(html){
+      h.innerHTML=html;bindHits();
+    });
+  },250);
+};
+q.onkeydown=function(e){if(e.key==='Escape'){q.value='';h.innerHTML='';}};";
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -168,5 +344,64 @@ mod tests {
         assert!(h.contains("<code>0+8</code>") || h.contains("<code>0+5</code>"), "one root");
         assert!(h.contains("class=\"n user last\"") || h.contains("class=\"n user last top\""));
         assert!(h.contains("pair one"));
+    }
+
+    /// `n` messages, all but the newest 64 summarized at every level (realistically stale,
+    /// built history), the recent tail left entirely unbuilt (fresh, not-yet-summarized) - so
+    /// the lazy page has both a real stub to test and a real unstubbed leaf to test against.
+    fn store(n: usize) -> crate::optchat::store::Store {
+        let d = std::env::temp_dir().join(format!("facet-browse-web-{}-{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut s = crate::optchat::store::Store::open(&d);
+        for i in 0..n {
+            s.msgs.push(crate::optchat::store::Msg { kind: "user".into(), text: format!("{:0>6}", i), date: String::new() });
+        }
+        let built = n - 64;
+        let t = s.t();
+        let mut l = 0;
+        while (1 << l) <= t {
+            for i in 0..(t >> l) { if (i << l) < built { s.set(l, i, "y".repeat(100)); } }
+            l += 1;
+        }
+        s
+    }
+
+    /// The lazy page stops at the frontier: it must be far smaller than the standalone one,
+    /// still balanced, carry stub markers, and still show the most recent (unstubbed) message.
+    #[test]
+    fn web_is_far_smaller_than_html_and_stays_balanced() {
+        let s = store(3000);
+        let v = crate::optchat::view::View::fold(&s, 20_000);
+        let full = super::html(&s, &v, 20_000, None);
+        let lazy = super::web(&s, &v, 20_000, "/tok");
+        assert!(lazy.len() * 20 < full.len(), "lazy {} should be far below full {}", lazy.len(), full.len());
+        assert_eq!(lazy.matches("<details").count(), lazy.matches("</details>").count());
+        assert!(lazy.contains(" stub"));
+        assert!(lazy.contains("data-l=\"0\" data-i=\"2999\""), "the last message still rendered in full");
+        // untouched: the standalone page for `facet browse` keeps rendering everything
+        assert!(!full.contains(" stub"));
+    }
+
+    /// A stub's fetch (`node`) hands back a balanced fragment, itself stubbed one level
+    /// further wherever it still has halves of its own.
+    #[test]
+    fn node_fetch_returns_one_balanced_level() {
+        let s = store(3000);
+        let v = crate::optchat::view::View::fold(&s, 20_000);
+        let frag = super::node(&s, &v, 11, 0);
+        assert!(frag.contains("<details"));
+        assert_eq!(frag.matches("<details").count(), frag.matches("</details>").count());
+    }
+
+    /// Search reaches text the page never shipped: a message planted past the synthetic
+    /// history, found by a case-insensitive, substring match, addressed by `(l, i)`.
+    #[test]
+    fn find_reaches_past_what_is_loaded() {
+        let mut s = store(3000);
+        s.log("user", "a ZEBRA-shaped needle").unwrap();
+        let hits = super::find(&s, "zebra");
+        assert!(hits.contains("data-l=\"0\" data-i=\"3000\""), "{}", hits);
+        assert_eq!(super::find(&s, "no-such-marker-anywhere"), "<p class=s>no matches</p>");
+        assert_eq!(super::find(&s, "   "), "");
     }
 }
