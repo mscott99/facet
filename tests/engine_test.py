@@ -389,6 +389,14 @@ try:
     check(any(x["ev"] == "fallback" and x["turn"] == n0 for x in events()) and
           any(x["ev"] == "turn" and x["first"] == n0 and x["fallback"] for x in events()), "the fallback is recorded")
 
+    n0 = len(log())
+    req({"op": "send", "text": "ZOOM please"})
+    wait(lambda: any(m["text"] == "zoomed" for m in log()[n0:]), 30, "reply after zoom")
+    wait(idle, 30, "idle after zoom")
+    L = [(m["kind"], m["text"]) for m in log()[n0:]]
+    check(not any(k in ("tool", "echo") for k, _ in L) and not any("zoom" in x.lower() for k, x in L if k not in ("user", "talk", "chat")),
+          "a zoom leaves no tool or echo line in the log, only the reply: %r" % L)
+
     json.dump({"c2": {"note": "Other Note", "line": 7, "answers": []}}, open(cards_f, "w"))
     n0 = len(log())
     req({"op": "send", "text": '[[Other Note]] L7 #c2: "a line" CARD c2 please', "later": True})

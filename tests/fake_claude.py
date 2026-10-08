@@ -17,6 +17,7 @@
 #                 all as measured on the real CLI (2.1.268)
 #   "CHAT x"   -> calls the engine's MCP send_chat with "x" (as the real CLI would, over HTTP to
 #                 the --mcp-config URL), then a reply "said it"
+#   "ZOOM"     -> calls MCP zoom (id 0), then a reply "zoomed"
 #   "CARD id"  -> calls MCP answer_card for card id with "card answer", then a reply "noted"
 #   "CHATFAIL" -> calls send_chat with empty text (an error result), then a reply "ok"
 #   otherwise  -> one reply "ok"
@@ -184,6 +185,9 @@ def run_turn(msg):
     n = int(t.split("TOOLS ")[1].split()[0]) if "TOOLS " in t else 0
     if "BGAGENT" in t: return run_bg_agent()
     if "AGENT" in t: run_agent()
+    if "ZOOM" in t:
+        output_tool("zoom", {"id": 0, "n": 1})
+        time.sleep(0.2); step([{"type": "text", "text": "zoomed"}]); result("zoomed"); return
     if "CHATFAIL" in t:
         output_tool("send_chat", {"text": ""})
     elif "CHAT " in t:
