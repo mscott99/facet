@@ -86,12 +86,13 @@ class Cal(unittest.TestCase):
         r = [x for x in rows(datetime(2026, 10, 1, tzinfo=VAN), datetime(2027, 1, 31, tzinfo=VAN)) if x[2] == "Second Tuesday"]
         self.assertEqual([x[0].astimezone(VAN).strftime("%m-%d") for x in r], ["10-13", "11-10", "12-08", "01-12"])
 
-    def test_dst_wall_clock(self):  # 2026-11-01 is the end of DST in Vancouver; weekly 14:00 stays 14:00 local
-        ics = ("BEGIN:VEVENT\nUID:z\nSUMMARY:W\nDTSTART;TZID=America/Vancouver:20261019T140000\n"
-               "DTEND;TZID=America/Vancouver:20261019T150000\nRRULE:FREQ=WEEKLY\nEND:VEVENT\n")
-        r = L.events_between(L.parse_ics(ics), datetime(2026, 10, 26, tzinfo=VAN), datetime(2026, 11, 12, tzinfo=VAN))
+    def test_dst_wall_clock(self):  # 2026-11-01 ends DST in Los Angeles (BC kept UTC-7 for good, tzdata 2026c); weekly 14:00 stays 14:00 local
+        ics = ("BEGIN:VEVENT\nUID:z\nSUMMARY:W\nDTSTART;TZID=America/Los_Angeles:20261019T140000\n"
+               "DTEND;TZID=America/Los_Angeles:20261019T150000\nRRULE:FREQ=WEEKLY\nEND:VEVENT\n")
+        LA = ZoneInfo("America/Los_Angeles")
+        r = L.events_between(L.parse_ics(ics), datetime(2026, 10, 26, tzinfo=LA), datetime(2026, 11, 12, tzinfo=LA))
         self.assertEqual(len(r), 3)
-        self.assertEqual({x[0].astimezone(VAN).hour for x in r}, {14})
+        self.assertEqual({x[0].astimezone(LA).hour for x in r}, {14})
         self.assertEqual({x[0].utcoffset() for x in r}, {timedelta(hours=-7), timedelta(hours=-8)})
 
     def test_folded_and_duration(self):

@@ -16,3 +16,4 @@
 /limits.json
 /usage.json
 facet.json
+__pycache__/
