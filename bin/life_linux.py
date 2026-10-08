@@ -36,9 +36,15 @@ def load_config():
         sys.exit(f"life: no config at {p}\nCreate it (chmod 600). Example (see bin/life.accounts.example.json):\n{EXAMPLE}")
     try:
         with open(p) as f:
-            return json.load(f)
+            cfg = json.load(f)
     except ValueError as e:
         sys.exit(f"life: {p} is not valid JSON: {e}")
+    # The server runs on UTC; "timezone" in the config names the user's own.
+    if cfg.get("timezone") and os.environ.get("TZ") != cfg["timezone"]:
+        import time
+        os.environ["TZ"] = cfg["timezone"]
+        time.tzset()
+    return cfg
 
 
 def _secret(path):
