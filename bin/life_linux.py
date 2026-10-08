@@ -36,7 +36,7 @@ def load_config():
         sys.exit(f"life: no config at {p}\nCreate it (chmod 600). Example (see bin/life.accounts.example.json):\n{EXAMPLE}")
     try:
         with open(p) as f:
-        return json.load(f)
+            return json.load(f)
     except ValueError as e:
         sys.exit(f"life: {p} is not valid JSON: {e}")
 

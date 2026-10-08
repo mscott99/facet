@@ -37,7 +37,7 @@ def linux():
 
 
 def osa(script):
-    need_macos("browser automation (web js/open/tabs; AppleScript) — no browser here; `life web get` works")
+    need_macos("browser automation (web js/open/tabs)")
     p = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
     if p.returncode:
         sys.exit(f"applescript failed: {p.stderr.strip()}")
