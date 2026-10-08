@@ -250,6 +250,7 @@ function restore(c){
   var rp=w.firstElementChild,n=rp?parseInt(rp.dataset.high,10):0;
   while(rp&&rp.firstChild){var x=rp.firstChild;d.insertBefore(x,st);if(x.nodeType==1){mathify(x);htmx.process(x)}}
   b.parentNode.insertBefore(d,b.nextSibling);
+  d._n=n;
   if(n)reply(d);
   return {d:d,n:n};
 }
@@ -392,7 +393,7 @@ function send(d,where,said,after){
 // what was said; a reply box then opens so answering back stays inside the same card. The
 // newest card is the one being watched — an older one keeps what it already has.
 var RCARD=null,RCOUNT=0,RT=null;
-function listen(d,n){RCARD=d;RCOUNT=n||0;wait()}
+function listen(d,n){RCARD=d;RCOUNT=n==null?(d._n||0):n;wait()}
 function wait(){if(!RT&&RCARD&&!document.hidden)RT=setTimeout(poll,0)}
 function later(){setTimeout(wait,5000)}
 function poll(){
@@ -403,11 +404,12 @@ function poll(){
     var w=document.createElement('div');w.innerHTML=h;
     var rp=w.firstElementChild;
     if(rp&&rp.children.length){
-      RCOUNT=parseInt(rp.dataset.high,10);
+      RCOUNT=d._n=parseInt(rp.dataset.high,10);
       var st=d.querySelector('.st');
       // htmx's own swap would wire up an answer's `apply` form; inserted by hand, it needs
       // telling the same way mathify is: once, right after it lands.
-      while(rp.firstChild){var n=rp.firstChild;d.insertBefore(n,st);mathify(n);htmx.process(n)}
+      var at=d.querySelector('textarea.r')||st;
+      while(rp.firstChild){var n=rp.firstChild;d.insertBefore(n,at);mathify(n);htmx.process(n)}
       reply(d);
     }
     wait();
