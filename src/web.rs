@@ -184,8 +184,17 @@ document.addEventListener('keydown',function(e){
   var t=e.target;if(t&&(t.tagName=='TEXTAREA'||t.tagName=='INPUT'||t.tagName=='SELECT'||t.isContentEditable))return;
   if(diffClear())e.preventDefault()});
 // Tapping a highlighted word clears it too: the phone's way, having no Escape.
+// A touch is caught at touchend (iOS may not send a click for plain text), a mouse at click;
+// anywhere on the note's text counts, a slide (scroll) does not.
+var dtap=null;
+document.addEventListener('touchstart',function(e){var t=e.touches[0];dtap=e.touches.length==1?{x:t.clientX,y:t.clientY}:null},{passive:true,capture:true});
+function dhit(e){var w=document.getElementById('docwrap');return w&&w.dataset.diff&&e.target.closest&&e.target.closest('#docwrap')&&!e.target.closest('.say,a,button,textarea,input')}
+document.addEventListener('touchend',function(e){
+  var t=e.changedTouches[0];if(!dtap||Math.hypot(t.clientX-dtap.x,t.clientY-dtap.y)>10||!dhit(e))return;
+  dtap=null;diffClear();window._dtapped=Date.now()},true);
 document.addEventListener('click',function(e){
-  if(e.target.closest&&e.target.closest('.dm')&&diffClear()){e.preventDefault();e.stopPropagation()}},true);
+  if(window._dtapped&&Date.now()-window._dtapped<700){e.preventDefault();e.stopPropagation();return}
+  if(dhit(e)&&e.target.closest('.dm')&&diffClear()){e.preventDefault();e.stopPropagation()}},true);
 function diffClear(){
   var w=document.getElementById('docwrap');if(!w||!w.dataset.diff)return false;
   var note=JSON.parse(w.dataset.diff).note;delete w.dataset.diff;
