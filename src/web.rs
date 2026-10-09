@@ -93,6 +93,7 @@ textarea:focus{outline:1px solid var(--line)}
 .say.info{border-left-color:#75767a99}.say.warn{border-left-color:var(--warn)}.say.error{border-left-color:var(--err)}
 ins.dm,span.dm{text-decoration:none;background:#8fa8c824;border-radius:2px;box-shadow:0 0 0 1px #8fa8c824}
 del.dm{color:var(--dim);text-decoration:line-through;text-decoration-thickness:1px;opacity:.75}
+.dm{cursor:pointer}
 .say .hd{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.35rem}
 .say .hd .x{flex:none;font:16px/1 var(--mono);background:none;border:0;cursor:pointer;padding:0 4px;color:var(--dim)}
 .say .hd .x:hover{color:var(--err)}
@@ -181,12 +182,17 @@ function diffApply(){
 document.addEventListener('keydown',function(e){
   if(e.key!='Escape'||e.defaultPrevented||e.isComposing)return;
   var t=e.target;if(t&&(t.tagName=='TEXTAREA'||t.tagName=='INPUT'||t.tagName=='SELECT'||t.isContentEditable))return;
-  var w=document.getElementById('docwrap');if(!w||!w.dataset.diff)return;
+  if(diffClear())e.preventDefault()});
+// Tapping a highlighted word clears it too: the phone's way, having no Escape.
+document.addEventListener('click',function(e){
+  if(e.target.closest&&e.target.closest('.dm')&&diffClear()){e.preventDefault();e.stopPropagation()}},true);
+function diffClear(){
+  var w=document.getElementById('docwrap');if(!w||!w.dataset.diff)return false;
   var note=JSON.parse(w.dataset.diff).note;delete w.dataset.diff;
   w.querySelectorAll('ins.dm,del.dm,.dm').forEach(function(x){
     if(x.tagName=='INS'||x.tagName=='DEL'){var p=x.parentNode;if(x.tagName=='INS'){while(x.firstChild)p.insertBefore(x.firstChild,x)}x.remove();p.normalize()}
     else x.classList.remove('dm')});
-  fetch(TOK+'/x/diff',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'note='+encodeURIComponent(note)});});
+  fetch(TOK+'/x/diff',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'note='+encodeURIComponent(note)});return true}
 function atEnd(){return innerHeight+scrollY>document.body.scrollHeight-120}
 var stick=true;
 addEventListener('scroll',function(){stick=atEnd()});
