@@ -12,6 +12,7 @@
 // Anything that is not one of those is an adapter.
 mod cards;
 mod cfg;
+mod diff;
 mod doc;
 mod log;
 mod md;

@@ -91,6 +91,8 @@ textarea:focus{outline:1px solid var(--line)}
    the fix if it has one, and the composer always last. No frame. */
 .say{box-sizing:border-box;max-width:100%;margin:.5rem 0 1.2rem;padding-left:1.1rem;border-left:2px solid #8fa8c880;font-size:.95em}
 .say.info{border-left-color:#75767a99}.say.warn{border-left-color:var(--warn)}.say.error{border-left-color:var(--err)}
+ins.dm,span.dm{text-decoration:none;background:#8fa8c824;border-radius:2px;box-shadow:0 0 0 1px #8fa8c824}
+del.dm{color:var(--dim);text-decoration:line-through;text-decoration-thickness:1px;opacity:.75}
 .say .hd{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.35rem}
 .say .hd .x{flex:none;font:16px/1 var(--mono);background:none;border:0;cursor:pointer;padding:0 4px;color:var(--dim)}
 .say .hd .x:hover{color:var(--err)}
@@ -138,11 +140,58 @@ function mrender(s){
 function mathify(r){
   if(typeof katex=='undefined')return;
   r.querySelectorAll('span[data-math-style]').forEach(mrender);}
+// The agent's latest edit to the note (the page's data-diff, see diff.rs), drawn over the
+// rendered text and never in the note: inserted words tinted, deleted ones struck through, a
+// changed formula tinted whole. Rendered words are matched to the line's words in order.
+function dkey(t){return t.charAt(0)=='$'?'$'+t.replace(/[\s$]/g,''):t.toLowerCase().replace(/[^\p{L}\p{N}]/gu,'')}
+function diffApply(){
+  var w=document.getElementById('docwrap');if(!w||!w.dataset.diff)return;
+  var D;try{D=JSON.parse(w.dataset.diff)}catch(e){return}
+  Object.keys(D.lines).forEach(function(n){
+    var el=w.querySelector('[data-line="'+n+'"][data-note="'+CSS.escape(D.note)+'"]');if(!el)return;
+    var rt=[],tw=document.createTreeWalker(el,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT,{acceptNode:function(x){
+      return x.nodeType==1?(x.hasAttribute('data-math-style')?NodeFilter.FILTER_ACCEPT:NodeFilter.FILTER_SKIP):
+        (x.parentNode.closest('[data-math-style]')?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT)}});
+    for(var x;x=tw.nextNode();){
+      if(x.nodeType==1){rt.push({el:x,key:dkey('$'+x.textContent)});continue}
+      var re=/\S+/g,m;while(m=re.exec(x.data)){var k=dkey(m[0]);if(k)rt.push({node:x,a:m.index,b:m.index+m[0].length,key:k})}}
+    var acts=[],j=0,pend=[];
+    D.lines[n].forEach(function(o){
+      var k=dkey(o[1]);if(!k)return;
+      if(o[0]==2){pend.push(o[1]);return}
+      for(var q=j;q<rt.length&&q<j+8;q++)if(rt[q].key==k){
+        if(pend.length)acts.push({del:pend.join(' '),at:rt[q],before:true});
+        if(o[0]==1)acts.push({mark:rt[q]});
+        pend=[];j=q+1;return}});
+    if(pend.length&&rt.length)acts.push({del:pend.join(' '),at:rt[rt.length-1],before:false});
+    acts.reverse().forEach(function(a){
+      var t=a.mark||a.at;
+      if(t.el){if(a.mark)t.el.classList.add('dm');
+        else{var d=document.createElement('del');d.className='dm';d.textContent=a.del;
+          t.el.parentNode.insertBefore(d,a.before?t.el:t.el.nextSibling);d.after(' ')}return}
+      var r=document.createRange();
+      if(a.mark){r.setStart(t.node,t.a);r.setEnd(t.node,t.b);var i=document.createElement('ins');i.className='dm';r.surroundContents(i)}
+      else{var d=document.createElement('del');d.className='dm';d.textContent=a.del+' ';
+        var at=a.before?t.a:t.b;r.setStart(t.node,at);r.collapse(true);r.insertNode(d);
+        if(!a.before){d.textContent=' '+a.del}}});
+  });
+}
+// Escape clears the edit being shown, and the server forgets it. Not while typing in a box
+// (there it keeps its own meaning), and not if something else took the key already.
+document.addEventListener('keydown',function(e){
+  if(e.key!='Escape'||e.defaultPrevented||e.isComposing)return;
+  var t=e.target;if(t&&(t.tagName=='TEXTAREA'||t.tagName=='INPUT'||t.tagName=='SELECT'||t.isContentEditable))return;
+  var w=document.getElementById('docwrap');if(!w||!w.dataset.diff)return;
+  var note=JSON.parse(w.dataset.diff).note;delete w.dataset.diff;
+  w.querySelectorAll('ins.dm,del.dm,.dm').forEach(function(x){
+    if(x.tagName=='INS'||x.tagName=='DEL'){var p=x.parentNode;if(x.tagName=='INS'){while(x.firstChild)p.insertBefore(x.firstChild,x)}x.remove();p.normalize()}
+    else x.classList.remove('dm')});
+  fetch(TOK+'/x/diff',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'note='+encodeURIComponent(note)});});
 function atEnd(){return innerHeight+scrollY>document.body.scrollHeight-120}
 var stick=true;
 addEventListener('scroll',function(){stick=atEnd()});
 document.addEventListener('htmx:afterSwap',function(e){mathify(e.target);if(stick&&!window._h)scrollTo(0,1e7)});
-addEventListener('load',function(){mathify(document);if(location.hash=='')scrollTo(0,1e7);start()});
+addEventListener('load',function(){diffApply();mathify(document);if(location.hash=='')scrollTo(0,1e7);start()});
 // A page keeps itself current by asking the server for news and being answered when there is
 // some (the request is held up to ~25s): a chat message shows as it lands, an edited note
 // refreshes, with no poll every few seconds. A hidden tab stops asking and catches up when
@@ -185,7 +234,7 @@ function docLive(){
         if(gen!=DL)return;
         // a box being typed in would be lost to the swap: wait it out
         if(h&&typing())return setTimeout(go,3000);
-        if(h){w.outerHTML=h;var nw=document.getElementById('docwrap');mathify(nw);htmx.process(nw);CV=0;cardLive()}
+        if(h){w.outerHTML=h;var nw=document.getElementById('docwrap');diffApply();mathify(nw);htmx.process(nw);CV=0;cardLive()}
         go();
       },function(e){if(gen==DL&&!(e&&e.name=='AbortError'))setTimeout(go,5000)});
   })();
@@ -795,19 +844,25 @@ fn doc_files(cfg: &Cfg, d: &doc::Doc) -> Vec<PathBuf> {
 
 /// Changes when the page's text does: the note, or a note it embeds. (Cards have their own.)
 fn doc_version(cfg: &Cfg, d: &doc::Doc) -> u64 {
-    doc_files(cfg, d).iter().map(|p| mtime_us(p)).max().unwrap_or(0)
+    doc_files(cfg, d).iter().map(|p| mtime_us(p)).max().unwrap_or(0).max(crate::diff::stamp(&home_of(d)))
+}
+
+/// The agent's latest edit to this note, for the page to draw (see `diff`): part of the markup,
+/// so a page tagged by its bytes (ETag) or kept live by its version sees it come and go.
+fn diff_attr(d: &doc::Doc) -> String {
+    match crate::diff::json(&home_of(d)) { Some(j) => format!(" data-diff=\"{}\"", md::esc(&j)), None => String::new() }
 }
 
 /// A page that keeps itself current: `live` is the route that answers for it, `v` the version
 /// the markup was made from. The page asks `live?v=..&wait=1`, which holds until the version
 /// differs (then answers with the new markup) or `LONG` is up (204, ask again).
-fn live_wrap(live: &str, v: u64, inner: String) -> String {
-    format!("<div id=docwrap data-live=\"{}\" data-v=\"{}\">{}</div>", md::esc(live), v, inner)
+fn live_wrap(live: &str, v: u64, extra: &str, inner: String) -> String {
+    format!("<div id=docwrap data-live=\"{}\" data-v=\"{}\"{}>{}</div>", md::esc(live), v, extra, inner)
 }
 
 fn doc_fragment(cfg: &Cfg, d: &doc::Doc) -> String {
     let v = doc_version(cfg, d);
-    live_wrap(&format!("{}/f/doc/{}", cfg.token_path(), md::urlenc(&d.slug)), v,
+    live_wrap(&format!("{}/f/doc/{}", cfg.token_path(), md::urlenc(&d.slug)), v, &diff_attr(d),
         format!("<h1>{}</h1>{}", md::esc(&d.title), note_html(cfg, d)))
 }
 
@@ -816,7 +871,7 @@ fn note_fragment(cfg: &Cfg, d: &doc::Doc, name: &str, h: &str) -> String {
     let body = if h.is_empty() { note_html(cfg, d) } else { section_html(cfg, d, h) };
     let live = format!("{}/f/note/{}{}", cfg.token_path(), md::urlenc(name),
         if h.is_empty() { String::new() } else { format!("?h={}", md::urlenc(h)) });
-    live_wrap(&live, v, format!("<h1>{}</h1>{}", md::esc(&d.title), body))
+    live_wrap(&live, v, &diff_attr(d), format!("<h1>{}</h1>{}", md::esc(&d.title), body))
 }
 
 /// The answer to a live page's question: the new markup if its version moved on, else nothing
@@ -915,7 +970,7 @@ pub fn serve(cfg: Cfg) {
     let server = Server::http(&addr).unwrap_or_else(|e| { eprintln!("bind {}: {}", addr, e); std::process::exit(1) });
     println!("facet on {} ({})", cfg.url("/"), addr);
     crate::tg::spawn(&cfg);
-    crate::watch::ensure(&cfg.vault());
+    crate::diff::spawn(cfg.vault());
     // A thread to a request: a page waiting for news (`?wait=1`) holds its thread for up to
     // `LONG`, and nothing else should queue behind it. A panic in a handler ends its own
     // connection and nothing more.
@@ -1146,6 +1201,9 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
             live_doc(cfg, || doc::note(cfg, name), qnum("v"), qnum("wait") > 0, |d| note_fragment(cfg, d, name, &h)) }
 
         ["d"] => html(cards_page(cfg), 200),
+
+        // Escape on a note: forget the edit it was showing
+        ["x", "diff"] if post => { crate::diff::clear(&field(&f, "note")); html("ok".into(), 200) }
 
         ["x", "send"] if post => {
             let text = field(&f, "text");
