@@ -7,11 +7,10 @@
 //                                     with later, a turn of its own after the running one)
 //   -> {"op":"cancel"}                stop the wait or the running call
 //   -> {"op":"note","text":..,"date":..}  import a note (queued during a turn; duplicates skipped)
-//   -> {"op":"answer","id":..,"text":..,"apply":..}  a deliberate reply to a line-comment card
-//                                     (never a talk reply its poll happens to catch); "apply",
-//                                     if given, becomes a fix the card can apply (diag::propose).
-//                                     Logged as kind `answer`; the master's MCP `answer_card` is
-//                                     the same call (see `answer` below)
+//   -> {"op":"card","do":"new|reply|fix|kind|close|delete|apply|list",..}  a card (cards.rs):
+//                                     what the agent does on one is logged as kind `answer`;
+//                                     the master's MCP card tools are the same call (`card` below)
+//   -> {"op":"answer","id":..,"text":..,"apply":..}  the old name of {"op":"card","do":"reply"}
 //   -> {"op":"restart","serve":bool}  queue a restart of this engine (and of serve, if asked) for
 //                                     when the running turn has ended and no detached spawn is
 //                                     alive; returns at once ("restart queued")
@@ -29,7 +28,7 @@ use super::store::Store;
 use super::view::View;
 use super::{compact, mcp, prompts, turn, usage, VIEW, JOBS};
 use crate::cfg::{self, Cfg};
-use crate::{cards, diag};
+use crate::cards;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
@@ -361,11 +360,13 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
             // a deliberate reply to a line-comment card: the id is how a card is told apart
             // from an ordinary talk reply, which is why one is never mistaken for the other
             // any more (a card's poll only ever sees what landed here, by its own id)
-            "answer" => {
-                let id = v["id"].as_str().unwrap_or("").trim().to_string();
-                let text = v["text"].as_str().unwrap_or("").trim().to_string();
-                match answer(e, &id, &text, v["apply"].as_str()) {
-                    Ok(code) => json!({"ok": true, "code": code}),
+            // a card: opened, answered, fixed, closed by the agent (or by `facet card`); the id
+            // is how an answer reaches its own card and never the chat
+            "card" | "answer" => {
+                let mut v = v.clone();
+                if v["op"] == "answer" { v["do"] = "reply".into(); }
+                match card(e, &v) {
+                    Ok(mut r) => { r["ok"] = true.into(); r }
                     Err(x) => json!({"ok": false, "error": x}),
                 }
             }
@@ -438,31 +439,13 @@ pub fn chat(e: &Arc<Engine>, text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A card answer: onto the card (cards.json, where the card's own poll reads it) and into the
-/// stream as kind `answer`, so memory has it too — but never in the chat venue: Telegram and
-/// the web chat page skip the kind. Returns the code of the fix attached, if one was.
-pub fn answer(e: &Arc<Engine>, id: &str, text: &str, apply: Option<&str>) -> Result<Option<String>, String> {
-    let (id, text) = (id.trim(), text.trim());
-    if id.is_empty() || text.is_empty() { return Err("id and text required".into()) }
-    let sd = state_dir(&e.dir);
-    let card = cards::get(&sd, id).ok_or_else(|| format!("no card {}", id))?;
-    let note = card["note"].as_str().unwrap_or("").to_string();
-    let line = card["line"].as_i64().unwrap_or(0);
-    // a replacement is only ever what this call attaches on purpose, never guessed from the
-    // answer's own prose
-    let rep = apply.map(str::trim).filter(|s| !s.is_empty());
-    let code = match rep {
-        Some(rep) => match diag::propose(&Cfg::load(), &note, line, rep) {
-            Ok(c) => Some(c),
-            Err(x) => { e.notice(&format!("answer {}: fix not attached: {}", id, x)); None }
-        },
-        None => None,
-    };
-    cards::answer(&sd, id, text, code.as_deref())?;
-    let mut s = format!("#{} on [[{}]] L{}: {}", id, note.trim_end_matches(".md"), line, text);
-    if let (Some(r), Some(_)) = (rep, &code) { s.push_str(&format!("\n(fix offered, replacing the line with: {})", r)); }
-    e.log("answer", &s);
-    Ok(code)
+/// Anything done on a card (cards.rs `op`): the card file changes — which is what an open page
+/// is waiting on — and what the agent did goes into the stream as kind `answer`, so memory has
+/// it too, but never the chat venue: Telegram and the web chat page skip the kind.
+pub fn card(e: &Arc<Engine>, v: &Value) -> Result<Value, String> {
+    let (r, line) = cards::op(&Cfg::load(), v)?;
+    if let Some(l) = line { e.log("answer", &l); }
+    Ok(r)
 }
 
 /// Fire a queued restart if there is one and nothing would be lost: no turn running, no

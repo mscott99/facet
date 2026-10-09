@@ -5,15 +5,13 @@
 //
 //   log   the memory: everything that happened, input and output, in order
 //   doc   output addressed by a slug: a note of the vault, published
-//   diag  output addressed by a code and anchored to a live line: a comment to be triaged
-//   cards a line-comment's id, and the deliberate answer addressed to it
+//   cards a conversation anchored to a line of a note: a comment, a review, a fix to apply
 //   tell  input: one funnel, from any route, into the memory
 //   web   the route with a screen            tg   the route with push
 //
 // Anything that is not one of those is an adapter.
 mod cards;
 mod cfg;
-mod diag;
 mod doc;
 mod log;
 mod md;
@@ -155,27 +153,14 @@ fn main() {
             }
         }
 
-        // a deliberate reply to a line-comment card (§ the viewer's cards), never a talk
-        // reply the card's poll happens to catch: the id comes from the card's own message
+        // a reply to a card, by id (`facet card reply`, kept under its old name)
         "answer" => {
-            if rest.len() < 2 { die("facet answer <id> <text> [--apply <replacement>]") }
-            let id = rest[0].clone();
-            let (mut apply, mut words, mut i) = (String::new(), Vec::new(), 1);
-            while i < rest.len() {
-                match rest[i].as_str() {
-                    "--apply" => { apply = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
-                    w => { words.push(w.to_string()); i += 1; }
-                }
-            }
-            let mut req = serde_json::json!({"op": "answer", "id": id, "text": words.join(" ")});
-            if !apply.trim().is_empty() { req["apply"] = apply.into(); }
-            match optchat::engine::request(&optchat::engine::dir(), req) {
-                Ok(v) if v["ok"].as_bool() == Some(true) => println!("{}", match v["code"].as_str() {
-                    Some(c) => format!("answered; fix {} ready to apply", c), None => "answered".into() }),
-                Ok(v) => die(v["error"].as_str().unwrap_or("refused")),
-                Err(e) => die(&e),
-            }
+            if rest.len() < 2 { die("facet answer <id> <text> [--fix <replacement>]") }
+            let mut v = vec!["reply".to_string()];
+            v.extend(rest.iter().map(|a| if a == "--apply" { "--fix".to_string() } else { a.clone() }));
+            card_cmd(&cfg, &v);
         }
+        "card" | "cards" => card_cmd(&cfg, rest),
 
         // queue a restart of the engine (re-exec) for when the reply ends and no spawn is alive
         "restart" => match optchat::engine::request(&optchat::engine::dir(),
@@ -185,21 +170,22 @@ fn main() {
             Err(e) => die(&e),
         },
 
-        "diag" => print!("{}", diag::brief(&cfg)),
-        // one call, N comments: anchors are verbatim text, the binary finds the lines
+        "diag" => card_cmd(&cfg, &["list".to_string()]),
+        // one call, N cards: anchors are verbatim text, the binary finds the lines
         "review" => {
             let replace = rest.iter().any(|a| a == "--replace");
             let note = rest.iter().find(|a| !a.starts_with("--")).cloned().unwrap_or_default();
             let mut spec = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut spec).ok();
-            match diag::review(&cfg, &note, &spec, replace) {
+            match cards::review(&cfg, &note, &spec, replace) {
                 Ok(m) => println!("{}", m), Err(e) => die(&e),
             }
         }
-        "apply" => match diag::apply(&cfg, rest.first().map(|s| s.as_str()).unwrap_or("")) {
-            Ok(m) => println!("{}", m), Err(e) => die(&e) },
-        "dismiss" => match diag::dismiss(&cfg, rest.first().map(|s| s.as_str()).unwrap_or(""), &rest[1..].join(" ")) {
-            Ok(m) => println!("{}", m), Err(e) => die(&e) },
+        "apply" | "dismiss" => {
+            let mut v = vec![if cmd == "apply" { "apply" } else { "close" }.to_string()];
+            v.extend(rest.iter().cloned());
+            card_cmd(&cfg, &v);
+        }
 
         "url" => println!("{}", cfg.url(&rest.first().map(|s| format!("/m/{}", s)).unwrap_or("/".into()))),
 
@@ -214,7 +200,7 @@ fn main() {
             println!("telegram   {}", match cfg.num("telegram.chat_id", 0) {
                 0 => "unpaired".to_string(), c => format!("chat {}", c) });
             println!("notes      {}", doc::table(&cfg).len());
-            println!("comments   {}", diag::all(&cfg).len());
+            println!("cards      {} open", cards::open(&cfg).len());
             println!("queued     {} command(s) riding along", tg::queued());
         }
 
@@ -243,19 +229,66 @@ facet spawn [--model M] [--kind general-purpose|explore] [--desc D] <task> | --t
                             the shell from running backticks in it)
                             a subagent that outlives this turn: returns its id at once; its
                             report arrives later, as a message of its own starting \"[id] \"
+facet card new <note> (--line N | --at \"verbatim text\") [--kind comment|info|warn|error]
+                 [--fix <replacement>] <text>|-   open a card on a line (text from stdin with -)
+facet card reply <id> <text>|- [--fix <replacement>]
+                            say something on a card (`facet answer` is the same); --fix only
+                            when you mean the card's lines replaced, which its Apply button does
+facet card fix <id> [<replacement>]   set, or with nothing take off, a card's fix
+facet card close|delete|apply <id> [reason]
+facet card list [note]      open cards (`facet diag` too)
 facet review <note> [--replace] < spec
-                            write comments on a note; the spec is
+                            many cards on a note at once; the spec is
                               @ verbatim anchor text (must be unique in the note)
-                              ! [severity] message
+                              ! [comment|info|warn|error] message
                               ? long explanation, markdown + math (optional, multi-line)
                               + replacement for the anchored line (optional, multi-line)
-facet diag                  open comments
-facet apply|dismiss <code>  triage one
-facet answer <id> <text> [--apply <replacement>]
-                            answer a line-comment card by id (from its message, shaped
-                            `[[Note]] L<n> #<id>: \"quote\"`); --apply only when you mean the
-                            line itself replaced, which the card can then apply
 facet status                where everything stands";
+
+/// `facet card ...`: through the engine when it is up (so what the agent does on a card is in
+/// the stream, as kind `answer`), else straight on the file.
+fn card_cmd(cfg: &Cfg, rest: &[String]) {
+    let Some(what) = rest.first() else { die("facet card new|reply|fix|close|delete|apply|list ...") };
+    let mut v = serde_json::json!({"do": what});
+    let (mut words, mut i) = (Vec::new(), 1);
+    while i < rest.len() {
+        let next = || rest.get(i + 1).cloned().unwrap_or_default();
+        match rest[i].as_str() {
+            "--line" => { v["line"] = next().parse::<i64>().unwrap_or(0).into(); i += 2 }
+            "--at" | "--anchor" => { v["anchor"] = next().into(); i += 2 }
+            "--kind" => { v["kind"] = next().into(); i += 2 }
+            "--fix" | "--apply" => { v["fix"] = next().into(); i += 2 }
+            w => { words.push(w.to_string()); i += 1 }
+        }
+    }
+    let mut take = |k: &str| if !words.is_empty() { v[k] = words.remove(0).into(); };
+    match what.as_str() {
+        "new" => take("note"),
+        "list" => take("note"),
+        _ => take("id"),
+    }
+    let mut text = words.join(" ");
+    if text == "-" { text.clear(); std::io::stdin().read_to_string(&mut text).ok(); }
+    match what.as_str() {
+        "close" | "dismiss" => v["reason"] = text.into(),
+        "fix" if v.get("fix").is_none() => v["fix"] = text.into(),
+        _ => v["text"] = text.into(),
+    }
+    let mut req = v.clone();
+    req["op"] = "card".into();
+    let r = match optchat::engine::request(&optchat::engine::dir(), req) {
+        Ok(r) => if r["ok"] == true { Ok(r) } else { Err(r["error"].as_str().unwrap_or("refused").to_string()) },
+        Err(_) => cards::op(cfg, &v).map(|(r, _)| r),
+    };
+    match r {
+        Ok(r) => match (r["text"].as_str(), r["id"].as_str()) {
+            (Some(t), _) => println!("{}", t.trim_end()),
+            (None, Some(id)) if what == "new" => println!("{} L{}", id, r["line"]),
+            _ => println!("ok"),
+        },
+        Err(e) => die(&e),
+    }
+}
 
 fn die(m: &str) -> ! { eprintln!("{}", m); std::process::exit(1) }
 

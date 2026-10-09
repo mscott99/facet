@@ -3,7 +3,7 @@
 // and the Enter key. All markdown goes through one renderer; math is extracted by the parser,
 // never by a regex.
 use crate::cfg::Cfg;
-use crate::{cards, diag, doc, log, md, tell};
+use crate::{cards, doc, log, md, tell};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -13,8 +13,8 @@ use tiny_http::{Header, Request, Response, Server};
 /// that a dead connection frees its thread soon; the page just asks again.
 const LONG: Duration = Duration::from_secs(25);
 
-/// Every POST takes this for its whole run: they read-modify-write small files (cards.json,
-/// diagnostics.json) that two simultaneous requests could otherwise clobber.
+/// Every POST takes this for its whole run, so two from the same page land in the order sent
+/// (cards.json itself is also locked, across processes, by cards.rs).
 static POSTING: Mutex<()> = Mutex::new(());
 
 const SHELL: &str = r#"<!DOCTYPE html><html><head><meta charset=utf-8>
@@ -76,17 +76,6 @@ table{border-collapse:collapse;width:100%;font-size:.9em;margin:1.2em 0}
 th,td{text-align:left;padding:.3rem 1.2rem .3rem 0;vertical-align:top}
 th{color:var(--dim);font-weight:600;border-bottom:1px solid var(--line)}
 blockquote{border-left:1px solid var(--line);margin:1.2em 0;padding-left:1.1rem;color:var(--dim)}
-/* A comment is an aside, not a dialog: a coloured edge where it belongs, and controls that
-   read as text until you want them. */
-.diag{margin:1.2rem 0 1.5rem;padding-left:1.1rem;border-left:2px solid var(--warn);font-size:.92em}
-.diag.error{border-left-color:var(--err)}.diag.info,.diag.hint{border-left-color:var(--line)}
-.diag .sev{font:11px var(--mono);text-transform:uppercase;letter-spacing:.1em;color:var(--warn)}
-.diag.error .sev{color:var(--err)}.diag.info .sev,.diag.hint .sev{color:var(--dim)}
-.diag p:last-child{margin-bottom:0}
-.diag form{display:flex;gap:1rem;margin-top:.6rem;flex-wrap:wrap;align-items:baseline}
-.diag input[type=text]{flex:1;min-width:9rem;background:none;border:0;border-bottom:1px solid var(--line);
- color:var(--fg);padding:.2rem 0;font:12.5px var(--mono)}
-.diag input[type=text]:focus{outline:0;border-bottom-color:var(--acc)}
 button{background:none;color:var(--dim);border:0;padding:0;cursor:pointer;font:12.5px var(--mono)}
 button:hover{color:var(--acc)}
 footer{position:fixed;bottom:0;left:0;right:0;background:var(--bg);
@@ -95,26 +84,29 @@ footer form{max-width:var(--measure);margin:0 auto;display:flex;gap:.8rem;align-
 textarea{flex:1;resize:none;background:#101115;color:var(--fg);border:0;border-radius:4px;
  padding:.6rem .8rem;font:16px/1.5 var(--serif);max-height:40vh}
 textarea:focus{outline:1px solid var(--line)}
-/* A comment card reads like the comments do: a coloured edge under the line, the quote dim
-   at the top, the thread under it in order, and the composer always last. No frame. A card
-   only waiting for its answer is just its quote, its thread and a status line. */
-.say{box-sizing:border-box;max-width:100%;margin:.5rem 0 1.2rem;padding-left:1.1rem;border-left:2px solid #8fa8c880}
+/* A card reads like an aside: a coloured edge under the line (the colour is its kind, and
+   nothing else about it differs), the quote dim at the top, the thread under it in order,
+   the fix if it has one, and the composer always last. No frame. */
+.say{box-sizing:border-box;max-width:100%;margin:.5rem 0 1.2rem;padding-left:1.1rem;border-left:2px solid #8fa8c880;font-size:.95em}
+.say.info{border-left-color:#75767a99}.say.warn{border-left-color:var(--warn)}.say.error{border-left-color:var(--err)}
 .say .hd{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.35rem}
 .say .hd .q{flex:1;font:11.5px/1.5 var(--mono);color:var(--dim);
  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .say .hd .x{flex:none;font:16px/1 var(--mono);background:none;border:0;cursor:pointer;padding:0 4px;color:var(--dim)}
 .say .hd .x:hover{color:var(--err)}
 .say .th .t{white-space:pre-wrap;margin:.5rem 0 0}
-.say .th .t:first-child{margin-top:0}
-.say .th .msg.talk{margin:.6rem 0 0;padding-left:.8rem;border-left:1px solid var(--line);font-size:.95em}
+.say .th>:first-child{margin-top:0}
+.say .th .msg.talk{margin:.6rem 0 0;padding-left:.8rem;border-left:1px solid var(--line)}
 .say .th .msg.talk p:last-child{margin-bottom:0}
-.say .th form{margin:.3rem 0 0 .8rem}
+.say .fx{margin-top:.6rem}
+.say .fx pre{margin:0 0 .2rem;white-space:pre-wrap}
+.say .fx .ap{color:var(--acc)}
 .say .cmp{display:flex;gap:.7rem;align-items:flex-end;margin-top:.6rem}
-.say .th:empty+.cmp{margin-top:0}
 .say .cmp textarea{flex:1;min-width:0;max-height:40vh;overflow-y:auto}
 .say .cmp .go{flex:none;padding:.5rem .1rem;font:14px var(--mono);color:var(--acc)}
 .say .cmp.bad textarea{outline:1px solid #c88}
 .say .t.pend{opacity:.4}
+.ctx{margin:2.2rem 0 .3rem}.ctx pre{margin:.3rem 0 0;white-space:pre-wrap}
 form.busy textarea,form.busy button{opacity:.45}
 #older{min-height:1px}
 body{overflow-anchor:none}
@@ -208,7 +200,7 @@ function docLive(){
         if(gen!=DL)return;
         // a box being typed in would be lost to the swap: wait it out
         if(h&&typing())return setTimeout(go,3000);
-        if(h){w.outerHTML=h;var nw=document.getElementById('docwrap');mathify(nw);htmx.process(nw);cards()}
+        if(h){w.outerHTML=h;var nw=document.getElementById('docwrap');mathify(nw);htmx.process(nw);CV=0;cardLive()}
         go();
       },function(e){if(gen==DL&&!(e&&e.name=='AbortError'))setTimeout(go,5000)});
   })();
@@ -216,30 +208,36 @@ function docLive(){
 function start(){
   if(document.hidden)return;
   if(document.getElementById('tail'))live();
-  if(document.getElementById('docwrap')){docLive();cards()}
+  if(document.getElementById('docwrap'))docLive();
+  cardLive();
 }
 document.addEventListener('visibilitychange',function(){
-  if(document.hidden){LS++;DL++;if(LC)LC.abort();if(DC)DC.abort();if(RA){var a=RA;RA=null;a.abort()}}
-  else{start();pull()}});
-// ---- Comment cards ----
-// One component, used the same way three times over: a new comment under a line, a card put
-// back on reload (or after a refresh of the page), and every reply inside a card after that.
-//   .say[data-id,note,line,where]
-//     .hd   the quote, and `remove`
-//     .th   the thread: what was said (.t) and the answers (.msg.talk), in the order they came
-//     .cmp  the composer — always last, under the whole thread: a box and a `send` button
+  if(document.hidden){LS++;DL++;CG++;if(LC)LC.abort();if(DC)DC.abort();if(CC)CC.abort()}
+  else start()});
+// ---- Cards ----
+// Everything said about a line — a comment typed here, a review's warning, the agent's answer
+// — is one card, and one component shows it wherever it appears: under its line on a note, or
+// in the list on /d/.
+//   .say.<kind>[data-id,note,line]   kind (comment|info|warn|error) is the edge's colour only
+//     .hd   the quote, and the X (close)
+//     .th   the thread, in order: what the user said (.t) and the server's (.msg.talk), each
+//           with data-k, its index in the card's thread on the server
+//     .fx   the fix, if the card has one: what would replace its lines, and `apply`
+//     .cmp  the composer — always last: a one-row box that grows, and `send`
 // Enter or `send` sends, Shift-Enter is a new line. A card nothing was said in leaves no
-// trace on Escape or a click away. Once sent, the composer waits for an answer before it
-// shows again, so a card that is only waiting stays one quiet line.
+// trace on Escape or a click away. What is sent shows grey at once and firms up when the
+// server has it; a failure takes it back out and returns the words to the box.
+// Cards are kept by the server (cards.rs) and come to the page through one held request
+// (`/f/cards?...&wait=1&v=`), answered when any card changes: a reply, a new card the agent
+// opened, a card closed or applied elsewhere all show without a reload.
+var CV=0,CC=null,CL=[],CG=0,CLOSED={};
 function card(b,o){
-  var d=document.createElement('div');d.className='say';
-  d.dataset.id=o.id;d.dataset.note=o.note;d.dataset.line=o.line;d.dataset.where=o.where;
-  d.innerHTML='<div class=hd><div class=q></div><button class=x type=button title=remove aria-label=remove>&times;</button></div>'+
-    '<div class=th></div><div class=cmp><textarea rows=1></textarea><button class=go type=button>send</button></div>';
-  d.querySelector('.q').textContent=o.where;
-  d._sent=o.sent||0;d._n=o.n||0;
-  var th=d.querySelector('.th'),t=d.querySelector('textarea'),go=d.querySelector('.go');
-  if(o.thread){th.innerHTML=o.thread;mathify(th);htmx.process(th)}
+  var d=document.createElement('div');d.className='say '+(o.kind||'comment');
+  d.dataset.id=o.id;d.dataset.note=o.note;d.dataset.line=o.line;
+  d.innerHTML='<div class=hd><div class=q></div><button class=x type=button title=close aria-label=close>&times;</button></div>'+
+    '<div class=th></div><div class=fx hidden></div><div class=cmp><textarea rows=1></textarea><button class=go type=button>send</button></div>';
+  d._n=0;d._known=0;head(d,o);
+  var t=d.querySelector('textarea'),go=d.querySelector('.go');
   d.querySelector('.x').addEventListener('click',function(){drop(d)});
   // the button must not take the focus from the box (on a phone that would close the keyboard)
   go.addEventListener('pointerdown',function(e){e.preventDefault()});
@@ -253,84 +251,121 @@ function card(b,o){
   // after the line, and after any cards already under it, so a line's cards read top to bottom
   var at=b;while(at.nextElementSibling&&at.nextElementSibling.classList.contains('say'))at=at.nextElementSibling;
   at.parentNode.insertBefore(d,at.nextSibling);
-  shape(d);
   return d;
 }
+function head(d,o){d._quote=o.quote||'';d.querySelector('.q').textContent='L'+o.line+(o.quote?' · '+o.quote:'')}
 // nothing has been said in it yet: such a card is only a box, and goes as easily as it came
-function fresh(d){return !d._sent&&!d.querySelector('.th').children.length}
-// the composer shows on a new card and on one with an answer to reply to
-function shape(d){}
+function fresh(d){return !d._known&&!d.querySelector('.th').children.length}
 function fit(t){t.style.height='auto';t.style.height=t.scrollHeight+'px'}
 // Whatever grows a card keeps the reader where they were: if the card is above the screen,
 // the page moves by as much as it grew instead of the text jumping under the reader.
 function grow(d,f){
   var top=d.getBoundingClientRect().top,h=d.offsetHeight;f();
   if(top<0)scrollBy(0,d.offsetHeight-h)}
+function post(u,body){
+  return fetch(TOK+u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
+    .then(function(r){return r.ok?r.json():Promise.reject('HTTP '+r.status)})
+    .then(function(j){return j.ok?j:Promise.reject(j.error||'refused')})}
+function toast(m){var t=document.getElementById('toast');if(t)t.textContent=m}
 // The one way anything is sent from a card, the first comment or a later reply alike: the id
-// travels every time, so the whole thread stays one card. It shows at once, in place, as what
-// was said; a failure takes it back out and returns the words to the box.
+// travels every time, so the whole thread stays one card.
 function submit(d){
-  var t=d.querySelector('textarea'),said=t.value.trim();
+  var t=d.querySelector('textarea'),said=t.value.trim(),cmp=d.querySelector('.cmp');
   if(!said){if(fresh(d))drop(d);return}
-  var k=document.createElement('div');k.className='t';k.textContent=said;
+  var k=document.createElement('div');k.className='t pend';k.textContent=said;
   grow(d,function(){d.querySelector('.th').appendChild(k);t.value='';fit(t)});
-  k.classList.add('pend');d.querySelector('.cmp').classList.remove('bad');
-  var body='id='+d.dataset.id+'&note='+encodeURIComponent(d.dataset.note)+'&line='+d.dataset.line+
-    '&text='+encodeURIComponent(d.dataset.where+'\n'+said)+'&later=1';
-  fetch(TOK+'/x/send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
-    .then(function(r){return r.ok?r.text():Promise.reject(r.status)})
-    .then(function(r){if(/^not sent/.test(r))return Promise.reject(r.replace(/^not sent:?\s*/,''))})
-    .then(function(){d._sent++;k.classList.remove('pend');watch(d)},
-          function(err){k.remove();if(!t.value)t.value=said;fit(t);d.querySelector('.cmp').classList.add('bad');d.querySelector('.cmp').title='not sent: '+err});
+  cmp.classList.remove('bad');cmp.title='';
+  post('/x/card','do=say&id='+d.dataset.id+'&note='+encodeURIComponent(d.dataset.note)+'&line='+d.dataset.line+
+    '&quote='+encodeURIComponent(d._quote)+'&text='+encodeURIComponent(said))
+    .then(function(r){
+      d._known=d._known||Date.now();
+      // the held request may have brought the server's copy first: keep one
+      var dup=d.querySelector('.th [data-k="'+r.k+'"]');
+      if(dup&&dup!==k)k.remove();else{k.dataset.k=r.k;k.classList.remove('pend')}},
+    function(err){k.remove();if(!t.value)t.value=said;fit(t);cmp.classList.add('bad');cmp.title='not sent: '+err});
 }
-// A card's own remove: a sent one only has to leave the page, not be unsent — the answers it
-// may already carry stay exactly where `facet answer` put them.
+// The X: closed on the server (off every page; kept on file), and gone from this one at once.
 function drop(d){
-  if(d===RC){RC=null;if(RA){var a=RA;RA=null;a.abort()}}
-  if(d._sent)fetch(TOK+'/x/hide',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+d.dataset.id});
+  var id=d.dataset.id;CLOSED[id]=1;
+  if(d._known)post('/x/card','do=close&id='+id).then(null,function(e){delete CLOSED[id];toast('not closed: '+e)});
+  var x=document.querySelector('.ctx[data-for="'+id+'"]');if(x)x.remove();
   d.remove()}
-// An answer belongs where the comment was made: a sent card watches for answers addressed to
-// it (by id, never a generic reply) and puts them at the end of its thread, above the
-// composer. The server holds the request until there is one (or ~25s). The newest card is the
-// one watched; an older one keeps what it has. `d._n` is how many answers the card shows, and
-// a reply that does not start there (a request that crossed with another) is not shown twice.
-var RC=null,RA=null;
-function watch(d){if(RC===d&&RA)return;if(RA){var a=RA;RA=null;a.abort()}RC=d;pull()}
-function pull(){
-  var d=RC;if(!d||RA||document.hidden)return;
-  if(!document.body.contains(d)){RC=null;return}
-  var a=RA=new AbortController();
-  fetch(TOK+'/f/reply?wait=1&id='+d.dataset.id+'&since='+d._n,{signal:a.signal})
-    .then(function(r){return r.ok?r.text():Promise.reject(r.status)}).then(function(h){
-      if(RA!==a)return;RA=null;
-      var w=document.createElement('div');w.innerHTML=h;
-      var rp=w.firstElementChild;
-      if(rp&&rp.children.length&&parseInt(rp.dataset.from,10)==d._n){
-        grow(d,function(){var th=d.querySelector('.th');
-          // inserted by hand, an answer's `apply` form needs htmx told about it, as mathify does
-          while(rp.firstChild){var n=rp.firstChild;th.appendChild(n);if(n.nodeType==1){mathify(n);htmx.process(n)}}
-          d._n=parseInt(rp.dataset.high,10);shape(d)});
-      }
-      pull();
-    },function(e){if(RA!==a)return;RA=null;if(!(e&&e.name=='AbortError'))setTimeout(pull,5000)});
-}
-// Cards outlive the page: a sent one comes back from the server — its thread from the log and
-// cards.json, in order — under the line it was about.
-function cards(){
+function applyFix(d){
+  post('/x/card','do=apply&id='+d.dataset.id).then(function(r){toast(r.text||'applied')},function(e){toast('not applied: '+e)})}
+// What the page asks cards for: the notes whose lines it shows, or (on /d/) all of them.
+function scope(){
+  if(document.getElementById('cardlist'))return 'all=1';
   var ns={};
   document.querySelectorAll('[data-note]').forEach(function(e){if(!e.closest('.say'))ns[e.dataset.note]=1});
-  var k=Object.keys(ns);if(!k.length)return;
-  fetch(TOK+'/f/cards?notes='+encodeURIComponent(JSON.stringify(k)))
-    .then(function(r){return r.json()}).then(function(cs){
-      var last=null;
-      cs.forEach(function(c){
-        if(document.querySelector('.say[data-id="'+c.id+'"]'))return;
-        var b=document.querySelector('[data-note="'+CSS.escape(c.note)+'"][data-line="'+c.line+'"]:not(.say)');
-        if(!b)return;
-        c.sent=1;last=card(b,c);
-        });
-      if(last&&(!RC||!document.body.contains(RC)))watch(last);
-    },function(){});
+  var k=Object.keys(ns);return k.length?'notes='+encodeURIComponent(JSON.stringify(k)):null}
+function cardLive(){
+  var gen=++CG;if(CC)CC.abort();
+  (function go(){
+    var sc=scope();if(gen!=CG||!sc||document.hidden)return;
+    CC=new AbortController();var t0=Date.now();
+    fetch(TOK+'/f/cards?'+sc+'&wait=1&v='+CV,{signal:CC.signal})
+      .then(function(r){return r.status==204?null:r.ok?r.json():Promise.reject(r.status)}).then(function(j){
+        if(gen!=CG)return;
+        if(j){CV=j.v;CL=j.cards;place(j.cards,t0)}
+        go();
+      },function(e){if(gen==CG&&!(e&&e.name=='AbortError'))setTimeout(go,5000)});
+  })();
+}
+// The line a card belongs under: the last block of its note starting at or before its line.
+function anchor(c){
+  var best=null,bl=-1,first=null;
+  document.querySelectorAll('[data-note="'+CSS.escape(c.note)+'"][data-line]').forEach(function(e){
+    if(e.closest('.say'))return;if(!first)first=e;
+    var l=+e.dataset.line;if(l<=c.line&&l>=bl){best=e;bl=l}});
+  return best||first}
+// On /d/, a card sits under its note's name and the lines it is about.
+function ctx(list,c){
+  var x=document.createElement('div');x.className='ctx';x.dataset.for=c.id;
+  x.innerHTML='<div class=at><a class=wl></a> · L'+c.line+'</div><pre></pre>';
+  var a=x.querySelector('a');a.textContent=c.note;a.href=TOK+'/n/'+encodeURIComponent(c.note);
+  x.querySelector('pre').textContent=c.ctx||'';
+  list.appendChild(x);return x}
+function place(cs,t0){
+  var seen={},list=document.getElementById('cardlist');
+  cs.forEach(function(c){
+    if(CLOSED[c.id])return;
+    seen[c.id]=1;
+    var d=document.querySelector('.say[data-id="'+c.id+'"]');
+    if(!d){var b=list?ctx(list,c):anchor(c);if(!b)return;d=card(b,c)}
+    fill(d,c,t0);
+  });
+  // a card closed (or applied) elsewhere goes here too — unless it is being written in, or
+  // this answer was asked for before the page knew the card at all
+  document.querySelectorAll('.say').forEach(function(d){
+    if(!d._known||d._known>=t0||seen[d.dataset.id])return;
+    if(d.querySelector('textarea').value.trim())return;
+    var x=document.querySelector('.ctx[data-for="'+d.dataset.id+'"]');if(x)x.remove();d.remove()});
+  var none=document.getElementById('none');if(none)none.hidden=!!document.querySelector('.say');
+}
+// Bring one card up to the server's: its colour, its quote, the messages it does not show yet
+// (each in its place by index; a grey one of the user's firms up instead of showing twice),
+// and its fix.
+function fill(d,c,t0){
+  if(!d._known)d._known=t0||1;
+  d.className='say '+c.kind;d.dataset.line=c.line;head(d,c);
+  var th=d.querySelector('.th');
+  var add=c.msgs.filter(function(m){return m.k>=d._n&&!th.querySelector('[data-k="'+m.k+'"]')});
+  if(add.length)grow(d,function(){add.forEach(function(m){
+    var w=document.createElement('div');w.innerHTML=m.html;var n=w.firstElementChild;
+    if(m.by=='user'){var ps=th.querySelectorAll('.t.pend');
+      for(var i=0;i<ps.length;i++)if(!ps[i].dataset.k&&ps[i].textContent==n.textContent){
+        ps[i].dataset.k=m.k;ps[i].classList.remove('pend');return}}
+    var at=null;
+    th.querySelectorAll('.t,.msg').forEach(function(e){
+      if(!at&&(e.dataset.k?+e.dataset.k>m.k:e.classList.contains('pend')))at=e});
+    th.insertBefore(n,at);mathify(n);htmx.process(n)})});
+  d._n=Math.max(d._n,c.n);
+  var fx=d.querySelector('.fx'),sig=c.fix?c.fix.sig:'';
+  if(fx.dataset.sig!==sig){
+    fx.dataset.sig=sig;fx.hidden=!c.fix;
+    fx.innerHTML=c.fix?'<div class=at>fix: replaces L'+c.fix.lines+'</div><pre></pre><button class=ap type=button>apply</button>':'';
+    if(c.fix){fx.querySelector('pre').textContent=c.fix.text;
+      fx.querySelector('.ap').addEventListener('click',function(){applyFix(d)})}}
 }
 // a card being typed in would be lost to a refresh of the page under it
 function typing(){var ts=document.querySelectorAll('.say textarea');
@@ -412,16 +447,15 @@ function quoted(b){
   return (c.textContent||'').trim().replace(/\s+/g,' ').slice(0,160);
 }
 function comment(e){
-  if(e.target.closest('a,form,button,textarea,.diag,.say'))return;
+  if(e.target.closest('a,form,button,textarea,.say,.ctx'))return;
   var b=e.target.closest('[data-line]');if(!b||!b.dataset.note)return;
   var quote=quoted(b);
   // A short id of its own, right here in the quote, is what lets a deliberate `facet answer`
   // find its way back to this card — never a talk reply its poll merely happens to catch.
   var id='c'+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
-  var where='[['+b.dataset.note+']] L'+b.dataset.line+' #'+id+(quote?': "'+quote+'"':'');
   // only one card nothing has been said in is open at a time
   document.querySelectorAll('.say').forEach(function(o){if(fresh(o))o.remove()});
-  var d=card(b,{id:id,note:b.dataset.note,line:b.dataset.line,where:where});
+  var d=card(b,{id:id,note:b.dataset.note,line:+b.dataset.line,quote:quote,kind:'comment'});
   d.querySelector('textarea').focus();
 }
 // iOS Safari does not fire `dblclick` reliably on a touch, so a coarse (touch) pointer gets
@@ -449,10 +483,10 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
     nav.push_str(&item("/", "home", "home"));
     nav.push_str(&item("/chat", "chat", "chat"));
     nav.push_str(&item("/m/", "notes", "notes"));
-    nav.push_str(&item("/d/", "comments", "diag"));
+    nav.push_str(&item("/d/", "cards", "diag"));
     nav.push_str(&item("/tree", "memory", "tree"));
     if !cfg.terminal().is_empty() { nav.push_str(&format!("<a href=\"{}\">term</a>", cfg.terminal())); }
-    let n = diag::all(cfg).len();
+    let n = cards::open(cfg).len();
     let model = if compose {
         crate::optchat::engine::request(&crate::optchat::engine::dir(), serde_json::json!({"op": "status"}))
             .ok().and_then(|v| v["model"].as_str().map(String::from)).unwrap_or_default()
@@ -460,7 +494,7 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
     let status = format!("{}{}{}",
         if model.is_empty() { String::new() } else { format!("<span id=mdl>{}</span> · ", md::esc(&model)) },
         if tell::healthy(cfg) { "" } else { "input down · " },
-        if n > 0 { format!("{} comments", n) } else { String::new() });
+        if n > 0 { format!("{} cards", n) } else { String::new() });
     // Only the chat has a box standing ready at the bottom. Reading a note, what you want to say
     // is always about a line of it, so the box comes to the line you double-click instead. The
     // toast line stays either way — the comment cards post through it.
@@ -525,47 +559,6 @@ fn log_fragment(cfg: &Cfg, since: i64, wait: bool) -> String {
     out
 }
 
-/// One answer as a card shows it; one with a fix attached gets the same apply button a
-/// diagnostic card does, through the same `/x/diag` route.
-fn answer_html(cfg: &Cfg, a: &serde_json::Value) -> String {
-    let mut s = format!("<div class=\"msg talk\">{}</div>",
-        md::render(a["text"].as_str().unwrap_or(""), &note_base(cfg)));
-    if let Some(code) = a["code"].as_str() {
-        s.push_str(&format!("<form hx-post=\"{}/x/diag\" hx-target=\"#toast\" hx-swap=innerHTML>\
-            <input type=hidden name=code value=\"{}\"><button name=do value=apply>apply</button></form>",
-            cfg.token_path(), md::esc(code)));
-    }
-    s
-}
-
-/// The answers addressed to one card, by its id — never a talk reply the poll merely happened
-/// to catch (the bug this and `facet answer` replace). `since` is how many of them the page
-/// has already shown; `data-from` says so back, so a page that has meanwhile moved on (a
-/// second poll for the same card) can tell and not show an answer twice.
-fn reply_fragment(cfg: &Cfg, id: &str, since: usize) -> String {
-    let sd = crate::optchat::engine::state_dir(&crate::optchat::engine::dir());
-    let card = cards::get(&sd, id).unwrap_or(serde_json::Value::Null);
-    let answers = card["answers"].as_array().cloned().unwrap_or_default();
-    let said: String = answers.iter().skip(since).map(|a| answer_html(cfg, a)).collect();
-    format!("<div class=rp data-from=\"{}\" data-high=\"{}\">{}</div>", since.min(answers.len()), answers.len(), said)
-}
-
-/// A card's whole thread, as a reload puts it back: what was said and what was answered, in
-/// the order it happened. An answer knows how many sends it came after (`after`); one from
-/// before that was recorded goes after everything said, where it always used to show.
-fn thread_html(said: &[String], answers: &[serde_json::Value], ans: impl Fn(&serde_json::Value) -> String) -> String {
-    let mut out = String::new();
-    let mut ai = 0;
-    for (k, t) in said.iter().enumerate() {
-        if !t.is_empty() { out.push_str(&format!("<div class=t>{}</div>", md::esc(t))) }
-        while ai < answers.len() && answers[ai]["after"].as_u64().map_or(false, |a| a as usize <= k + 1) {
-            out.push_str(&ans(&answers[ai])); ai += 1;
-        }
-    }
-    for a in &answers[ai..] { out.push_str(&ans(a)) }
-    out
-}
-
 const PAGE: usize = 40;
 
 /// Older chat messages: the PAGE before `before`, and a sentinel that fetches the PAGE before
@@ -596,81 +589,17 @@ fn chat_page(cfg: &Cfg) -> String {
         older_sentinel(cfg, &all[k..], k > 0), log_fragment(cfg, since, false)), true)
 }
 
-/// A diagnostic as a card: the message, the explanation with real math, and the three things
-/// you can do about it. `where_` is shown when the card is away from its note.
-fn diag_card(cfg: &Cfg, d: &diag::Diag, show_where: bool, quote: bool) -> String {
-    let t = cfg.token_path();
-    let base = note_base(cfg);
-    let mut s = format!("<div class=\"diag {}\" id=\"d-{}\"><div><span class=sev>{}</span> \
-        <span class=at>{}L{}</span></div><div>{}</div>",
-        d.severity, md::esc(&d.code), md::esc(&d.severity),
-        if show_where { format!("{} · ", md::esc(d.note.trim_end_matches(".md"))) } else { String::new() },
-        d.line, md::render(&d.message, &base));
-    if quote {
-        s.push_str(&format!("<pre>{}</pre>", md::esc(&diag::context(cfg, d, 1))));
-    }
-    if let Some(det) = &d.detail {
-        s.push_str(&format!("<details class=step><summary>why</summary>{}</details>",
-            md::render(det, &base)));
-    }
-    s.push_str(&format!("<form hx-post=\"{}/x/diag\" hx-target=\"#toast\" hx-swap=innerHTML>\
-        <input type=hidden name=code value=\"{}\">\
-        <input type=text name=note placeholder=\"reason / question\">{}\
-        <button name=do value=dismiss>dismiss</button>\
-        <button name=do value=discuss>discuss</button></form></div>",
-        t, md::esc(&d.code),
-        if d.fixes > 0 { format!("<button name=do value=apply>apply fix ({})</button>", d.fixes) }
-        else { String::new() }));
-    s
-}
-
-/// A note, with its diagnostics anchored in place. The text is cut only at blank lines that
-/// are not inside a fence or a display-math block, so a card never lands mid-block.
+/// A note, rendered whole. Its cards are not in this markup: the page places them under their
+/// lines itself (`/f/cards`), so a card can change without the note being rendered again.
 fn note_html(cfg: &Cfg, d: &doc::Doc) -> String {
-    let ds = diag::for_note(cfg, &d.path);
-    let base = note_base(cfg);
-    let home = home_of(d);
     let lines: Vec<&str> = d.text.split('\n').collect();
     let skip = doc::front_len(&d.text);     // frontmatter is metadata, not prose
-    if ds.is_empty() {
-        let (text, srcs) = doc::assemble(cfg, &home, &lines[skip.min(lines.len())..], skip);
-        return md::render_at(&text, &base, &srcs);
-    }
-    let mut out = String::new();
-    let (mut start, mut fence, mut math) = (skip, false, false);
-    let emit = |out: &mut String, a: usize, b: usize| {
-        if a >= b { return }
-        let (text, srcs) = doc::assemble(cfg, &home, &lines[a..b], a);
-        out.push_str(&md::render_at(&text, &base, &srcs));
-        for g in ds.iter().filter(|g| g.line - 1 >= a as i64 && g.line - 1 < b as i64) {
-            out.push_str(&diag_card(cfg, g, false, false));
-        }
-    };
-    for (i, l) in lines.iter().enumerate().skip(skip) {
-        let tl = l.trim_start();
-        if tl.starts_with("```") { fence = !fence }
-        if tl == "$$" { math = !math }
-        if fence || math { continue }
-        // Cut at blank lines, and at the start of a top-level list item: lists have no blank
-        // lines inside them, and without this a comment on one bullet lands under the last.
-        if l.trim().is_empty() {
-            emit(&mut out, start, i + 1);
-            start = i + 1;
-        } else if (l.starts_with("- ") || l.starts_with("* ")) && i > start {
-            emit(&mut out, start, i);
-            start = i;
-        }
-    }
-    emit(&mut out, start, lines.len());
-    // anything anchored past the end of the note
-    for g in ds.iter().filter(|g| g.line as usize > lines.len()) {
-        out.push_str(&diag_card(cfg, g, false, true));
-    }
-    out
+    let (text, srcs) = doc::assemble(cfg, &home_of(d), &lines[skip.min(lines.len())..], skip);
+    md::render_at(&text, &note_base(cfg), &srcs)
 }
 
-/// One `#`-section of a note: what `[[Note#Section]]` asks for, as `?h=`. No comment cards
-/// here — their line numbers are the whole file's, and a section does not start where it does.
+/// One `#`-section of a note: what `[[Note#Section]]` asks for, as `?h=`. Its lines carry the
+/// whole file's numbers, so the note's cards land in it as they would on the whole note.
 fn section_html(cfg: &Cfg, d: &doc::Doc, h: &str) -> String {
     let Some((s, start)) = doc::section_at(&d.text, h) else { return note_html(cfg, d) };
     let lines: Vec<&str> = s.split('\n').collect();
@@ -713,9 +642,9 @@ fn doc_files(cfg: &Cfg, d: &doc::Doc) -> Vec<PathBuf> {
     seen
 }
 
-/// Changes when anything on the page does: the note, a note it embeds, or a comment on it.
+/// Changes when the page's text does: the note, or a note it embeds. (Cards have their own.)
 fn doc_version(cfg: &Cfg, d: &doc::Doc) -> u64 {
-    doc_files(cfg, d).iter().map(|p| mtime_us(p)).chain(std::iter::once(mtime_us(&diag::file(cfg)))).max().unwrap_or(0)
+    doc_files(cfg, d).iter().map(|p| mtime_us(p)).max().unwrap_or(0)
 }
 
 /// A page that keeps itself current: `live` is the route that answers for it, `v` the version
@@ -752,19 +681,10 @@ fn live_doc(cfg: &Cfg, get: impl Fn() -> Option<doc::Doc>, v: i64, wait: bool,
     }
 }
 
-fn diag_page(cfg: &Cfg) -> String {
-    let ds = diag::all(cfg);
-    let mut body = format!("<h1>Comments</h1><p class=at>{} open</p>", ds.len());
-    if ds.is_empty() { body.push_str("<p class=at>Nothing open. Reviews land in <code>.claude/diagnostics.json</code>.</p>"); }
-    let mut last = String::new();
-    for d in &ds {
-        if d.note != last {
-            body.push_str(&format!("<h2>{}</h2>", md::esc(d.note.trim_end_matches(".md"))));
-            last = d.note.clone();
-        }
-        body.push_str(&diag_card(cfg, d, false, true));
-    }
-    page(cfg, "Comments", "diag", &body, false)
+/// Every open card, under its note's name and the lines it is about — the same component as on
+/// a note, placed by the page from `/f/cards?all=1` and kept live the same way.
+fn cards_page(cfg: &Cfg) -> String {
+    page(cfg, "Cards", "diag", "<h1>Cards</h1><p class=at id=none>Nothing open.</p><div id=cardlist></div>", false)
 }
 
 // ---- the server -------------------------------------------------------------------------
@@ -780,12 +700,12 @@ fn home(cfg: &Cfg) -> String {
         Err(e) => (format!("engine DOWN: {}", e), String::new()),
     };
     let notes = doc::table(cfg).len();
-    let comments = diag::all(cfg).len();
+    let comments = cards::open(cfg).len();
     let mut rows: Vec<(String, &str, String)> = vec![
         (format!("{}/chat", t), "Chat", engine),
         (format!("{}/tree", t), "Memory", "the whole tree: summaries down to every message, searchable".into()),
         (format!("{}/m/", t), "Notes", format!("{} published", notes)),
-        (format!("{}/d/", t), "Comments", format!("{} open", comments)),
+        (format!("{}/d/", t), "Cards", format!("{} open", comments)),
     ];
     if !cfg.terminal().is_empty() { rows.push((cfg.terminal(), "Terminal", "the chat in a terminal (facet chat)".into())); }
     if let Some(u) = cfg.opt("telegram.username") { rows.push((format!("https://t.me/{}", u), "Telegram", format!("@{} · /ping, /last, /help", u))); }
@@ -884,37 +804,85 @@ fn mtime_us_meta(m: &std::fs::Metadata) -> u64 {
         .map(|d| d.as_micros() as u64).unwrap_or(0)
 }
 
-/// Every card of these notes still on the page: who it was about, what was said (from the log,
-/// where the message already is), and the answers it has - the same markup a live card shows.
-fn cards_json(cfg: &Cfg, notes: &[String]) -> String {
-    let sd = crate::optchat::engine::state_dir(&crate::optchat::engine::dir());
-    let all = cards::all(&sd);
-    let msgs = log::since_by(cfg, -1, |m| m.kind == "user" && cards::from_card(&m.text).is_some());
-    let mut out: Vec<(i64, serde_json::Value)> = Vec::new();
-    for (id, c) in all.as_object().into_iter().flatten() {
-        if c["hidden"] == true || !notes.iter().any(|n| Some(n.as_str()) == c["note"].as_str()) { continue }
-        let mine: Vec<&log::Msg> = msgs.iter().filter(|m| cards::from_card(&m.text) == Some(id.as_str())).collect();
-        let Some(first) = mine.first() else { continue };
-        let body = |m: &log::Msg| -> (String, String) {
-            let t = m.text.find("[end prior context]\n\n").map(|k| &m.text[k + 21..]).unwrap_or(&m.text).trim_start();
-            let (w, r) = t.split_once('\n').unwrap_or((t, ""));
-            (w.to_string(), r.trim().to_string())
-        };
-        let said: Vec<String> = mine.iter().map(|m| body(m).1).collect();
-        let answers = c["answers"].as_array().cloned().unwrap_or_default();
-        out.push((first.i, serde_json::json!({
-            "id": id, "note": c["note"], "line": c["line"], "where": body(first).0,
-            "thread": thread_html(&said, &answers, |a| answer_html(cfg, a)),
-            "n": answers.len(),
-        })));
-    }
-    out.sort_by_key(|(i, _)| *i);
-    serde_json::Value::Array(out.into_iter().map(|(_, v)| v).collect()).to_string()
+/// The open cards of these notes (or all of them), as the page builds them: each message
+/// rendered (the user's as typed, the server's as markdown with math) with its index in the
+/// thread, and the fix as the text it would put in. `v` is the version they were read at.
+fn cards_json(cfg: &Cfg, notes: Option<&[String]>) -> String {
+    let v = cards::version(cfg);
+    let base = note_base(cfg);
+    let mut cs: Vec<serde_json::Value> = cards::open(cfg).into_iter()
+        .filter(|c| notes.is_none_or(|ns| ns.iter().any(|n| *n == cards::stem(c["note"].as_str().unwrap_or("")))))
+        .collect();
+    cs.sort_by(|a, b| a["note"].as_str().cmp(&b["note"].as_str()).then(a["line"].as_i64().cmp(&b["line"].as_i64()))
+        .then(a["at"].as_str().cmp(&b["at"].as_str())));
+    let out: Vec<serde_json::Value> = cs.iter().map(|c| {
+        let thread = c["thread"].as_array().cloned().unwrap_or_default();
+        let msgs: Vec<serde_json::Value> = thread.iter().enumerate().map(|(k, m)| {
+            let text = m["text"].as_str().unwrap_or("");
+            let by = if m["by"] == "user" { "user" } else { "server" };
+            let html = if by == "user" { format!("<div class=t data-k={}>{}</div>", k, md::esc(text)) }
+                else { format!("<div class=\"msg talk\" data-k={}>{}</div>", k, md::render(text, &base)) };
+            serde_json::json!({"k": k, "by": by, "html": html})
+        }).collect();
+        let fix = c["fix"].as_array().filter(|f| !f.is_empty()).map(|f| {
+            let text = f.iter().map(|e| e["new_text"].as_str().unwrap_or("")).collect::<Vec<_>>().join("\n…\n");
+            let lines = f.iter().map(|e| {
+                let (a, b) = (e["start_line"].as_i64().unwrap_or(0), e["end_line"].as_i64().unwrap_or(0));
+                if a == b { a.to_string() } else { format!("{}-{}", a, b) }
+            }).collect::<Vec<_>>().join(", ");
+            serde_json::json!({"text": text, "lines": lines, "sig": format!("{}|{}", lines, text)})
+        });
+        let note = c["note"].as_str().unwrap_or("");
+        let mut j = serde_json::json!({
+            "id": c["id"], "note": cards::stem(note), "path": note, "line": c["line"], "kind": c["kind"],
+            "quote": c["quote"], "by": c["by"], "n": thread.len(), "msgs": msgs, "fix": fix,
+        });
+        if notes.is_none() {
+            let text = std::fs::read_to_string(cfg.vault().join(note)).unwrap_or_default();
+            let ls: Vec<&str> = text.split('\n').collect();
+            let (a, b) = (c["line"].as_i64().unwrap_or(1), c["end"].as_i64().unwrap_or(1));
+            let lo = (a - 2).max(0) as usize;
+            let hi = (b.max(a) as usize + 1).min(ls.len());
+            j["ctx"] = ls[lo.min(hi)..hi].join("\n").into();
+        }
+        j
+    }).collect();
+    serde_json::json!({"v": v, "cards": out}).to_string()
+}
+
+fn json_resp(v: serde_json::Value) -> Response<std::io::Cursor<Vec<u8>>> {
+    Response::from_string(v.to_string())
+        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+        .with_header(Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap())
 }
 
 /// A page for something that is not there, in the same dark look as everything else.
 fn gone(cfg: &Cfg, what: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     html(page(cfg, "Not found", "", &format!("<h1>Not found</h1><p class=at>{}</p>", md::esc(what)), false), 404)
+}
+
+/// What the user writes on a card: kept on the card (opening it, if this is its first word),
+/// then told to the conversation as a card message, queued for a turn of its own. A send the
+/// conversation refused is taken back off the card, so the card never shows what was not sent.
+fn card_say(cfg: &Cfg, f: &[(String, String)]) -> Result<serde_json::Value, String> {
+    let (id, text) = (field(f, "id"), field(f, "text"));
+    if text.trim().is_empty() { return Err("empty".into()) }
+    let k = match cards::get(cfg, &id) {
+        Some(_) => cards::say(cfg, &id, "user", &text)?,
+        None => {
+            let line: i64 = field(f, "line").parse().map_err(|_| "no line".to_string())?;
+            let quote = field(f, "quote");
+            cards::create(cfg, cards::New { id: Some(&id), note: &field(f, "note"), at: cards::At::Line(line),
+                text: &text, kind: "comment", fix: None, by: "user", quote: Some(&quote) })?;
+            0
+        }
+    };
+    let c = cards::get(cfg, &id).ok_or("the card vanished")?;
+    if let Err(e) = tell::tell(cfg, &cards::message(&c, &text), "reader", true) {
+        let _ = cards::unsay(cfg, &id, k);
+        return Err(format!("not sent: {}", e));
+    }
+    Ok(serde_json::json!({"k": k}))
 }
 
 fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -953,23 +921,19 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         ["f", "older"] => html(older_fragment(cfg, qnum("before")), 200),
         ["f", "log"] => html(log_fragment(cfg, qnum("since"), qnum("wait") > 0), 200),
 
-        // the answers addressed to one card, for it to show them where it was sent
-        ["f", "reply"] => {
-            // with `wait`, held until the card has more answers than the page has shown
-            let (id, seen) = (qstr("id"), qnum("since").max(0) as usize);
-            let t0 = Instant::now();
-            let sd = crate::optchat::engine::state_dir(&crate::optchat::engine::dir());
-            while qnum("wait") > 0 && t0.elapsed() < LONG
-                && cards::get(&sd, &id).map(|c| c["answers"].as_array().map(|a| a.len()).unwrap_or(0)).unwrap_or(0) <= seen {
-                std::thread::sleep(Duration::from_millis(500));
-            }
-            html(reply_fragment(cfg, &id, seen), 200)
-        }
-
-        // the cards of the notes on a page, so a reload (or a refresh) puts them back
+        // the cards of the notes on a page (or `all`), held with `wait` until any card changes
+        // from `v`: a reply, a new card the agent opened, one closed elsewhere
         ["f", "cards"] => {
-            let notes: Vec<String> = serde_json::from_str(&qstr("notes")).unwrap_or_default();
-            html(cards_json(cfg, &notes), 200)
+            let notes: Option<Vec<String>> = if qnum("all") > 0 { None }
+                else { Some(serde_json::from_str(&qstr("notes")).unwrap_or_default()) };
+            let (v, t0) = (qnum("v"), Instant::now());
+            while qnum("wait") > 0 && cards::version(cfg) as i64 == v {
+                if t0.elapsed() >= LONG { return html(String::new(), 204) }
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            Response::from_string(cards_json(cfg, notes.as_deref()))
+                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                .with_header(Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap())
         }
 
         // the memory tree (folded from the files: the engine's view is the same fold), the
@@ -1013,16 +977,9 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         ["f", "note", name] => { let h = qstr("h");
             live_doc(cfg, || doc::note(cfg, name), qnum("v"), qnum("wait") > 0, |d| note_fragment(cfg, d, name, &h)) }
 
-        ["d"] => html(diag_page(cfg), 200),
+        ["d"] => html(cards_page(cfg), 200),
 
         ["x", "send"] if post => {
-            // a card's first send registers it: who it is about, so a later `facet answer`
-            // (and a fix it attaches) knows where to land, without the id having to carry that
-            let id = field(&f, "id");
-            if !id.is_empty() {
-                let sd = crate::optchat::engine::state_dir(&crate::optchat::engine::dir());
-                cards::register(&sd, &id, &field(&f, "note"), field(&f, "line").parse().unwrap_or(0));
-            }
             let text = field(&f, "text");
             let t = text.trim();
             if t == "/model" || t.starts_with("/model ") {
@@ -1034,29 +991,19 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
             }
         }
 
-        // taking a card off the page for good (its answers stay where `facet answer` put them)
-        ["x", "hide"] if post => {
-            cards::hide(&crate::optchat::engine::state_dir(&crate::optchat::engine::dir()), &field(&f, "id"));
-            html(String::new(), 204)
-        }
-
-        ["x", "diag"] if post => {
-            let (code, note) = (field(&f, "code"), field(&f, "note"));
-            let r = match field(&f, "do").as_str() {
-                "apply" => diag::apply(cfg, &code),
-                "dismiss" => diag::dismiss(cfg, &code, &note),
-                "discuss" => match diag::find(cfg, &code) {
-                    Some(d) => {
-                        let text = format!("About my comment on [[{}]] L{} ({}): {}\n\nThe text there now:\n\n{}\n\n{}",
-                            d.note.trim_end_matches(".md"), d.line, d.code, d.message,
-                            diag::context(cfg, &d, 2), note);
-                        tell::tell(cfg, &text, "comment", false).map(|_| "sent to the conversation".into())
-                    }
-                    None => Err("that diagnostic is gone".into()),
-                },
-                _ => Err("?".into()),
+        // a card, from its page: `say` (the first word opens it), `close` (the X), `apply`
+        ["x", "card"] if post => {
+            let id = field(&f, "id");
+            let r: Result<serde_json::Value, String> = match field(&f, "do").as_str() {
+                "say" => card_say(cfg, &f),
+                "close" => cards::close(cfg, &id, &field(&f, "reason")).map(|m| serde_json::json!({"text": m})),
+                "apply" => cards::apply(cfg, &id).map(|m| serde_json::json!({"text": m})),
+                other => Err(format!("unknown action {:?}", other)),
             };
-            html(match r { Ok(m) => md::esc(&m), Err(e) => format!("no: {}", md::esc(&e)) }, 200)
+            json_resp(match r {
+                Ok(mut v) => { v["ok"] = true.into(); v }
+                Err(e) => serde_json::json!({"ok": false, "error": e}),
+            })
         }
 
         // the one bundled script: kept a week, and revalidated by tag after that
@@ -1076,19 +1023,6 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_reloaded_card_shows_its_thread_in_order() {
-        let said = vec!["fix this".to_string(), "and <that>".to_string()];
-        let a = |t: &str, after: Option<u64>| serde_json::json!({"text": t, "after": after});
-        let ans = |v: &serde_json::Value| format!("<A {}>", v["text"].as_str().unwrap());
-        assert_eq!(thread_html(&said, &[a("one", Some(1)), a("two", Some(2))], ans),
-            "<div class=t>fix this</div><A one><div class=t>and &lt;that&gt;</div><A two>");
-        // answers recorded before `after` existed go last, as they always did
-        assert_eq!(thread_html(&said, &[a("old", None)], ans),
-            "<div class=t>fix this</div><div class=t>and &lt;that&gt;</div><A old>");
-        assert_eq!(thread_html(&[], &[a("x", Some(1))], ans), "<A x>");
-    }
 
     #[test]
     fn a_tagged_page_is_not_resent_to_a_browser_that_has_it() {

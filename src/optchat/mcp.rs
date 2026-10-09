@@ -2,8 +2,9 @@
 // on a loopback port with a random secret in the path (§9: "MCP over HTTP on a local port").
 // The tool list is a constant: it is part of every cached prefix.
 //
-// The master also gets the two output tools (README, "Stream and venues"): send_chat, its
-// only way to speak in the chat venue, and answer_card, its way to answer a line-comment card.
+// The master also gets the output tools (README, "Stream and venues"): send_chat, its only way
+// to speak in the chat venue, and the card tools (new_card, answer_card, fix_card, close_card;
+// list_cards only reads), its way to speak on a line of a note.
 // A detached subagent (`facet spawn`) is pointed at a second path of the same server, which
 // lists and serves zoom and date only: a subagent reports, it never speaks to the user. Task
 // subagents share the master's connection; their definitions (prompts::agents) leave the two
@@ -25,18 +26,37 @@ pub fn tools(full: bool) -> Value {
         let a = t.as_array_mut().unwrap();
         a.push(json!({"name": "send_chat", "description": prompts::SEND_DOC,
             "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}));
+        let st = json!({"type": "string"});
+        a.push(json!({"name": "new_card", "description": prompts::NEW_CARD_DOC,
+            "inputSchema": {"type": "object", "properties": {"note": st, "anchor": st, "line": {"type": "integer"},
+                "text": st, "kind": {"type": "string", "enum": ["comment", "info", "warn", "error"]}, "fix": st},
+                "required": ["note", "text"]}}));
         a.push(json!({"name": "answer_card", "description": prompts::ANSWER_DOC,
-            "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"},
-                "apply": {"type": "string"}}, "required": ["id", "text"]}}));
+            "inputSchema": {"type": "object", "properties": {"id": st, "text": st, "fix": st}, "required": ["id", "text"]}}));
+        a.push(json!({"name": "fix_card", "description": prompts::FIX_CARD_DOC,
+            "inputSchema": {"type": "object", "properties": {"id": st, "fix": st}, "required": ["id", "fix"]}}));
+        a.push(json!({"name": "close_card", "description": prompts::CLOSE_CARD_DOC,
+            "inputSchema": {"type": "object", "properties": {"id": st, "delete": {"type": "boolean"}}, "required": ["id"]}}));
+        a.push(json!({"name": "list_cards", "description": prompts::LIST_CARDS_DOC,
+            "inputSchema": {"type": "object", "properties": {"note": st}}}));
     }
     t
 }
 
-/// What a successful output-tool call returns. The turn loop leaves the call and this result
-/// out of the log (the `chat` or `answer` message already says it); anything else, an error,
-/// is logged as an echo so a failed send is remembered.
+/// What a successful output-tool call returns (or starts with: a new card's result goes on to
+/// give its id). The turn loop leaves the call and this result out of the log (the `chat` or
+/// `answer` message already says it); anything else, an error, is logged as an echo so a
+/// failed send is remembered.
 pub const SENT: &str = "sent";
 pub const ANSWERED: &str = "answered";
+
+/// The card tools that speak (and so log themselves); `list_cards` only reads.
+pub fn card_action(tool: &str) -> Option<&'static str> {
+    match tool {
+        "new_card" => Some("new"), "answer_card" => Some("reply"), "fix_card" => Some("fix"),
+        "close_card" => Some("close"), "list_cards" => Some("list"), _ => None,
+    }
+}
 
 /// The path a detached subagent is given: the same server, read-only tools.
 pub fn agent_url(master: &str) -> String {
@@ -132,12 +152,16 @@ fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
                     Ok(()) => (SENT.into(), false),
                     Err(x) => (format!("send_chat failed: {}", x), true),
                 },
-                "answer_card" if full => {
-                    let id = st("id");
-                    let apply = a["apply"].as_str();
-                    match super::engine::answer(e, &id, &st("text"), apply) {
+                t if full && card_action(t).is_some() => {
+                    let mut q = a.clone();
+                    if !q.is_object() { q = json!({}); }
+                    q["do"] = card_action(t).unwrap().into();
+                    if t == "close_card" && a["delete"] == true { q["do"] = "delete".into(); }
+                    match super::engine::card(e, &q) {
+                        Ok(r) if t == "list_cards" => (r["text"].as_str().unwrap_or("").to_string(), false),
+                        Ok(r) if t == "new_card" => (format!("{}: card {} at L{}", ANSWERED, r["id"].as_str().unwrap_or(""), r["line"]), false),
                         Ok(_) => (ANSWERED.into(), false),
-                        Err(x) => (format!("answer_card {} failed: {}", id, x), true),
+                        Err(x) => (format!("{} failed: {}", t, x), true),
                     }
                 }
                 other => (format!("No tool {}.", other), true),
@@ -157,9 +181,9 @@ mod tests {
         assert_eq!(agent_url("http://127.0.0.1:5/abc/mcp"), "http://127.0.0.1:5/abc/agent");
         let names = |t: Value| t.as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         assert_eq!(names(tools(false)), ["zoom", "date"]);
-        assert_eq!(names(tools(true)), ["zoom", "date", "send_chat", "answer_card"]);
+        assert_eq!(names(tools(true)), ["zoom", "date", "send_chat", "new_card", "answer_card", "fix_card", "close_card", "list_cards"]);
         let a = crate::optchat::prompts::agents("X", "sonnet", "<chat></chat>");
-        assert!(!a.contains("send_chat") && !a.contains("answer_card"));
+        assert!(!a.contains("send_chat") && !a.contains("answer_card") && !a.contains("new_card"));
     }
 
     #[test]

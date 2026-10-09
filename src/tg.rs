@@ -16,7 +16,7 @@
 // tool call. Either choice stays one message away: `/now <text>` delivers into the running turn,
 // `/later <text>` queues whatever the default is, and `/queue on|off` moves the default.
 use crate::cfg::{self, Cfg};
-use crate::{diag, doc, log};
+use crate::{doc, log};
 use serde_json::{json, Value};
 use std::process::Command;
 use std::sync::Mutex;
@@ -235,7 +235,7 @@ pub fn command(cfg: &Cfg, text: &str) -> (String, bool) {
              /model [opus|sonnet]  show or switch the main model\n\
              /queue on|off  which of those is the default\n\n\
              These are answered here instead, and ride along with your next message:\n\
-             /diag  open comments      /notes  published notes\n\
+             /diag  open cards         /notes  published notes\n\
              /cal N days ahead         /mail [query]\n\
              /last N  recent messages  /buffer  what is queued   /flush  send it now\n\
              /link  the reader         /ping  engine and usage left\n\n{}",
@@ -248,7 +248,7 @@ pub fn command(cfg: &Cfg, text: &str) -> (String, bool) {
             Some(p) => match crate::tell::tell(cfg, &p, "telegram", false) { Ok(_) => "sent".into(), Err(e) => e },
             None => "nothing queued".into(),
         }, false),
-        "diag" => (diag::brief(cfg), true),
+        "diag" | "cards" => (crate::cards::brief(cfg, None), true),
         "notes" => {
             let t = doc::table(cfg);
             if t.is_empty() { ("nothing published".to_string(), true) }
@@ -373,9 +373,10 @@ fn outbound(_cfg: Cfg) {
 
         // new comments on notes
         let before = st["tg_diag"].as_i64().unwrap_or(-1);
-        let count = diag::all(&c).len() as i64;
+        // the agent's own cards only: one the user opened by double-click is no news to them
+        let count = crate::cards::open(&c).iter().filter(|x| x["by"] == "server").count() as i64;
         if before >= 0 && count > before {
-            let _ = push(&c, &format!("{} new comment(s), {} open\n{}",
+            let _ = push(&c, &format!("{} new card(s), {} open\n{}",
                 count - before, count, c.url("/d/")));
         }
 
