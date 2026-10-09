@@ -476,7 +476,6 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
     nav.push_str(&item("/m/", "notes", "notes"));
     nav.push_str(&item("/d/", "cards", "diag"));
     nav.push_str(&item("/tree", "memory", "tree"));
-    if !cfg.terminal().is_empty() { nav.push_str(&format!("<a href=\"{}\">term</a>", cfg.terminal())); }
     let n = cards::open(cfg).len();
     let model = if compose {
         crate::optchat::engine::request(&crate::optchat::engine::dir(), serde_json::json!({"op": "status"}))
@@ -703,7 +702,6 @@ fn home(cfg: &Cfg) -> String {
         (format!("{}/m/", t), "Notes", format!("{} published", notes)),
         (format!("{}/d/", t), "Cards", format!("{} open", comments)),
     ];
-    if !cfg.terminal().is_empty() { rows.push((cfg.terminal(), "Terminal", "the chat in a terminal (facet chat)".into())); }
     if let Some(u) = cfg.opt("telegram.username") { rows.push((format!("https://t.me/{}", u), "Telegram", format!("@{} · /ping, /last, /help", u))); }
     // No cards, despite the class name: a list of names, each with its line of state under it.
     let mut b = String::from("<style>.home a.card{display:block;padding:.8rem 0;border:0;color:inherit}\

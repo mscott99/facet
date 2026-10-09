@@ -64,7 +64,6 @@ impl Cfg {
         let b = if b.is_empty() { format!("http://{}:{}", self.host(), self.port()) } else { b };
         format!("{}/{}{}", b, self.token(), tail)
     }
-    pub fn terminal(&self) -> String { self.str("terminal_url", "").trim_end_matches('/').to_string() }
 }
 
 // state: what has already been pushed, where the Telegram cursor is. Written often, never precious.
