@@ -376,14 +376,17 @@ Ctrl-J is a new line; Ctrl-C or Ctrl-D leaves (the engine and a running turn car
 `/resume`, `/stats`, `/status`, `/quit`. A mistyped `/command` is refused, never sent.
 
 Settings live under `chat` in facet.json (all optional): `model` (opus), `effort` (high),
-`compact_model` (sonnet), `compact_effort` (medium), `agent_model` (sonnet), `tools`, `permission`
+`compact_model` (haiku), `compact_effort` (xhigh), `agent_model` (sonnet), `tools`, `permission`
 (bypassPermissions), `cwd` (~), `cache_ttl` (5m), `prime` (true), `budget_hour_eq` (0 = none), `claude`
 (path to the binary). `/model` overrides `model`, and is kept across restarts.
 
 ## Departures from the gist
 
 The engine follows the gist exactly where it can. These are the places it does not, each
-with its reason. Measurements: Claude Code 2.1.268, subscription (OAuth), Sonnet 5.5, through
+with its reason. The gist was rewritten on 2026-10-08 (revision 3c190e0; earlier ones
+2026-10-04); items 1-21 cite the section numbers of the first version, items 22 on those of
+the rewrite (§1 log, §2 tree, §3 view, §3.3 cache, §4 compactions, §5 prompt, §6 turn,
+§7 mistakes). Item 22 is the line-by-line audit against the rewrite. Measurements: Claude Code 2.1.268, subscription (OAuth), Sonnet 5.5, through
 a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 
 **Forced by `claude -p`**
@@ -461,13 +464,17 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     backgrounded Task subagent included, the moment the reply ends, so the paragraph tells it
     to spawn in the foreground when it needs what the subagent finds. For work that should
     outlive the turn, it names `facet spawn` (see 21) instead of backgrounding a Task call.
-13. *Free nodes are built at once*, without waiting for rule 3 (§4.1): they need no model call,
-    so the compactor never sees them; the result is the same.
-14. *Failures do not retry forever at 10 s (§4.1).* A usage-limit error pauses the compactor
-    until the reset time Claude Code reports (else 5 minutes); a node that fails 5 times parks
-    it for an hour (a refusal would otherwise cost a paid call every 10 s, for ever); an
-    optional hourly budget (`budget_hour_eq`) parks it too. `/resume` lifts any of them. A
-    compactor call with no result after 180 s counts as a failure.
+13. *Free nodes are built at once*, without waiting for the start rule (§4: fewer than 8
+    unbuilt lines before a message): they need no model call, so no call ever sees them
+    unbuilt; the result is the same.
+14. *Failures (§4: "a failed call is tried again at the next message").* As the gist: a failed
+    node is held until the next message arrives (logged, or accepted for a turn, so a turn
+    waiting on it is not stuck until the message after) or `/resume`. Added for safety: a
+    usage-limit error pauses the compactor until the reset time Claude Code reports (else 5
+    minutes) and then tries the node again by itself; an optional hourly budget
+    (`budget_hour_eq`) pauses it too; a compactor call with no result after 180 s counts as a
+    failure. (The old 10 s retry and the park after 5 failures are gone with the rule they
+    patched.)
 15. *Messages accepted but not yet logged are durable too (§2).* Queued and held messages are
     kept in a file and queued again after a crash or restart. Cancelling the wait logs the
     waiting messages, unanswered (§6).
@@ -639,9 +646,68 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     plain log line, no turn), so a task passed by file is not lost; `--add-dir /tmp` on the
     master's and spawns' calls keeps work in /tmp from resetting the shell's directory, and a
     trailing "Shell cwd was reset to ..." line is stripped from a tool result before it is logged
-    as `echo`; the compactor's length example (`prompts::SCALE`) is labelled invented, about no
-    real chat, and COMPACT tells it that a summary is never longer than what it stands for and
-    may lean on the lines before it, never the ones after.
+    as `echo`; COMPACT tells the compactor that a summary is never longer than what it stands
+    for and may lean on the lines before it, never the ones after. (The invented length example,
+    `prompts::SCALE`, is gone: the gist's 512-dash ruler replaced it, see 22.)
+
+22. *Audit against the rewritten gist (2026-10-08), and what changed to match it.*
+    Matched by this audit: the compactor is Claude Haiku at xhigh effort (`compact_model`
+    haiku, `compact_effort` xhigh; was sonnet/medium); the task is the gist's, verbatim
+    ("Compaction: compress message {id} ..." / "Compaction: merge lines {a} and {b} ...",
+    `<input>` tags, the message whole), with the 512-dash ruler instead of a sample line (the
+    gist: a real sample line "got its content copied"; this chat saw that, the old SCALE text
+    about a tide-chart widget turning up in real summaries) and the gist's "Too long: ..."
+    retry, at most 5 tries, shortest kept; the compaction's view is its own (§4): the chat's
+    view merged further to 16-32 KB (CVIEW), cut again from the chat's view when that merges,
+    batched back to 16 KB past 32 KB, rendered `id+n|text` like every view (the old "no ids"
+    rule is gone from the gist; a copied `id+n|` head is still stripped from a reply), ending
+    at the node and stopping at the first unbuilt line; a message's node starts once fewer
+    than 8 lines before it are unbuilt and a merge once both halves are built (was: only once
+    every line before it was built, the first version's rule 3); a failed call is tried again
+    at the next message (see 14); the view is saved to `chat/view.json` after every change and
+    loaded at start, never folded again from the log (§3.2, mistake 3; it was folded at every
+    start, so every restart was a full cache miss) — folded only when there is no file yet or
+    it does not fit the log; tool output is clipped to 30,000 characters in all, note included,
+    and any other text longer than that is logged as several messages in a row (§1); COMPACT
+    is the gist's view and compaction sections verbatim (kinds renamed); MASTER gained the
+    gist's "Never grep or search memories manually; zoom is your only allowed mechanism to
+    navigate the tree", "its latest word on a thing is the truth" and "Never wait for one (no
+    sleep, no polling)"; `zoom("spawn_...")` gives a detached agent's whole run (§6).
+
+    Kept, with the gist's argument answered:
+    - *The compactor has its own system prompt and no tools* (§4, §5, mistake 6: "a compaction
+      ... with its own system prompt (it loses the turns' cache)"). The gist's gain is that a
+      compaction reads tools and system prompt from the turns' cache entry. A prompt cache is
+      per model, and here the turns run sonnet or opus while compactions run haiku (the gist's
+      own choice too), so no compaction could ever read the turns' entry; sharing would only
+      add Claude Code's master prefix (its tool definitions, the date block) to every
+      compaction. The compactions share their own constant prefix with each other, which is
+      the part of the gist's argument that still applies. If `compact_model` is ever set to
+      the master's model this should be revisited.
+    - *Queues (§4, mistake 13: "never scan the tree for work: over a long chat, that is
+      O(N²)").* The pump walks each level from a low-water mark below which every node is
+      built (`Mem::lo`), and level 0 stops at the 8th unbuilt line, so one pump costs the nodes
+      still to build plus one step per level, not the tree: the O(N) per pump that makes the
+      gist's O(N²) is not there.
+    - *`view.json` holds an object*, `{"view": {"parts": [[l, i], ...], "cutting": bool},
+      "compact": {...}}`, not a bare list of pairs: the compactions' view and an unfinished
+      batch (§3.2, "it merges what it can at each new message until it does") must survive a
+      restart too, or the next start would differ from the live view the gist says to keep.
+    - *MASTER's subagent paragraph* (12) and *the view as a working rule* (the user's own
+      decisions in this chat): the gist's "use subagents only when the user asks" and "zoom
+      until you have it whole ... before you act" stand against them; kept because the user
+      asked for both after weighing them, and the gist's reason ("without it, models guess from
+      a summary") is answered in the prompt by "zoom freely ... whenever a summary only
+      mentions something you need".
+    - *No user instructions after the prompt* (§5): the user removed the instructions file on
+      purpose; the chat is the memory of how they want work done ("A correction given in chat
+      survives up the tree, so most of an AGENTS.md becomes unneeded", the gist's own line).
+    - *One paragraph added to COMPACT* (lines never longer than what they stand for; lean on
+      the lines before; never "result unseen"): each fixes a failure seen in this chat's
+      summaries, and none contradicts the gist's text.
+    - *zoom("Name")* works only for `facet spawn` agents: a Task subagent's events are dropped
+      (19), so there is no run to give. *Images* (`zoom(id, 1)` "with its images") are not
+      logged by this engine.
 
 Not implemented: computer use, and `tell` — a running `facet spawn` cannot be messaged once
 sent, only awaited for its report (§9); `facet spawn` itself (21) is this engine's answer to
@@ -697,6 +763,9 @@ Append-only, one JSON object per line, fsynced; never edit or delete a line.
                                  venue; answer: sent to a card — see **stream and venues**)
     chat/tree/YYYY-MM-DD.jsonl   {l, i, text, size}            summary node (l, i) covers messages
                                  [i·2^l, (i+1)·2^l); shown as id+n with id = i·2^l, n = 2^l
+    chat/view.json               {view, compact}               the chat's view and the compactions'
+                                 view as [l, i] parts (+ whether a batch is under way); rewritten
+                                 (write, rename) at every change, loaded at start, never refolded
     usage.jsonl                  {date, kind, model, usage}    one line per API request the engine
                                  caused; kind is turn | prime | compact; usage is the API's own
                                  usage object (input, cache read, cache write by TTL, output)

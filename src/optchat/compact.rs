@@ -1,14 +1,15 @@
-// §4 The compactor: a pump that starts every node whose sources and context are ready, in
-// the gist's order, up to JOBS at once; one `claude -p` call per node, with the view as
-// cached context, the size enforced by cut-at-limit feedback in the same conversation.
+// §4 Compactions: a pump that starts every node that is ready, in the gist's order, up to JOBS
+// at once; one `claude -p` call per node, with the compactions' own view (16-32 KB, cut from the
+// chat's) as cached context and the gist's task verbatim, the size shown by a 512-dash ruler and
+// enforced by the cut-at-limit retry in the same conversation, at most TRIES, shortest kept.
 //
-// The cache is marked as in the gist (§8): the context goes out in blocks of BLOCK lines, one
-// mark on its last whole block and one on the request's end (the step). The gate is the
+// The cache is marked as in the gist (§3.3): the context goes out in blocks of BLOCK lines, one
+// mark on its last whole block and one on the request's end (the task). The gate is the
 // gist's too: calls whose marked prefixes are not in the cache yet wait for the one call
-// already writing them, instead of all writing the same 30-40k tokens in parallel.
+// already writing them, instead of all writing the same prefix in parallel.
 use super::claude::{self, Meter, Proc, Tick};
 use super::engine::Engine;
-use super::{cut_bytes, flat, prompts, view, NODE, RETRY, TRIES, CALL_TIMEOUT, WARM};
+use super::{cut_bytes, flat, view, AHEAD, NODE, TRIES, CALL_TIMEOUT, WARM};
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -18,7 +19,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 pub struct Job { pub l: usize, pub i: usize, pub chat: String, pub step: String }
 
-/// Start whatever can start (§4.1). Free nodes are built on the spot: they need no model.
+/// Start whatever can start (§4 of the gist, "The order"): a message's node once fewer than
+/// AHEAD lines before it are still unbuilt, a merge once both its halves are built, up to JOBS
+/// at once. Free nodes are built on the spot: they need no model. The levels are walked from
+/// their low-water marks (`Mem::lo`), below which everything is built, so a pump costs the
+/// nodes still to build, not the tree (see README, "Departures").
 pub fn pump(e: &Arc<Engine>) {
     let mut jobs = Vec::new();
     {
@@ -40,19 +45,20 @@ pub fn pump(e: &Arc<Engine>) {
             }
             l += 1;
         }
-        if grew { let budget = e.conf.view; let mm = &mut *m; mm.view.fit(&mm.store, budget); e.changed.notify_all(); }
+        if grew { let budget = e.conf.view; m.refit(budget); e.changed.notify_all(); }
         if m.paused().is_some() { return }
-        let first = m.view.first(&m.store);
+        // the starts of the view's unbuilt lines, oldest first (only level-0 lines can be unbuilt)
+        let unbuilt: Vec<usize> = m.view.parts.iter().filter(|p| !m.store.built(p.l, p.i)).map(|p| p.start()).collect();
         let mut l = 0;
         'levels: while (1usize << l) <= t {
             let mut i = m.lo(l);
             while ((i + 1) << l) <= t {
                 if m.busy.len() >= e.conf.jobs { break 'levels }
-                let end = if l == 0 { i } else { (i + 1) << l };
-                if end > first { break } // rule 3; `end` only grows with i
-                if !m.store.built(l, i) && !m.busy.contains(&(l, i)) && m.store.ready(l, i) {
+                // a message: fewer than AHEAD unbuilt lines before it; `i` only grows
+                if l == 0 && unbuilt.partition_point(|&x| x < i) >= AHEAD { break }
+                if !m.store.built(l, i) && !m.busy.contains(&(l, i)) && !m.held.contains(&(l, i)) && m.store.ready(l, i) {
                     m.busy.insert((l, i));
-                    jobs.push(job(&m, l, i, &e.conf.name));
+                    jobs.push(job(&m, l, i));
                 }
                 i += 1;
             }
@@ -65,23 +71,41 @@ pub fn pump(e: &Arc<Engine>) {
     }
 }
 
-/// The two blocks of a compactor call (§4.2). `</chat>` opens the step block rather than
-/// closing the chat block, so that one call's chat is a prefix of the next one's.
-fn job(m: &super::engine::Mem, l: usize, i: usize, _name: &str) -> Job {
+/// The 512-dash ruler that shows the model the length (§4 of the gist): a real sample line got
+/// its content copied.
+pub fn ruler() -> String { "-".repeat(NODE) }
+
+/// The two blocks of a compaction (§4 of the gist): its view, then its task, verbatim.
+/// `</chat>` opens the task block rather than closing the view block, so that one call's view
+/// is a prefix of the next one's.
+fn job(m: &super::engine::Mem, l: usize, i: usize) -> Job {
     let s = &m.store;
-    let head = format!("</chat>\n\nFor length only, here is an invented example line about no real chat, exactly {} bytes; never copy or mention its content:\n{}\n\n", NODE, prompts::SCALE);
     if l == 0 {
-        let chat = m.view.bare(s, |p| p.end() <= i);
+        let chat = m.cview.context(s, i);
         let msg = &s.msgs[i];
-        let step = format!("{}Compress this message into one line, in at most {} bytes:\n{}: {}", head, NODE, msg.kind, msg.text);
+        let step = format!("</chat>\n\nCompaction: compress message {} into one line of at most {}\nbytes (about 70 words), the length of this ruler:\n{}\n<input>\n{}: {}\n</input>",
+            i, NODE, ruler(), msg.kind, msg.text);
         Job { l, i, chat, step }
     } else {
-        let end = (i + 1) << l;
-        let chat = m.view.bare(s, |p| p.start() < end);
+        let (start, end) = (i << l, (i + 1) << l);
+        let chat = m.cview.context(s, end);
+        let h = 1usize << (l - 1);
         let (a, b) = (s.node(l - 1, 2 * i).unwrap_or(""), s.node(l - 1, 2 * i + 1).unwrap_or(""));
-        let step = format!("{}Merge these two lines into one, in at most {} bytes:\n{}\n{}", head, NODE, flat(a), flat(b));
+        let step = format!("</chat>\n\nCompaction: merge lines {}+{} and {}+{}, adjacent, into one line of at most\n{} bytes (about 70 words), the length of this ruler:\n{}\n<chat> may hold their messages, {} to {}, in more detail: take details\nof them from there too.\n<input>\n{}\n{}\n</input>",
+            start, h, start + h, h, NODE, ruler(), start, end - 1, flat(a), flat(b));
         Job { l, i, chat, step }
     }
+}
+
+/// A reply that begins with an `id+n|` head, copied from the view's format, loses it.
+pub fn unhead(line: &str) -> &str {
+    let b = line.as_bytes();
+    let mut k = 0;
+    let digits = |k: &mut usize| { let s = *k; while *k < b.len() && b[*k].is_ascii_digit() { *k += 1; } *k > s };
+    if !digits(&mut k) || k >= b.len() || b[k] != b'+' { return line }
+    k += 1;
+    if !digits(&mut k) || k >= b.len() || b[k] != b'|' { return line }
+    line[k + 1..].trim_start()
 }
 
 /// What a node's call did, for the event log only (events.rs).
@@ -108,34 +132,38 @@ fn run(e: &Arc<Engine>, j: Job) {
             let mut m = e.mem.lock().unwrap();
             let mm = &mut *m;
             if let Err(err) = mm.store.put(j.l, j.i, &text) { drop(m); e.notice(&format!("cannot write tree: {}", err)); return }
-            mm.view.fit(&mm.store, e.conf.view);
+            mm.refit(e.conf.view);
             mm.busy.remove(&(j.l, j.i));
             mm.failed.remove(&(j.l, j.i));
             e.changed.notify_all();
         }
         Err(f) => {
-            let n = { let mut m = e.mem.lock().unwrap(); let c = m.failed.entry((j.l, j.i)).or_insert(0); *c += 1; *c };
-            let name = format!("{}+{}", j.i << j.l, 1 << j.l);
+            // §4 of the gist: a failed call is tried again at the next message (Engine::log_at,
+            // turn::input), not on a timer; a usage limit also pauses the compactor until it resets
+            let n = {
+                let mut m = e.mem.lock().unwrap();
+                m.busy.remove(&(j.l, j.i));
+                m.held.insert((j.l, j.i));
+                let c = m.failed.entry((j.l, j.i)).or_insert(0); *c += 1; *c
+            };
             if f.limit {
                 e.mem.lock().unwrap().pause(SystemTime::now() + Duration::from_secs(300), &f.text);
                 e.notice(&format!("compactor paused for 5 min: {}", f.text));
-            } else if n >= PARK {
-                // §4.1 says retry forever; a node that fails every time (a refusal, say) would
-                // then cost a paid call every 10 s. Park instead, and say so.
-                e.mem.lock().unwrap().pause(SystemTime::now() + Duration::from_secs(3600), &format!("node {} failed {} times", name, n));
-                e.notice(&format!("compactor parked for 1 h: node {} failed {} times: {} (/resume to retry now)", name, n, f.text));
+                // the limit's reset is the next chance, message or not: wait out the pause (in
+                // short steps against the wall clock, so /resume and a sleeping laptop are seen)
+                let e = e.clone();
+                std::thread::spawn(move || {
+                    let mut m = e.mem.lock().unwrap();
+                    while m.paused().is_some() { m = e.changed.wait_timeout(m, Duration::from_secs(10)).unwrap().0; }
+                    m.held.remove(&(j.l, j.i));
+                    drop(m);
+                    pump(&e);
+                });
             } else if n == 1 {
-                e.notice(&format!("node {} failed (retrying every {} s): {}", name, RETRY.as_secs(), f.text));
+                e.notice(&format!("node {} failed (tried again at the next message, or /resume): {}", name, f.text));
             }
-            // Wait RETRY, and then out any pause, in short steps against the wall clock: one
-            // long sleep would miss a /resume and, on macOS, stand still while the machine sleeps.
-            let t0 = Instant::now();
-            let mut m = e.mem.lock().unwrap();
-            while t0.elapsed() < RETRY || m.paused().is_some() {
-                m = e.changed.wait_timeout(m, RETRY).unwrap().0;
-            }
-            m.busy.remove(&(j.l, j.i));
-            drop(m);
+            e.changed.notify_all();
+            return;
         }
     }
     pump(e);
@@ -187,14 +215,15 @@ fn call(e: &Arc<Engine>, blocks: &[(String, bool)], keys: &[u64], name: &str, tr
             if out.error { return Err(fail(if out.text.is_empty() { out.subtype } else { out.text })) }
             // the retry note shows the cut ending in "| ← LIMIT"; a model may copy it back
             let line = out.text.trim();
-            let line = line.strip_suffix("← LIMIT").map(|t| t.trim_end().trim_end_matches('|')).unwrap_or(line).trim().to_string();
+            let line = line.strip_suffix("← LIMIT").map(|t| t.trim_end().trim_end_matches('|')).unwrap_or(line).trim();
+            let line = unhead(line).to_string();
             if line.is_empty() { return Err(fail("empty reply")) }
             let n = line.len();
             tr.tries.push(n);
             tries.push(line);
             if n <= NODE || tries.len() >= TRIES { break }
             let cut = cut_bytes(tries.last().unwrap(), NODE).trim_end_matches('\u{FFFD}');
-            p.send_text(&format!("That line is {} bytes; the limit is {}. It must end where it is cut here:\n{}| ← LIMIT", n, NODE, cut))
+            p.send_text(&format!("Too long: your line is {} bytes, over the {}-byte limit. Write\nthe whole line again for the same <input>, cutting just enough of the\nleast valuable items to fit before this cut:\n{}| ← LIMIT", n, NODE, cut))
                 .map_err(|x| fail(format!("write: {}", x)))?;
         }
         Ok(tries.into_iter().min_by_key(|t| t.len()).unwrap())
@@ -209,9 +238,6 @@ fn stderr_tail(p: &Proc) -> String {
     let t = e.trim();
     if t.is_empty() { String::new() } else { format!(": {}", &t[t.len().saturating_sub(300)..]) }
 }
-
-/// failures of one node after which the compactor parks
-const PARK: u32 = 5;
 
 /// The blocks of a compactor call, each with whether it carries a cache mark (§8): the
 /// context's whole blocks of BLOCK lines, the last of them marked, then its partial block,
@@ -301,6 +327,14 @@ mod tests {
         assert_eq!(b2.iter().filter(|x| x.1).count(), 2);
         // 2 + 1 whole blocks at 12 lines: the mark moves one block on, within the lookback
         assert!(b2[2].1);
+    }
+
+    #[test]
+    fn a_copied_head_is_dropped() {
+        assert_eq!(unhead("40+8|user: x"), "user: x");
+        assert_eq!(unhead("40+8| user: x"), "user: x");
+        assert_eq!(unhead("user: 40+8|x"), "user: 40+8|x");
+        assert_eq!(unhead("40+x|y"), "40+x|y");
     }
 
     #[test]

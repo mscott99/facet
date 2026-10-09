@@ -27,7 +27,10 @@ pub struct View {
 fn text<'a>(s: &'a Store, p: &Part) -> &'a str { s.node(p.l, p.i).unwrap_or(PLACEHOLDER) }
 
 impl View {
-    /// At load the view is not read from disk: it is folded again from message 0 (§5.2).
+    /// Fold the view from message 0, as if every message had arrived in order with the tree as
+    /// it is now. Only for a chat that has no saved view yet (or an unreadable one): the gist
+    /// says never to rebuild the live view from the log (§3.2), so it is saved and loaded instead
+    /// (`save`, `load`).
     pub fn fold(s: &Store, budget: usize) -> View {
         let mut v = View::default();
         let mut size = 0;
@@ -40,12 +43,6 @@ impl View {
     }
 
     pub fn size(&self, s: &Store) -> usize { self.parts.iter().map(|p| text(s, p).len()).sum() }
-
-    /// On a new message: append its part, then fit.
-    pub fn append(&mut self, s: &Store, i: usize, budget: usize) {
-        self.parts.push(Part { l: 0, i });
-        self.fit(s, budget);
-    }
 
     /// The gist's batch (§5.2): once the view passes its budget, merge the most due pair whose
     /// parent is built, again and again, until it is at most `inner(budget)` (half). A pair whose
@@ -96,11 +93,6 @@ impl View {
     /// Every line is a summary: the condition for any call to start (§6).
     pub fn settled(&self, s: &Store) -> bool { self.parts.iter().all(|p| s.built(p.l, p.i)) }
 
-    /// First message whose view line is unbuilt (§4.1 `first`).
-    pub fn first(&self, s: &Store) -> usize {
-        self.parts.iter().find(|p| !s.built(p.l, p.i)).map(|p| p.start()).unwrap_or(s.t())
-    }
-
     /// What every agent call sees: `id+n|text` per line, inside <chat> tags (§5.1).
     pub fn render(&self, s: &Store) -> String {
         let mut out = String::from("<chat>\n");
@@ -111,16 +103,78 @@ impl View {
         out
     }
 
-    /// The compactor's context: bare lines, no ids (§4.2), for the parts `keep` selects.
-    /// The closing tag is not included: see compact.rs.
-    pub fn bare(&self, s: &Store, keep: impl Fn(&Part) -> bool) -> String {
+    /// A compaction's context (§4 of the gist): its view's lines, `id+n|text` as every call sees
+    /// them, for the parts that end by message `end`, stopping at the first unbuilt line, so no
+    /// call ever sees a placeholder or half a message. The closing tag is not included: see
+    /// compact.rs.
+    pub fn context(&self, s: &Store, end: usize) -> String {
         let mut out = String::from("<chat>\n");
-        for p in self.parts.iter().filter(|p| keep(p)) {
-            out.push_str(&flat(text(s, p)));
-            out.push('\n');
+        for p in self.parts.iter().take_while(|p| p.end() <= end) {
+            let Some(t) = s.node(p.l, p.i) else { break };
+            out.push_str(&format!("{}+{}|{}\n", p.start(), p.n(), flat(t)));
         }
         out
     }
+
+    /// The view as saved in `view.json` (§3.2 of the gist): its `[l, i]` pairs, and whether a
+    /// batch is still under way.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({"parts": self.parts.iter().map(|p| [p.l, p.i]).collect::<Vec<_>>(), "cutting": self.cutting})
+    }
+
+    /// A saved view, checked against the log: it must tile the chat from message 0 on, every
+    /// part above level 0 built. Messages logged after it was saved (a crash between the two
+    /// writes) are appended as their own lines. None if it does not fit this log.
+    pub fn from_json(v: &serde_json::Value, s: &Store) -> Option<View> {
+        let mut parts = Vec::new();
+        let mut at = 0;
+        for x in v["parts"].as_array()? {
+            let p = Part { l: x[0].as_u64()? as usize, i: x[1].as_u64()? as usize };
+            if p.start() != at || p.end() > s.t() || (p.l > 0 && !s.built(p.l, p.i)) { return None }
+            at = p.end();
+            parts.push(p);
+        }
+        for i in at..s.t() { parts.push(Part { l: 0, i }); }
+        Some(View { parts, cutting: v["cutting"].as_bool().unwrap_or(false) })
+    }
+}
+
+/// Where the saved views live: `chat/view.json`, beside `chat/main/` and `chat/tree/`.
+pub fn path(dir: &std::path::Path) -> std::path::PathBuf { dir.join("chat").join("view.json") }
+
+/// Save the chat's view and the compactions' view, whole, by write-then-rename.
+pub fn save(dir: &std::path::Path, view: &View, cview: &View) -> std::io::Result<()> {
+    let p = path(dir);
+    if let Some(d) = p.parent() { std::fs::create_dir_all(d)?; }
+    let tmp = p.with_extension("json.tmp");
+    let body = serde_json::json!({"view": view.to_json(), "compact": cview.to_json()}).to_string();
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &p)
+}
+
+/// The views at start: loaded from `view.json`; folded from the log only when there is none
+/// that fits it (the first start of a chat, or a file that does not match this log), with a
+/// note saying so. The compactions' view, if missing, is cut from the chat's view (§4).
+pub fn load(dir: &std::path::Path, s: &Store, budget: usize) -> (View, View, Option<String>) {
+    let saved = std::fs::read_to_string(path(dir)).ok().and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok());
+    let (view, note) = match saved.as_ref().and_then(|v| View::from_json(&v["view"], s)) {
+        Some(mut v) => { v.fit(s, budget); (v, None) }
+        None => (View::fold(s, budget), Some(if saved.is_some() { "view.json does not fit the log: view folded again" } else { "no view.json: view folded from the log" }.to_string())),
+    };
+    let cview = match saved.as_ref().and_then(|v| View::from_json(&v["compact"], s)) {
+        Some(mut c) if note.is_none() => { c.fit(s, super::CVIEW); c }
+        _ => compaction_view(&view, s),
+    };
+    (view, cview, note)
+}
+
+/// The compactions' view cut from the chat's (§4 of the gist): the same lines, merged further
+/// by the same rule down to half of CVIEW.
+pub fn compaction_view(view: &View, s: &Store) -> View {
+    let mut c = view.clone();
+    c.cutting = true;
+    c.fit(s, super::CVIEW);
+    c
 }
 
 /// Byte offsets where `s` is cut into cache blocks (§8): just after every BLOCK-th `\n`.
@@ -244,10 +298,53 @@ mod tests {
         s.put(0, 0, "user: 0").unwrap();
         let v = View::fold(&s, 1000);
         assert!(!v.settled(&s));
-        assert_eq!(v.first(&s), 1);
         assert_eq!(v.render(&s), format!("<chat>\n0+1|user: 0\n1+1|{}\n2+1|{}\n</chat>", PLACEHOLDER, PLACEHOLDER));
         s.put(0, 1, "a\nb").unwrap();
-        assert_eq!(v.bare(&s, |p| p.end() <= 2), "<chat>\nuser: 0\na b\n");
+        assert_eq!(v.context(&s, 2), "<chat>\n0+1|user: 0\n1+1|a b\n");
+        // it stops at the first unbuilt line, and at the node's end
+        assert_eq!(v.context(&s, 3), "<chat>\n0+1|user: 0\n1+1|a b\n");
+        assert_eq!(v.context(&s, 1), "<chat>\n0+1|user: 0\n");
+    }
+
+    #[test]
+    fn saved_view_loads_as_it_was_never_refolded() {
+        let mut s = store(40, 10);
+        build_all(&mut s, 100);
+        let d = s.dir.clone();
+        std::fs::create_dir_all(&d).unwrap();
+        // a live view that differs from a fold: grown with a smaller budget, then saved
+        let live = View::fold(&s, 1_500);
+        let c = compaction_view(&live, &s);
+        save(&d, &live, &c).unwrap();
+        let (v, cv, note) = load(&d, &s, 3_000);
+        assert!(note.is_none());
+        assert_eq!(v.parts, live.parts);
+        assert_eq!(cv.parts, c.parts);
+        assert_ne!(View::fold(&s, 3_000).parts, live.parts);
+        // messages logged after the save come in as their own lines
+        s.msgs.push(crate::optchat::store::Msg { kind: "user".into(), text: "new".into(), date: String::new() });
+        let (v2, _, _) = load(&d, &s, 3_000);
+        assert_eq!(v2.parts.last(), Some(&Part { l: 0, i: 40 }));
+        assert_eq!(&v2.parts[..v2.parts.len() - 1], &live.parts[..]);
+        // a file that does not fit the log is folded again, and says so
+        std::fs::write(path(&d), r#"{"view":{"parts":[[0,5]]}}"#).unwrap();
+        assert!(load(&d, &s, 3_000).2.is_some());
+        // no file: folded
+        std::fs::remove_file(path(&d)).unwrap();
+        let (f, fc, n) = load(&d, &s, 3_000);
+        assert!(n.is_some() && tiles(&f, 41) && tiles(&fc, 41));
+    }
+
+    #[test]
+    fn compaction_view_is_the_chat_view_merged_to_half_of_cview() {
+        let mut s = store(3000, 10);
+        build_all(&mut s, 100);
+        let v = View::fold(&s, 128_000);
+        let c = compaction_view(&v, &s);
+        assert!(tiles(&c, 3000));
+        assert!(c.size(&s) <= crate::optchat::CVIEW / 2 && !c.cutting);
+        // every line of it is a line of the view or a merge of some
+        for p in &v.parts { assert!(c.parts.iter().any(|q| q.start() <= p.start() && p.end() <= q.end())); }
     }
 
     #[test]

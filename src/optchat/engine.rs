@@ -73,8 +73,8 @@ impl Conf {
             effort: s("effort", "high"),
             tools: s("tools", "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task"),
             permission: s("permission", "bypassPermissions"),
-            compact_model: s("compact_model", "sonnet"),
-            compact_effort: s("compact_effort", "medium"),
+            compact_model: s("compact_model", "haiku"),
+            compact_effort: s("compact_effort", "xhigh"),
             agent_model: s("agent_model", "sonnet"),
             ttl: s("cache_ttl", "5m"),
             cwd: cfg::tilde(&s("cwd", "~")),
@@ -93,9 +93,15 @@ impl Conf {
 pub struct Mem {
     pub store: Store,
     pub view: View,
+    /// The compactions' own view (§4 of the gist): the chat's view merged further, 16-32 KB.
+    pub cview: View,
     pub busy: HashSet<(usize, usize)>,
     /// failures per node since its last success
     pub failed: HashMap<(usize, usize), u32>,
+    /// Nodes whose last call failed: tried again at the next message (§4 of the gist), not before.
+    pub held: HashSet<(usize, usize)>,
+    /// the chat directory, where `view.json` is saved
+    pub dir: PathBuf,
     lo: Vec<usize>,
     /// Wall clock, not `Instant`: on macOS `Instant` stops while the machine sleeps, so a
     /// pause until the limit resets would outlast the reset by however long the lid was shut.
@@ -103,6 +109,30 @@ pub struct Mem {
 }
 
 impl Mem {
+    pub fn new(dir: PathBuf, store: Store, view: View, cview: View) -> Mem {
+        Mem { store, view, cview, busy: HashSet::new(), failed: HashMap::new(), held: HashSet::new(), dir, lo: Vec::new(), pause: None }
+    }
+
+    /// A new message: its line is appended to both views, then both are fitted (§3.2, §4).
+    pub fn append(&mut self, i: usize, budget: usize) {
+        self.view.parts.push(super::view::Part { l: 0, i });
+        self.cview.parts.push(super::view::Part { l: 0, i });
+        self.refit(budget);
+    }
+
+    /// Fit the chat's view (a batch past its budget); when it merges, the compactions' view is
+    /// cut from it again, else that one only runs its own batch past CVIEW. Then both are saved.
+    pub fn refit(&mut self, budget: usize) {
+        if self.view.fit(&self.store, budget) {
+            self.cview = super::view::compaction_view(&self.view, &self.store);
+        } else {
+            self.cview.fit(&self.store, super::CVIEW);
+        }
+        if let Err(e) = super::view::save(&self.dir, &self.view, &self.cview) {
+            eprintln!("cannot save view.json: {}", e);
+        }
+    }
+
     /// Below this index every node of level l is built: where the pump starts scanning.
     pub fn lo(&mut self, l: usize) -> usize {
         if self.lo.len() <= l { self.lo.resize(l + 1, 0); }
@@ -170,12 +200,20 @@ impl Engine {
     /// Append to the log, extend the view, and let the compactor at it.
     pub fn log(self: &Arc<Self>, kind: &str, text: &str) { self.log_at(kind, text, &super::store::now_iso()) }
 
+    /// §1 of the gist: a text too long for one message is never cut, it is logged as several
+    /// messages in a row, each at most CAP characters (tool output is clipped before this).
     pub fn log_at(self: &Arc<Self>, kind: &str, text: &str, date: &str) {
+        for part in split(text, super::CAP) { self.log_one(kind, part, date); }
+    }
+
+    fn log_one(self: &Arc<Self>, kind: &str, text: &str, date: &str) {
         let r = {
             let mut m = self.mem.lock().unwrap();
             let mm = &mut *m;
             let r = mm.store.log_at(kind, text, date);
-            if let Ok(i) = r { mm.view.append(&mm.store, i, self.conf.view); }
+            if let Ok(i) = r { mm.append(i, self.conf.view); }
+            // §4 of the gist: a failed call is tried again at the next message
+            mm.held.clear();
             self.changed.notify_all();
             r
         };
@@ -241,7 +279,8 @@ impl Engine {
         let t = self.turn.lock().unwrap();
         json!({
             "messages": m.store.t(), "view_parts": m.view.parts.len(), "view_bytes": m.view.size(&m.store),
-            "unsummarized": unbuilt, "compacting": m.busy.len(), "failing": m.failed.len(),
+            "unsummarized": unbuilt, "compacting": m.busy.len(), "failing": m.failed.len(), "held": m.held.len(),
+            "compact_view_bytes": m.cview.size(&m.store),
             "paused": m.pause_reason(), "busy": t.running, "queued": t.queue.len() + t.held.len() + t.later.len(), "later": t.later.len(),
             "phase": t.phase, "hour_eq": self.hour_eq().round(),
             "model": self.model(), "compact_model": self.conf.compact_model,
@@ -250,6 +289,22 @@ impl Engine {
             "dir": self.dir.display().to_string(), "state_dir": state_dir(&self.dir).display().to_string(),
         })
     }
+}
+
+/// `text` in pieces of at most `max` characters, each ending at a line end where one falls in
+/// its last quarter; one piece if it fits.
+pub fn split(text: &str, max: usize) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while rest.chars().count() > max {
+        let at = rest.char_indices().nth(max).map(|(k, _)| k).unwrap_or(rest.len());
+        let min = rest.char_indices().nth(max * 3 / 4).map(|(k, _)| k).unwrap_or(0);
+        let cut = rest[..at].rfind('\n').filter(|&k| k + 1 > min).map(|k| k + 1).unwrap_or(at);
+        out.push(&rest[..cut]);
+        rest = &rest[cut..];
+    }
+    out.push(rest);
+    out
 }
 
 /// Run the engine in this process until stopped. Exits if another engine holds the chat.
@@ -274,9 +329,13 @@ pub fn serve() -> ! {
     let store = Store::open(&dir);
     for n in &store.notes { eprintln!("load: {}", n); }
     let t0 = Instant::now();
-    let view = View::fold(&store, conf.view);
-    eprintln!("{} messages, view of {} lines / {} bytes folded in {} ms",
-        store.t(), view.parts.len(), view.size(&store), t0.elapsed().as_millis());
+    // §3.2: the view is loaded from view.json, never rebuilt from the log (only folded once,
+    // for a chat that has none yet)
+    let (view, cview, vnote) = super::view::load(&dir, &store, conf.view);
+    if let Some(n) = &vnote { eprintln!("load: {}", n); }
+    eprintln!("{} messages, view of {} lines / {} bytes, compactions' view {} lines / {} bytes, in {} ms",
+        store.t(), view.parts.len(), view.size(&store), cview.parts.len(), cview.size(&store), t0.elapsed().as_millis());
+    if vnote.is_some() { let _ = super::view::save(&dir, &view, &cview); }
     // §10: on start, print the view
     println!("{}", view.render(&store));
 
@@ -287,7 +346,7 @@ pub fn serve() -> ! {
 
     let e = Arc::new(Engine {
         dir: dir.clone(), conf,
-        mem: Mutex::new(Mem { store, view, busy: HashSet::new(), failed: HashMap::new(), lo: Vec::new(), pause: None }),
+        mem: Mutex::new(Mem::new(dir.clone(), store, view, cview)),
         changed: Condvar::new(), gate: Default::default(),
         turn: Mutex::new(turn::State::default()), compact_sys, mcp_url: OnceLock::new(),
         watchers: Mutex::new(Vec::new()), spend: Mutex::new(VecDeque::new()), tally: Default::default(),
@@ -379,6 +438,7 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
                 let mut m = e.mem.lock().unwrap();
                 m.pause = None;
                 m.failed.clear();
+                m.held.clear();
                 drop(m);
                 e.changed.notify_all(); // a failed job waiting out the pause
                 e.notice("compactor resumed");
@@ -521,4 +581,18 @@ pub fn ensure(dir: &Path) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(100));
     }
     Err(format!("engine did not start; see {}", sd.join("engine.log").display()))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn long_text_is_split_not_cut() {
+        assert_eq!(super::split("short", 10), vec!["short"]);
+        let t = format!("{}\n{}", "a".repeat(8), "b".repeat(8)); // 17 chars
+        assert_eq!(super::split(&t, 10), vec!["aaaaaaaa\n", "bbbbbbbb"]);
+        let u = "é".repeat(25);
+        let p = super::split(&u, 10);
+        assert_eq!(p.iter().map(|x| x.chars().count()).collect::<Vec<_>>(), vec![10, 10, 5]);
+        assert_eq!(p.concat(), u);
+    }
 }

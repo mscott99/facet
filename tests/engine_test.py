@@ -102,17 +102,20 @@ try:
     check(st["unsummarized"] == 0, "seeded chat settles (%d messages)" % st["messages"])
     merges = [x for x in fake() if x["kind"] == "compact"]
     check(len(merges) > 0, "compactor built merges with a model call (%d calls)" % len(merges))
-    # compactor input: no ids in the context; the context's last block marked; </chat> in the step
+    # compactor input: the view's id+n| lines (the gist's), at most CVIEW; the gist's task, after </chat>
     c = merges[0]["content"]
-    check(all("|" not in b["text"].split("\n")[1][:12] for b in c[:-1] if b["text"].startswith("<chat>\n") and len(b["text"]) > 8), "no ids in compactor context")
-    check(c[-1]["text"].startswith("</chat>\n\nFor length only, here is an invented example line about no real chat, exactly 512 bytes;"), "step block opens with </chat> and SCALE")
+    ctx = "".join(b["text"] for b in c[:-1])
+    check(all(re.match(r"^\d+\+\d+\|", l) for l in ctx.split("\n")[1:] if l), "compactor context lines are id+n|text")
+    check(all(len("".join(b["text"] for b in x["content"][:-1]).encode()) <= 32_000 + 600 for x in merges), "compaction view within CVIEW (32 KB)")
+    check(c[-1]["text"].startswith("</chat>\n\nCompaction: ") and ("-" * 512) in c[-1]["text"] and c[-1]["text"].endswith("</input>"),
+          "task block opens with </chat>, carries the 512-dash ruler and <input>")
     check(sum(1 for b in c if "cache_control" in b) <= 2 and "cache_control" in c[-1], "at most 2 cache marks per compactor call, one on the step (the gist's)")
     whole = [k for k, b in enumerate(c[:-1]) if b["text"].count("\n") == 4]
     check(all(b["text"].count("\n") == 4 for b in c[:-2]) and [k for k, b in enumerate(c[:-1]) if "cache_control" in b] == whole[-1:],
           "compactor context in blocks of 4 lines, the last whole one marked")
     check(all(x["env"]["DISABLE_PROMPT_CACHING"] == "1" for x in merges), "compactor runs with Claude Code marks off")
     retries = [x for x in fake() if x["kind"] == "compact-retry"]
-    check(len(retries) == len(merges) and all(r["text"].startswith("That line is 600 bytes; the limit is 512. It must end where it is cut here:\n") and r["text"].endswith("| ← LIMIT") for r in retries),
+    check(len(retries) == len(merges) and all(r["text"].startswith("Too long: your line is 600 bytes, over the 512-byte limit. Write\nthe whole line again for the same <input>, cutting just enough of the\nleast valuable items to fit before this cut:\n") and r["text"].endswith("| ← LIMIT") for r in retries),
           "one size retry per node, with the cut-at-limit feedback")
     tree = [json.loads(l) for f in os.listdir(os.path.join(D, "chat/tree")) for l in open(os.path.join(D, "chat/tree", f))]
     called = [n for n in tree if n["text"].startswith("S")]
@@ -215,9 +218,12 @@ try:
     req({"op": "send", "text": "TOOLS 4"})
     wait(lambda: any(m["kind"] == "tool" for m in log()[n0:]), 30, "tool before crash")
     req({"op": "send", "text": "SURVIVOR"})
+    saved = json.load(open(os.path.join(D, "chat", "view.json")))
     eng.kill(); eng.wait()
     eng = subprocess.Popen([BIN, "engine"], env=env, stdout=subprocess.DEVNULL, stderr=open(os.path.join(D, "engine2.err"), "w"))
     wait(lambda: os.path.exists(os.path.join(D, "lock")) and any(m["text"] == "SURVIVOR" for m in log()[n0:]), 30, "survivor logged after restart")
+    err2 = open(os.path.join(D, "engine2.err")).read()
+    check("view of" in err2 and "folded" not in err2 and len(saved["view"]["parts"]) > 0, "the view is loaded from view.json at a restart, not folded again (§3.2)")
     wait(idle, 60, "idle after restart")
     L = [(m["kind"], m["text"]) for m in log()[n0:]]
     k = L.index(("user", "SURVIVOR"))

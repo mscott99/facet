@@ -1,6 +1,7 @@
 // The memory: an implementation of Taelin's OptChat gist
 // (gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449), driving `claude -p`.
-// Section numbers in comments (§n) refer to that gist. Departures are listed in README.md.
+// Section numbers in comments (§n) refer to that gist; some older comments still use the
+// numbering of its first version (before 2026-10-08). Departures are listed in README.md.
 //
 //   store    the log and the tree, append-only JSONL, fsync per line (§2)
 //   view     the fold: append, then merge the most due pair (§5)
@@ -30,12 +31,16 @@ pub mod view;
 
 use std::time::Duration;
 
-// §1 constants. Sizes are UTF-8 bytes.
+// Constants. Sizes are UTF-8 bytes.
 pub const NODE: usize = 512;
 pub const VIEW: usize = 128_000;
 pub const JOBS: usize = 8;
 pub const TRIES: usize = 5;
-pub const RETRY: Duration = Duration::from_secs(10);
+/// A compaction's own view (§4 of the gist): the chat's view merged further, to between half
+/// of this and this (16-32 KB), with the same sawtooth.
+pub const CVIEW: usize = 32_000;
+/// A message's node starts once fewer than this many lines before it are still unbuilt (§4).
+pub const AHEAD: usize = 8;
 pub const CAP: usize = 30_000;
 /// Lines per cache block (§8 of the gist): the view goes out as blocks of BLOCK lines, one
 /// cache mark on the last whole block and one on the request's end. The API looks back up to

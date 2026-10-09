@@ -18,7 +18,7 @@ use std::sync::Arc;
 pub fn tools(full: bool) -> Value {
     let mut t = json!([
         {"name": "zoom", "description": prompts::ZOOM_DOC,
-         "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}, "n": {"type": "integer"}}, "required": ["id", "n"]}},
+         "inputSchema": {"type": "object", "properties": {"id": {"type": ["integer", "string"]}, "n": {"type": "integer"}}, "required": ["id"]}},
         {"name": "date", "description": prompts::DATE_DOC,
          "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}}
     ]);
@@ -145,7 +145,12 @@ fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
             let num = |k: &str| a[k].as_i64().or_else(|| a[k].as_str().and_then(|s| s.trim().parse().ok()));
             let st = |k: &str| a[k].as_str().map(String::from).or_else(|| a[k].as_i64().map(|x| x.to_string())).unwrap_or_default();
             let (text, err) = match v["params"]["name"].as_str().unwrap_or("") {
-                "zoom" => (match (num("id"), num("n")) { (Some(i), Some(n)) => zoom(&e.mem.lock().unwrap().store, i, n), _ => "zoom needs id and n.".into() }, false),
+                "zoom" => (match (num("id"), num("n")) {
+                    (Some(i), Some(n)) => zoom(&e.mem.lock().unwrap().store, i, n),
+                    // zoom("Name"): an agent's whole run (§6 of the gist)
+                    (None, _) if a["id"].is_string() => super::agent::transcript(e, &st("id")),
+                    _ => "zoom needs id and n (or an agent's name).".into()
+                }, false),
                 "date" => (match num("id") { Some(i) => date(&e.mem.lock().unwrap().store, i), None => "date needs id.".into() }, false),
                 // the mem lock is not held here: logging takes it
                 "send_chat" if full => match super::engine::chat(e, &st("text")) {

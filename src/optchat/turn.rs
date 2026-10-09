@@ -195,6 +195,10 @@ pub fn input(e: &Arc<Engine>, text: String, later: bool) {
     };
     save(e, &t);
     drop(t);
+    // a message has arrived, even if it is logged only once its turn starts: nodes whose
+    // call failed are tried again now (§4 of the gist), so a turn waiting on one is not stuck
+    let retry = { let mut m = e.mem.lock().unwrap(); let r = !m.held.is_empty(); m.held.clear(); r };
+    if retry { super::compact::pump(e); }
     super::events::log(&e.dir, "input", json!({"how": how, "bytes": text.len()}));
     e.emit(json!({"ev": "accepted", "how": how, "text": text, "waiting": t_later(e)}));
 }
@@ -750,14 +754,15 @@ fn result_text(c: &Value) -> String {
     }
 }
 
-/// §7: a tool result is capped at CAP characters, head and tail kept, with a note of the cut.
+/// §1 of the gist: a tool's output is clipped to its head and tail, CAP characters in all,
+/// the note of the cut included.
 pub fn cap(s: &str) -> String {
     let n = s.chars().count();
     if n <= CAP { return s.to_string() }
-    let half = CAP / 2;
-    let head: String = s.chars().take(half).collect();
-    let tail: String = s.chars().skip(n - half).collect();
-    format!("{}\n[… {} characters cut …]\n{}", head, n - CAP, tail)
+    let keep = CAP - 64; // room for the note
+    let head: String = s.chars().take(keep / 2).collect();
+    let tail: String = s.chars().skip(n - (keep - keep / 2)).collect();
+    format!("{}\n[… {} characters cut …]\n{}", head, n - keep, tail)
 }
 
 /// Persist after each turn (§10): the chat directory is a git repository.
@@ -778,9 +783,10 @@ mod tests {
     fn cap_keeps_head_and_tail() {
         let s = format!("{}{}", "a".repeat(20_000), "b".repeat(20_000));
         let c = super::cap(&s);
-        assert!(c.starts_with(&"a".repeat(15_000)));
-        assert!(c.ends_with(&"b".repeat(15_000)));
-        assert!(c.contains("[… 10000 characters cut …]"));
+        assert!(c.starts_with(&"a".repeat(14_968)));
+        assert!(c.ends_with(&"b".repeat(14_968)));
+        assert!(c.contains("[… 10064 characters cut …]"));
+        assert!(c.chars().count() <= crate::optchat::CAP);
         assert_eq!(super::cap("short"), "short");
     }
 }

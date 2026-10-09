@@ -138,3 +138,42 @@ fn run(e: Arc<Engine>, mut p: Proc, rec: Rec) {
     e.spawns.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     super::engine::restart_if_idle(&e);
 }
+
+/// zoom("Name") (§6 of the gist): a detached agent's whole run, from its captured stream: its
+/// text, its tool calls and their results (each clipped as the log clips tool output). Task
+/// subagents leave no stream behind (their events are dropped), so only `facet spawn` ids work.
+pub fn transcript(e: &Engine, name: &str) -> String {
+    let name = name.trim();
+    if !name.starts_with("spawn_") || !name[6..].chars().all(|c| c.is_ascii_hexdigit()) || name.len() == 6 {
+        return format!("No agent {}: zoom takes a `facet spawn` id (spawn_...).", name);
+    }
+    let Ok(body) = std::fs::read_to_string(dir(e).join(format!("{}.jsonl", name))) else {
+        return format!("No agent {}.", name);
+    };
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let Ok(ev) = serde_json::from_str::<Value>(line) else { continue };
+        let blocks = ev["message"]["content"].as_array().cloned().unwrap_or_default();
+        match ev["type"].as_str().unwrap_or("") {
+            "assistant" => for b in &blocks {
+                match b["type"].as_str().unwrap_or("") {
+                    "text" => { let t = b["text"].as_str().unwrap_or("").trim(); if !t.is_empty() { out.push(format!("agent: {}", t)); } }
+                    "tool_use" => out.push(format!("tool: {} {}", b["name"].as_str().unwrap_or(""), b["input"])),
+                    _ => {}
+                }
+            },
+            "user" => for b in &blocks {
+                if b["type"] == "tool_result" {
+                    let t = match &b["content"] {
+                        Value::String(x) => x.clone(),
+                        Value::Array(a) => a.iter().filter_map(|x| x["text"].as_str()).collect::<Vec<_>>().join("\n"),
+                        _ => String::new(),
+                    };
+                    out.push(format!("echo: {}", turn::cap(&t)));
+                }
+            },
+            _ => {}
+        }
+    }
+    if out.is_empty() { format!("Agent {} has no steps on file yet.", name) } else { out.join("\n\n") }
+}

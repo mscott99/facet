@@ -56,9 +56,9 @@ fn main() {
             let dir = optchat::engine::dir();
             match optchat::engine::request(&dir, serde_json::json!({"op": "view"})) {
                 Ok(v) => println!("{}", v["view"].as_str().unwrap_or("")),
-                Err(_) => { // no engine: the view is a fold of the files
+                Err(_) => { // no engine: the view saved in view.json
                     let s = optchat::store::Store::open(&dir);
-                    println!("{}", optchat::view::View::fold(&s, optchat::VIEW).render(&s));
+                    println!("{}", optchat::view::load(&dir, &s, optchat::VIEW).0.render(&s));
                 }
             }
         }
@@ -66,7 +66,7 @@ fn main() {
             let out = PathBuf::from(rest.first().map(|s| s.as_str()).unwrap_or("memory.html"));
             let dir = optchat::engine::dir();
             let s = optchat::store::Store::open(&dir);
-            let v = optchat::view::View::fold(&s, optchat::VIEW);
+            let v = optchat::view::load(&dir, &s, optchat::VIEW).0;
             match std::fs::write(&out, optchat::browse::html(&s, &v, optchat::VIEW, None)) {
                 Ok(()) => println!("{}", out.display()), Err(e) => die(&e.to_string()) }
         }

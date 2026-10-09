@@ -243,9 +243,9 @@ Alt-Enter (Shift-Enter after Claude Code's /terminal-setup) sends for a turn of 
 /// The memory tree as a page (optchat/browse.rs), opened in the browser here; the same page is
 /// live at /tree on the web route, which is the way in from the phone.
 fn tree(dir: &std::path::Path) -> Result<String, String> {
-    use crate::optchat::{browse, store::Store, view::View, VIEW};
+    use crate::optchat::{browse, store::Store, view, VIEW};
     let s = Store::open(dir);
-    let v = View::fold(&s, VIEW);
+    let v = view::load(dir, &s, VIEW).0;
     let out = engine::state_dir(dir).join("memory.html");
     std::fs::write(&out, browse::html(&s, &v, VIEW, None)).map_err(|e| e.to_string())?;
     // /usr/bin/open on macOS, xdg-open elsewhere; if neither exists, nothing happens.
