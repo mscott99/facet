@@ -45,7 +45,7 @@ async function until(f, ms) { const t = Date.now(); while (Date.now() - t < ms) 
     check(b && b.dataset.line === "7", `it sits under its line (after L${b && b.dataset.line})`);
     check(fresh.querySelector(".th .msg.talk") && /x\^2/.test(fresh.querySelector(".th").textContent), "its message is in its thread");
     check(!fresh.querySelector(".fx").hidden && fresh.querySelector(".fx pre").textContent === "LINE FIVE" && fresh.querySelector(".fx .ap"), "its fix shows, with apply");
-    check(fresh.querySelector(".hd .x") && fresh.querySelector(".cmp textarea").getAttribute("rows") === "1", "X at the top, a one-row box at the bottom");
+    check(fresh.querySelector(".cmp .no") && fresh.querySelector(".cmp textarea").getAttribute("rows") === "1", "dismiss beside send, a one-row box at the bottom");
   }
 
   // a reader double-clicks line three and writes on it
@@ -68,7 +68,7 @@ async function until(f, ms) { const t = Date.now(); while (Date.now() - t < ms) 
   // the X closes the agent's card
   if (fresh) {
     const id = fresh.dataset.id;
-    fresh.querySelector(".hd .x").click();
+    fresh.querySelector(".cmp .no").click();
     check(!doc.querySelector(`.say[data-id="${id}"]`), "the X takes the card off the page");
     await sleep(1500);
     const cs2 = await (await fetch(`${base}/${tok}/f/cards?all=1`)).json();
