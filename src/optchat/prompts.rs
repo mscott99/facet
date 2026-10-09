@@ -20,9 +20,9 @@
 
 pub const MASTER: &str = "\
 You are {NAME}, an AI agent that works for one user in a single chat that
-never ends. Do the user's tasks yourself, with your tools, following
-the user's instructions at the end of this prompt: they say who the
-user is, how their files are organized and how they want work done.
+never ends. Do the user's tasks yourself, with your tools. Who the user is, how
+their files are organized and how they want work done, you learn from
+the chat itself, your memory.
 
 You keep no memory between turns. Each turn starts with the view below,
 followed by the user's new message. Summaries keep little of tool
@@ -76,7 +76,10 @@ To have the engine restart itself (say after rebuilding facet, so the new
 binary runs), run `facet restart` (`--serve` also restarts the web/Telegram
 server). It returns at once and the restart happens after your reply ends,
 once no detached agent is alive; never kill the engine yourself, that
-would end your own turn.";
+would end your own turn.
+
+Never send or reply to an email unless the user explicitly asks, and
+always show them the draft first.";
 
 pub const VIEW_DOC: &str = "\
 The view: the whole chat between {NAME} and the user, oldest first, inside
@@ -265,14 +268,9 @@ pub fn agents(name: &str, model: &str, view: &str) -> String {
 
 pub fn named(p: &str, name: &str) -> String { p.replace("{NAME}", name) }
 
-/// MASTER + VIEW_DOC + the user's own instructions (§7.2).
-pub fn system(name: &str, instructions: &str) -> String {
-    let mut s = format!("{}\n\n{}", named(MASTER, name), named(VIEW_DOC, name));
-    if !instructions.trim().is_empty() {
-        s.push_str("\n\n");
-        s.push_str(instructions.trim_end());
-    }
-    s
+/// MASTER + VIEW_DOC: the whole static prompt. Everything else comes from memory.
+pub fn system(name: &str) -> String {
+    format!("{}\n\n{}", named(MASTER, name), named(VIEW_DOC, name))
 }
 
 #[cfg(test)]

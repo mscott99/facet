@@ -324,8 +324,7 @@ fn settle(e: &Arc<Engine>) -> bool {
 /// The arguments of a master call. Priming and the real call must use exactly these.
 fn args(e: &Engine, view: &str) -> Vec<String> {
     let sd = state_dir(&e.dir);
-    let instr = std::fs::read_to_string(&e.conf.instructions).unwrap_or_default();
-    let sys = prompts::system(&e.conf.name, &instr);
+    let sys = prompts::system(&e.conf.name);
     super::events::system(&e.dir, "master", &sys);
     let f = sd.join("system.txt");
     if std::fs::read_to_string(&f).ok().as_deref() != Some(sys.as_str()) { let _ = std::fs::write(&f, &sys); }

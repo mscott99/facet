@@ -301,8 +301,7 @@ Ctrl-J is a new line; Ctrl-C or Ctrl-D leaves (the engine and a running turn car
 
 Settings live under `chat` in facet.json (all optional): `model` (opus), `effort` (high),
 `compact_model` (sonnet), `compact_effort` (medium), `agent_model` (sonnet), `tools`, `permission`
-(bypassPermissions), `cwd` (~), `instructions` (~/.optchat/instructions.md, appended to the
-system prompt), `cache_ttl` (5m), `prime` (true), `budget_hour_eq` (0 = none), `claude`
+(bypassPermissions), `cwd` (~), `cache_ttl` (5m), `prime` (true), `budget_hour_eq` (0 = none), `claude`
 (path to the binary). `/model` overrides `model`, and is kept across restarts.
 
 ## Departures from the gist

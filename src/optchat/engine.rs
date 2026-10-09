@@ -49,7 +49,6 @@ pub struct Conf {
     pub agent_model: String,
     pub ttl: String,
     pub cwd: PathBuf,
-    pub instructions: PathBuf,
     pub prime: bool,
     pub safe_mode: bool,
     /// eq per hour above which the compactor parks (0 = no limit)
@@ -59,7 +58,7 @@ pub struct Conf {
 }
 
 impl Conf {
-    pub fn load(dir: &Path) -> Conf {
+    pub fn load(_dir: &Path) -> Conf {
         // `chat.<key>` in facet.json; FACET_CHAT_<KEY> in the environment wins (tests)
         let mut c = Cfg::load();
         for (k, v) in std::env::vars() {
@@ -80,7 +79,6 @@ impl Conf {
             agent_model: s("agent_model", "sonnet"),
             ttl: s("cache_ttl", "5m"),
             cwd: cfg::tilde(&s("cwd", "~")),
-            instructions: c.opt("chat.instructions").map(|p| cfg::tilde(&p)).unwrap_or_else(|| dir.join("instructions.md")),
             prime: c.get_bool("chat.prime", true),
             // --safe-mode would be ideal (no CLAUDE.md, skills, hooks) but it also drops --mcp-config
             // servers (measured), so zoom and date would be gone; --setting-sources "" is enough
