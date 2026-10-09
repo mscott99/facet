@@ -37,16 +37,16 @@ pub const JOBS: usize = 8;
 pub const TRIES: usize = 5;
 pub const RETRY: Duration = Duration::from_secs(10);
 pub const CAP: usize = 30_000;
-/// Where the view is cut for the cache marks. Tied to the budget, the last one just under it,
-/// so that a view sitting at its budget is almost entirely inside the cacheable prefix (§8).
-pub const MARKS: [usize; 3] = [VIEW * 3 / 8, VIEW * 5 / 8, VIEW * 15 / 16];
+/// Where the view is cut for the cache marks (characters). The view climbs from VIEW/2 to VIEW
+/// by appends alone and is then cut back to VIEW/2 in one batch (`inner`), so its prefix holds
+/// still for the whole climb. The first mark sits just under the post-cut size, so it is present
+/// from the first call after a cut; the other two follow the climb, so the tail past the last
+/// mark stays short through it (§8).
+pub const MARKS: [usize; 3] = [VIEW * 15 / 32, VIEW * 23 / 32, VIEW * 15 / 16];
 
-/// The outer limit on the view: appends may carry it this far past its budget before anything
-/// collapses, and a collapse then takes it back to the budget in one batch. One limit instead
-/// of two means a collapse on nearly every append, each one reshaping the front of the view and
-/// so throwing away the compactor's cached prefix. The view holds its full budget of history
-/// either way; it is simply allowed to drift a little above it between collapses.
-pub const fn over(budget: usize) -> usize { budget * 27 / 25 }
+/// What a batch cuts the view back to once it passes its budget: half of it, as in the gist
+/// (128 KB down to 64 KB).
+pub const fn inner(budget: usize) -> usize { budget / 2 }
 
 /// A compactor call that has produced no result by then is failed like any other.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(180);

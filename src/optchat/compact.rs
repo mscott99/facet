@@ -230,7 +230,7 @@ const PARK: u32 = 5; // the API looks back 20 blocks from a mark
 fn h(s: &str) -> u64 { let mut x = DefaultHasher::new(); s.hash(&mut x); x.finish() }
 
 /// The blocks of a compactor call, each with whether it carries a cache mark.
-/// View pieces at 50k/80k/100k marked, the tail as chain blocks with the last one marked;
+/// View pieces at the MARKS (60k/92k/120k characters) marked, the tail as chain blocks with the last one marked;
 /// a mark left over goes on the step, which then serves the size retries.
 pub fn layout(ch: &mut Chain, chat: &str, step: &str) -> Vec<(String, bool)> {
     let cuts = view::cuts(chat);

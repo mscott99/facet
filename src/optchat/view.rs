@@ -2,7 +2,7 @@
 // budget. It only ever appends at the end and coarsens (never splits), so consecutive views
 // share a long prefix, which is what makes them cacheable (§8).
 use super::store::Store;
-use super::{flat, MARKS};
+use super::{flat, inner, MARKS};
 
 pub const PLACEHOLDER: &str = "(not summarized yet: zoom it)";
 
@@ -16,7 +16,13 @@ impl Part {
 }
 
 #[derive(Default, Clone)]
-pub struct View { pub parts: Vec<Part> }
+pub struct View {
+    pub parts: Vec<Part>,
+    /// A batch is under way: the view passed its budget and has not yet been brought down to
+    /// `inner(budget)` (some parents were unbuilt). It goes on merging what it can at each fit
+    /// until it gets there (§3.2 of the gist).
+    pub cutting: bool,
+}
 
 fn text<'a>(s: &'a Store, p: &Part) -> &'a str { s.node(p.l, p.i).unwrap_or(PLACEHOLDER) }
 
@@ -41,9 +47,10 @@ impl View {
         self.fit(s, budget);
     }
 
-    /// Past the outer limit, replace the most due mergeable pair by its parent until back at
-    /// the budget. A pair whose parent is not built yet is passed over; if none is built, stay
-    /// over budget (§5.2).
+    /// The gist's batch (§5.2): once the view passes its budget, merge the most due pair whose
+    /// parent is built, again and again, until it is at most `inner(budget)` (half). A pair whose
+    /// parent is not built yet is passed over; if that stops the batch short, it goes on at each
+    /// later fit until it gets there. Returns whether anything merged.
     pub fn fit(&mut self, s: &Store, budget: usize) -> bool {
         let before = self.parts.len();
         let size = self.size(s);
@@ -52,33 +59,37 @@ impl View {
     }
 
     fn fit_from(&mut self, s: &Store, budget: usize, mut size: usize, t: usize) -> usize {
-        // Two limits: nothing collapses until the view has drifted past the outer one, and then
-        // it collapses all the way back to the budget, so the marked prefix holds still in
-        // between and the compactor's cache survives the appends (§8, `over`).
-        if size <= super::over(budget) { return size }
-        while size > budget {
+        // Nothing merges until the view passes the budget; then it goes down to half the budget
+        // in one batch, so the view grows by appends alone, its prefix byte-identical, for the
+        // whole climb back up (§8).
+        if size > budget { self.cutting = true; }
+        if !self.cutting { return size }
+        let floor = inner(budget);
+        while size > floor {
             let mut best: Option<usize> = None;
             for k in 0..self.parts.len().saturating_sub(1) {
                 let (a, b) = (self.parts[k], self.parts[k + 1]);
                 if a.l != b.l || a.i % 2 != 0 || b.i != a.i + 1 || !s.built(a.l + 1, a.i / 2) { continue }
-                // due = (T - start) / 2^(l+2); compare exactly, keep the first of equals
+                // due = (T - last) / 2^l, last = the pair's last message (b.end() - 1);
+                // compare exactly, keep the first (oldest) of equals
                 best = match best {
                     Some(j) => {
                         let c = self.parts[j];
-                        let lhs = ((t - a.start()) as u128) << (c.l + 2);
-                        let rhs = ((t - c.start()) as u128) << (a.l + 2);
+                        let lhs = ((t + 1 - b.end()) as u128) << c.l;
+                        let rhs = ((t + 1 - self.parts[j + 1].end()) as u128) << a.l;
                         if lhs > rhs { Some(k) } else { Some(j) }
                     }
                     None => Some(k),
                 };
             }
-            let Some(k) = best else { break };
+            let Some(k) = best else { return size };
             let (a, b) = (self.parts[k], self.parts[k + 1]);
             let up = Part { l: a.l + 1, i: a.i / 2 };
             size = size - text(s, &a).len() - text(s, &b).len() + text(s, &up).len();
             self.parts[k] = up;
             self.parts.remove(k + 1);
         }
+        self.cutting = false;
         size
     }
 
@@ -172,7 +183,7 @@ mod tests {
         build_all(&mut s, 100);
         let v = View::fold(&s, 20_000);
         assert!(tiles(&v, 3000));
-        assert!(v.size(&s) <= crate::optchat::over(20_000)); // the outer limit, not the budget
+        assert!(v.size(&s) <= 20_000);
         // older parts are at least as coarse as newer ones, roughly: the first is the coarsest
         assert!(v.parts[0].l >= v.parts.last().unwrap().l);
         assert_eq!(v.parts.last().unwrap().l, 0);
@@ -210,6 +221,26 @@ mod tests {
         assert!(v.fit(&s, 300));
         assert_eq!(v.parts.len(), 7);
         assert_eq!(v.parts[4], Part { l: 1, i: 2 });
+    }
+
+    #[test]
+    fn batch_cuts_to_half_and_resumes_when_short() {
+        let mut s = store(8, 10);
+        for i in 0..8 { s.put(0, i, &"z".repeat(100)).unwrap(); }
+        let mut v = View::fold(&s, 750); // 800 > 750: a batch starts, nothing to merge yet
+        assert!(v.cutting);
+        assert_eq!(v.parts.len(), 8);
+        s.put(1, 0, &"p".repeat(50)).unwrap();
+        assert!(v.fit(&s, 750)); // one merge, 650 bytes, still over 375: the batch goes on
+        assert!(v.cutting && v.size(&s) == 650);
+        for i in 1..4 { s.put(1, i, &"p".repeat(50)).unwrap(); }
+        s.put(2, 0, &"q".repeat(50)).unwrap();
+        assert!(v.fit(&s, 750)); // under its budget, but the batch runs on down to half
+        assert!(v.size(&s) <= 375 && !v.cutting);
+        // most due first, (T - last) / 2^l: 2+2 (due 5), then 4+2 (3) over 0+4 (2.5)
+        let p = |l, i| Part { l, i };
+        assert_eq!(v.parts, vec![p(1, 0), p(1, 1), p(1, 2), p(0, 6), p(0, 7)]);
+        assert!(!v.fit(&s, 750)); // and then nothing until the budget is passed again
     }
 
     #[test]
