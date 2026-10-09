@@ -1,0 +1,13 @@
+# Zotero translation-server for `life zot add`; loopback only.
+[Unit]
+Description=Zotero translation-server (127.0.0.1:1969)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/.local/share/translation-server
+ExecStart=%h/.local/node/bin/node src/server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

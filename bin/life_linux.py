@@ -1482,7 +1482,72 @@ def resolve_url(url):
     return it
 
 
-def resolve_any(s):
+TSERVER = os.environ.get("LIFE_TRANSLATION_URL", "http://127.0.0.1:1969")
+NOTES = []  # remarks from the last resolve (which path, multiple-choice lists), printed by zot add
+
+
+def ts_post(path, body, ctype, timeout=60):
+    """POST to the local translation-server. Returns (status, text); raises OSError if unreachable."""
+    req = urllib.request.Request(TSERVER + path, data=body.encode(), method="POST",
+                                 headers={"Content-Type": ctype, "User-Agent": "life-zot/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+
+
+def ts_item(it):
+    """Translation-server item -> Zotero item the Web API accepts (drop its bookkeeping fields)."""
+    it = {k: v for k, v in it.items() if k not in ("key", "version", "attachments", "notes", "seeAlso", "id")}
+    it["tags"] = []
+    return it
+
+
+def resolve_ts(s):
+    """Resolve an identifier (DOI, arXiv id, ISBN, PMID) via /search or a URL via /web on the local
+    translation-server. Returns an item, or None when the server is down or finds nothing (caller falls back)."""
+    try:
+        if re.match(r"https?://", s) and not re.search(r"doi\.org/10\.|arxiv\.org/(abs|pdf)/", s):
+            sess = uuid.uuid4().hex
+            code, txt = ts_post("/web", json.dumps({"url": s, "session": sess}), "application/json")
+            if code == 300:
+                ch = json.loads(txt).get("items") or {}
+                titles = [(k, (v.get("title") if isinstance(v, dict) else str(v))) for k, v in ch.items()]
+                NOTES.append("translation-server offered %d choices; picked the first:" % len(titles))
+                NOTES.extend("  %s%s" % ("* " if i == 0 else "  ", t) for i, (k, t) in enumerate(titles[:10]))
+                if not titles:
+                    return None
+                code, txt = ts_post("/web", json.dumps({"url": s, "session": sess, "items": {titles[0][0]: ch[titles[0][0]]}}),
+                                    "application/json")
+        else:
+            ident = s.strip()
+            if re.match(r"https?://", ident):
+                ident = ("arXiv:" + arxiv_id_of(ident)) if arxiv_id_of(ident) else (doi_of(ident) or ident)
+            code, txt = ts_post("/search", ident, "text/plain")
+        if code != 200:
+            NOTES.append("translation-server: HTTP %s; using Crossref/arXiv/meta" % code)
+            return None
+        items = json.loads(txt)
+        if not items:
+            return None
+        NOTES.append("source: translation-server")
+        return ts_item(items[0])
+    except (OSError, ValueError, KeyError) as e:
+        NOTES.append("translation-server unavailable or failed (%s); using Crossref/arXiv/meta" % (e,))
+        return None
+
+
+def resolve_any(s, ts=True):
+    del NOTES[:]
+    if ts:
+        it = resolve_ts(s)
+        if it:
+            return it
+    return resolve_old(s)
+
+
+def resolve_old(s):
     ax = arxiv_id_of(s)
     if ax:
         return resolve_arxiv(ax)
@@ -1599,7 +1664,9 @@ def clean_item(it):
 
 
 def cmd_zot_add(a):
-    item = clean_item(resolve_any(a.what))
+    item = clean_item(resolve_any(a.what, ts=not getattr(a, "no_translation", False)))
+    for n in NOTES:
+        print(n)
     item["tags"] = [{"tag": t} for t in a.tag]
     if a.collection:
         item["collections"] = [a.collection]

@@ -395,7 +395,7 @@ def main():
     s.add_argument("query", nargs="+"); s.set_defaults(fn=cmd_zot_find)
     s = z.add_parser("add", help="add an item from an arXiv id, DOI or URL (dry run unless --yes; never edits existing items)")
     s.add_argument("what", help="arXiv id/url, DOI/doi.org url, or web page url")
-    s.add_argument("--collection", help="collection key"); s.add_argument("--tag", action="append", default=[])
+    s.add_argument("--collection", help="collection key"); s.add_argument("--no-translation", action="store_true", help="skip translation-server (Crossref/arXiv/meta only)"); s.add_argument("--tag", action="append", default=[])
     s.add_argument("--yes", action="store_true", help="really create it"); s.set_defaults(fn=cmd_zot_add)
     s = z.add_parser("pdf", help="local path of an item's PDF, fetched on demand from the Zotero WebDAV share (read-only)")
     s.add_argument("what", nargs="*", help="item key, citekey, attachment key, or search text")

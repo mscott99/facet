@@ -132,9 +132,17 @@ copy `bin/life.accounts.example.json`.
     with no bib entry or note.
   - `zot sync [--force]`: just update the cache.
   - `zot find QUERY...`: live search of the personal library (`qmode=everything`), same line format as `search`.
-  - `zot add <arxiv-id|doi|url> [--collection KEY] [--tag T]... [--yes]`: resolves arXiv (arXiv API, `preprint`), DOI
+  - `zot add <arxiv-id|doi|url> [--collection KEY] [--tag T]... [--no-translation] [--yes]`: first asks the local
+    Zotero **translation-server** (`systemd/zotero-translation.service`, user unit on `127.0.0.1:1969`; Node 22 in
+    `~/.local/node`, server cloned to `~/.local/share/translation-server` with `config/local.json` `{"host":"127.0.0.1"}`;
+    override URL with `LIFE_TRANSLATION_URL`): identifiers (DOI, arXiv id, ISBN, PMID) go to `/search`, other URLs to `/web`
+    (on a 300 multiple-choice answer the first choice is taken and the list printed). Same translators as the browser
+    Connector, so e.g. a PMLR page comes out as `conferencePaper` with proceedings title and pages. If the server is down,
+    returns nothing or errors, or with `--no-translation`, the old path below runs. Citekey year comes from the item's
+    date (published date when the translator has one; an arXiv-first paper keeps its arXiv year, BBT pattern unchanged).
+    Old path: resolves arXiv (arXiv API, `preprint`), DOI
     (Crossref: journalArticle/conferencePaper/book/bookSection/...), or a page URL (stdlib scrape of `citation_*`/Dublin
-    Core/`og:` meta; a found DOI or arXiv id goes through those resolvers; else `webPage`; no translation-server).
+    Core/`og:` meta; a found DOI or arXiv id goes through those resolvers; else `webPage`).
     Dedupe runs first (exact DOI/arXiv id/url in any field, or title ratio >= 0.93): on a hit it prints the existing key and
     posts nothing. Default is a dry run printing the item JSON; `--yes` POSTs with a `Zotero-Write-Token` and prints the
     new key. Also prints a suggested Better BibTeX-style citekey (first author's lowercase surname + first three
