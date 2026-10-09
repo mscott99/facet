@@ -37,7 +37,7 @@ header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:.3rem 1.1
  padding:.7rem 1.1rem;background:var(--bg);font:12.5px/1.4 var(--mono)}
 header a{color:var(--dim);text-decoration:none;border:0}
 header a:hover{color:var(--fg)}header a.on{color:var(--acc)}
-header .sp{flex:1}
+header .sp{flex:1}#lastnote{max-width:16em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 main{max-width:var(--measure);margin:0 auto;padding:.6rem 1.1rem 8rem}
 h1,h2,h3,h4{font-weight:600;line-height:1.3}
 h1{font-size:1.35rem;margin:2rem 0 .7rem}
@@ -90,6 +90,8 @@ textarea:focus{outline:1px solid var(--line)}
 .say{box-sizing:border-box;max-width:100%;margin:.5rem 0 1.2rem;padding-left:1.1rem;border-left:2px solid #8fa8c880;font-size:.95em}
 .say.info{border-left-color:#75767a99}.say.warn{border-left-color:var(--warn)}.say.error{border-left-color:var(--err)}
 .say .hd{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.35rem}
+.say .hd .x{flex:none;font:16px/1 var(--mono);background:none;border:0;cursor:pointer;padding:0 4px;color:var(--dim)}
+.say .hd .x:hover{color:var(--err)}
 .say .hd .q{flex:1;font:11.5px/1.5 var(--mono);color:var(--dim);
  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .say .th .t{white-space:pre-wrap;margin:.5rem 0 0}
@@ -215,12 +217,13 @@ var CV=0,CC=null,CL=[],CG=0,CLOSED={};
 function card(b,o){
   var d=document.createElement('div');d.className='say '+(o.kind||'comment');
   d.dataset.id=o.id;d.dataset.note=o.note;d.dataset.line=o.line;
-  d.innerHTML='<div class=hd><div class=q></div></div>'+
+  d.innerHTML='<div class=hd><div class=q></div><button class=x type=button title=done aria-label=done>&times;</button></div>'+
     '<div class=th></div><div class=fx hidden></div><div class=cmp><textarea rows=1></textarea><button class=go type=button>send</button><button class=no type=button>done</button></div>';
   d._n=0;d._known=0;head(d,o);
   var t=d.querySelector('textarea'),go=d.querySelector('.go');
   var no=d.querySelector('.no');no.addEventListener('pointerdown',function(e){e.preventDefault()});
   no.addEventListener('click',function(){drop(d)});
+  d.querySelector('.x').addEventListener('click',function(){drop(d)});
   // the button must not take the focus from the box (on a phone that would close the keyboard)
   go.addEventListener('pointerdown',function(e){e.preventDefault()});
   go.addEventListener('click',function(){submit(d)});
@@ -403,6 +406,26 @@ document.addEventListener('keydown',function(e){
   e.preventDefault();c.focus();
   c.setRangeText(e.key,c.selectionStart,c.selectionEnd,'end');
   c.dispatchEvent(new Event('input',{bubbles:true}));});
+// The note tab: a note page (/n/<name> or /m/<slug>) is remembered as the last note read, with
+// how far down it was, so going to the chat and back lands where reading left off.
+(function(){
+  var a=document.getElementById('lastnote'),here=location.pathname+location.search;
+  var isnote=a&&a.classList.contains('on');
+  if(isnote){localStorage.lastnote=here;localStorage.lasttitle=document.title}
+  if(a&&localStorage.lastnote){a.href=localStorage.lastnote;a.textContent=localStorage.lasttitle||'note';a.hidden=false}
+  if(!isnote)return;
+  var key='scroll:'+here,y=+localStorage[key]||0,t=0;
+  if(y){var go=function(){scrollTo({top:y,behavior:'instant'})};go();addEventListener('load',function(){go();setTimeout(go,300)})}
+  addEventListener('scroll',function(){clearTimeout(t);t=setTimeout(function(){localStorage[key]=scrollY},200)},{passive:true});
+})();
+// Alt+C goes to the chat, Alt+N to the note tab (the notes list until a note is read), from anywhere, a box included. The key is read
+// from `code`, not `key`, since on a Mac Alt turns the letter into another character.
+document.addEventListener('keydown',function(e){
+  if(!e.altKey||e.ctrlKey||e.metaKey||e.isComposing)return;
+  var to=e.code=='KeyC'?'chat':e.code=='KeyN'?'notes':'';if(!to)return;
+  var l=document.getElementById('lastnote');
+  var a=to=='notes'&&l&&!l.hidden?l:[].find.call(document.querySelectorAll('header a'),function(a){return a.textContent==to});
+  if(a){e.preventDefault();location.href=a.href}},true);
 // Vim keys for reading: d/u a half page, j/k a few lines, gg and G the ends. Every jump is
 // instant — no animation to sit through — and none of them fire while typing somewhere.
 var gg=0;
@@ -518,6 +541,8 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
     nav.push_str(&item("/", "home", "home"));
     nav.push_str(&item("/chat", "chat", "chat"));
     nav.push_str(&item("/m/", "notes", "notes"));
+    // The note last read, its own tab, filled in by the page script (it lives in the browser).
+    nav.push_str(&format!("<a id=lastnote hidden{}></a>", if nav_on == "note" { " class=on" } else { "" }));
     nav.push_str(&item("/d/", "cards", "diag"));
     nav.push_str(&item("/tree", "memory", "tree"));
     let n = cards::open(cfg).len();
@@ -645,11 +670,11 @@ fn section_html(cfg: &Cfg, d: &doc::Doc, h: &str) -> String {
 /// notes and messages all land here, so a name that is not in the vault must say so plainly.
 fn note_page(cfg: &Cfg, name: &str, h: &str, inm: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     let Some(d) = doc::note(cfg, name) else {
-        return html(page(cfg, "no such note", "notes",
+        return html(page(cfg, "no such note", "note",
             &format!("<h1>no such note</h1><p class=at>{} is not in {}</p>",
                 md::esc(name), md::esc(&cfg.vault().to_string_lossy())), false), 404);
     };
-    html_tagged(page(cfg, &d.title, "notes", &note_fragment(cfg, &d, name, h), false), inm)
+    html_tagged(page(cfg, &d.title, "note", &note_fragment(cfg, &d, name, h), false), inm)
 }
 
 
@@ -1004,7 +1029,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
 
         ["m", slug] => match doc::get(cfg, slug) {
             Some(d) => { let t = d.title.clone();
-                         html_tagged(page(cfg, &t, "notes", &doc_fragment(cfg, &d), false), &inm) }
+                         html_tagged(page(cfg, &t, "note", &doc_fragment(cfg, &d), false), &inm) }
             None => gone(cfg, &format!("no published note called {}", slug)),
         },
 
