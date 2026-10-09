@@ -392,11 +392,21 @@ document.addEventListener('htmx:afterSwap',function(e){
 function nearTop(){var o=document.getElementById('older');
   if(o&&!window._h&&scrollY<document.body.scrollHeight/4)htmx.trigger(o,'more')}
 addEventListener('scroll',nearTop,{passive:true});
+// On the chat page, typing anywhere types into the compose box, the first key included, as
+// Telegram does: a printable key outside any box focuses it and lands there.
+document.addEventListener('keydown',function(e){
+  var c=document.querySelector('#compose textarea');if(!c||e.defaultPrevented)return;
+  if(e.ctrlKey||e.metaKey||e.altKey||e.isComposing||e.key.length!=1)return;
+  var t=e.target;
+  if(t.tagName=='TEXTAREA'||t.tagName=='INPUT'||t.tagName=='SELECT'||t.isContentEditable)return;
+  e.preventDefault();c.focus();
+  c.setRangeText(e.key,c.selectionStart,c.selectionEnd,'end');
+  c.dispatchEvent(new Event('input',{bubbles:true}));});
 // Vim keys for reading: d/u a half page, j/k a few lines, gg and G the ends. Every jump is
 // instant — no animation to sit through — and none of them fire while typing somewhere.
 var gg=0;
 document.addEventListener('keydown',function(e){
-  if(e.ctrlKey||e.metaKey||e.altKey)return;
+  if(e.defaultPrevented||e.ctrlKey||e.metaKey||e.altKey)return;
   var t=e.target;
   if(t.tagName=='TEXTAREA'||t.tagName=='INPUT'||t.isContentEditable)return;
   var h=innerHeight,by=0;
