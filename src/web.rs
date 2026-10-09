@@ -633,8 +633,8 @@ header a{color:var(--dim);text-decoration:none;border:0}
 header a:hover{color:var(--fg)}header a.on{color:var(--acc)}
 header .sp{flex:1}#lastnote{max-width:16em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #panes{flex:1;position:relative;min-height:0}
-#panes iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:var(--bg);visibility:hidden;pointer-events:none}
-#panes iframe.on{visibility:visible;pointer-events:auto}
+#panes iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:var(--bg);display:none}
+#panes iframe.on{display:block}
 @media (max-width:30rem){header{gap:.3rem .85rem;padding:.6rem .9rem}}
 </style></head><body>
 <header>{{NAV}}<span class=sp></span><span class=at>{{STATUS}}</span></header>
@@ -656,7 +656,12 @@ function show(tab,url,mode){ // mode: 'push' (default), 'pop' (history moved), '
     f.src=p.url;document.getElementById('panes').appendChild(f);
     f.addEventListener('load',function(){if(cur==tab)try{f.contentWindow.focus()}catch(e){}})}
   else if(url&&url!=p.url){p.url=url;p.f.src=url}
-  for(var k in panes)panes[k].f.classList.toggle('on',k==tab);
+  // A hidden pane is display:none, not just invisible: iOS keeps the layers of every invisible
+  // full-size iframe and runs short of tile memory, painting parts of the shown one black. So
+  // its scroll is kept by hand.
+  for(var k in panes){var q=panes[k];if(k!=tab&&q.f.classList.contains('on'))try{q.y=q.f.contentWindow.scrollY}catch(e){}
+    q.f.classList.toggle('on',k==tab)}
+  if(p.y!=null)try{var y=p.y;p.f.contentWindow.scrollTo(0,y);requestAnimationFrame(function(){p.f.contentWindow.scrollTo(0,y)})}catch(e){}
   for(var k in links)links[k].classList.toggle('on',k==tab);
   cur=tab;
   if(mode!='pop'){history[mode=='init'?'replaceState':'pushState']({tab:tab},'',p.url)}
