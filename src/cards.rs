@@ -6,7 +6,7 @@
 // answers lived in the engine's `cards.json`. They were the same thing seen from two ends — a
 // conversation anchored to a line — so now there is one:
 //
-//   Card { id, note, line, end, quote, kind, by, thread, fix, closed, applied?, at }
+//   Card { id, note, line, end, quote, word?, col?, kind, by, thread, fix, closed, applied?, at }
 //     note    vault-relative path of the note ("Folder/Note.md")
 //     line    1-based first line it is about; `end` the last (a review anchor can span lines)
 //     quote   the line as it read when the card was opened (shown dim at the top)
@@ -220,6 +220,9 @@ pub struct New<'a> {
     pub by: &'a str,
     /// the quote as the page showed it (a user's card), else read from the note
     pub quote: Option<&'a str>,
+    /// the word clicked and its character offset in the line (a user's card; old cards have neither)
+    pub word: Option<&'a str>,
+    pub col: Option<i64>,
 }
 
 fn make(cfg: &Cfg, cards: &[Value], n: &New) -> Result<Value, String> {
@@ -238,6 +241,8 @@ fn make(cfg: &Cfg, cards: &[Value], n: &New) -> Result<Value, String> {
         "quote": n.quote.map(String::from).unwrap_or_else(|| quote_of(&lines, a, b)),
         "kind": kind_of(n.kind), "by": by, "thread": [], "fix": null, "closed": false, "at": now(),
     });
+    if let Some(w) = n.word.filter(|w| !w.is_empty()) { c["word"] = json!(w); }
+    if let Some(k) = n.col { c["col"] = json!(k); }
     if !n.text.trim().is_empty() {
         c["thread"] = json!([{"by": by, "text": n.text.trim(), "at": now()}]);
     }
@@ -440,7 +445,7 @@ pub fn op(cfg: &Cfg, v: &Value) -> Result<(Value, Option<String>), String> {
             let text = s("text");
             if text.trim().is_empty() { return Err("a new card needs text".into()) }
             let kind = s("kind");
-            let c = create(cfg, New { id: None, note: &s("note"), at, text: &text, kind: &kind, fix, by: "server", quote: None })?;
+            let c = create(cfg, New { id: None, note: &s("note"), at, text: &text, kind: &kind, fix, by: "server", quote: None, word: None, col: None })?;
             let mut l = format!("new {} card {}", c["kind"].as_str().unwrap_or(""), line_of(&c, text.trim()));
             if let Some(f) = fix { l.push_str(&format!("\n(fix offered: {})", f)); }
             Ok((json!({"ok": true, "id": c["id"], "line": c["line"]}), Some(l)))
@@ -542,7 +547,7 @@ pub fn review(cfg: &Cfg, name: &str, spec: &str, replace: bool) -> Result<String
             let fix = if d.fix.trim().is_empty() { None } else { Some(d.fix.trim_end()) };
             let mut all = cards.clone(); all.extend(made.iter().cloned());
             let c = make(cfg, &all, &New { id: None, note: &note, at: At::Text(d.anchor.clone()), text: &text,
-                kind: &d.kind, fix, by: "server", quote: None })?;
+                kind: &d.kind, fix, by: "server", quote: None, word: None, col: None })?;
             made.push(c);
         }
         let n = made.len();
@@ -647,8 +652,9 @@ mod tests {
     fn a_card_is_created_even_without_a_claude_dir_and_holds_a_thread() {
         let cfg = vault("thread", "one\ntwo\nthree\n");
         let c = create(&cfg, New { id: Some("c1"), note: "Note", at: At::Line(2), text: "hm", kind: "comment",
-            fix: None, by: "user", quote: Some("two") }).unwrap();
+            fix: None, by: "user", quote: Some("two"), word: Some("two"), col: Some(4) }).unwrap();
         assert_eq!(c["note"], "Note.md");
+        assert_eq!((c["word"].as_str(), c["col"].as_i64()), (Some("two"), Some(4)));
         assert!(file(&cfg).is_file());
         assert_eq!(say(&cfg, "c1", "server", "looks right").unwrap(), 1);
         assert_eq!(say(&cfg, "c1", "user", "and?").unwrap(), 2);
@@ -660,22 +666,22 @@ mod tests {
         assert_eq!(from_card(&message(&c, "x")), Some("c1"));
         unsay(&cfg, "c1", 2).unwrap();
         assert_eq!(get(&cfg, "c1").unwrap()["thread"].as_array().unwrap().len(), 2);
-        assert!(create(&cfg, New { id: Some("c1"), note: "Note", at: At::Line(1), text: "", kind: "", fix: None, by: "user", quote: None }).is_err());
-        assert!(create(&cfg, New { id: None, note: "Nope", at: At::Line(1), text: "x", kind: "", fix: None, by: "server", quote: None }).is_err());
+        assert!(create(&cfg, New { id: Some("c1"), note: "Note", at: At::Line(1), text: "", kind: "", fix: None, by: "user", quote: None, word: None, col: None }).is_err());
+        assert!(create(&cfg, New { id: None, note: "Nope", at: At::Line(1), text: "x", kind: "", fix: None, by: "server", quote: None, word: None, col: None }).is_err());
     }
 
     #[test]
     fn creating_where_no_card_can_be_kept_fails_out_loud() {
         let cfg = Cfg(json!({"vault": "/nonexistent/facet-vault"}));
-        assert!(create(&cfg, New { id: None, note: "Note", at: At::Line(1), text: "x", kind: "warn", fix: None, by: "server", quote: None }).is_err());
+        assert!(create(&cfg, New { id: None, note: "Note", at: At::Line(1), text: "x", kind: "warn", fix: None, by: "server", quote: None, word: None, col: None }).is_err());
     }
 
     #[test]
     fn a_fix_applies_behind_its_guard_and_shifts_the_others() {
         let cfg = vault("apply", "one\ntwo\nthree\nfour\n");
         let a = create(&cfg, New { id: None, note: "Note", at: At::Text("two".into()), text: "split it", kind: "warn",
-            fix: Some("2a\n2b"), by: "server", quote: None }).unwrap();
-        let b = create(&cfg, New { id: None, note: "Note", at: At::Line(4), text: "fine", kind: "info", fix: None, by: "server", quote: None }).unwrap();
+            fix: Some("2a\n2b"), by: "server", quote: None, word: None, col: None }).unwrap();
+        let b = create(&cfg, New { id: None, note: "Note", at: At::Line(4), text: "fine", kind: "info", fix: None, by: "server", quote: None, word: None, col: None }).unwrap();
         let (a, b) = (a["id"].as_str().unwrap().to_string(), b["id"].as_str().unwrap().to_string());
         set_fix(&cfg, &b, Some("FOUR")).unwrap();
         assert!(apply(&cfg, "missing").is_err());

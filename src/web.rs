@@ -234,7 +234,7 @@ function card(b,o){
   at.parentNode.insertBefore(d,at.nextSibling);
   return d;
 }
-function head(d,o){d._quote=o.quote||'';d.querySelector('.q').textContent='L'+o.line+(o.quote?' · '+o.quote:'')}
+function head(d,o){d._quote=o.quote||'';d._word=o.word||'';d._col=o.col==null?-1:o.col;d.querySelector('.q').textContent='L'+o.line+(o.quote?' · '+o.quote:'')}
 // nothing has been said in it yet: such a card is only a box, and goes as easily as it came
 function fresh(d){return !d._known&&!d.querySelector('.th').children.length}
 function fit(t){t.style.height='auto';t.style.height=t.scrollHeight+'px'}
@@ -257,7 +257,7 @@ function submit(d){
   grow(d,function(){d.querySelector('.th').appendChild(k);t.value='';fit(t)});
   cmp.classList.remove('bad');cmp.title='';
   post('/x/card','do=say&id='+d.dataset.id+'&note='+encodeURIComponent(d.dataset.note)+'&line='+d.dataset.line+
-    '&quote='+encodeURIComponent(d._quote)+'&text='+encodeURIComponent(said))
+    '&quote='+encodeURIComponent(d._quote)+'&word='+encodeURIComponent(d._word||'')+'&col='+(d._col==null?-1:d._col)+'&text='+encodeURIComponent(said))
     .then(function(r){
       d._known=d._known||Date.now();
       // the held request may have brought the server's copy first: keep one
@@ -425,28 +425,71 @@ document.addEventListener('keydown',function(e){
 // KaTeX leaves three copies of every formula in the DOM (the visual one, a MathML one and the
 // TeX annotation), so reading `textContent` off a line would repeat each formula three times.
 // A quote therefore comes off a clone whose rendered math is put back as its own TeX source.
-function quoted(b){
-  var c=b.cloneNode(true);
-  // a formula not rendered yet is still its own TeX source
-  Array.prototype.forEach.call(c.querySelectorAll('span[data-math-style]:not([data-r])'),function(k){
-    k.parentNode.replaceChild(document.createTextNode('$'+k.textContent+'$'),k);
-  });
-  Array.prototype.forEach.call(c.querySelectorAll('.katex'),function(k){
-    var a=k.querySelector('annotation');
-    k.parentNode.replaceChild(document.createTextNode(a?'$'+a.textContent+'$':''),k);
-  });
-  return (c.textContent||'').trim().replace(/\s+/g,' ').slice(0,160);
+// The word under the click is marked ⟨like this⟩ in the quote, and a formula clicked is marked whole:
+// the agent receiving the card then sees where in the line the user pointed. The quote is a window
+// of about 160 characters around it, cut with … where the line goes on. `at` is {word,col} (col =
+// character offset of the word in the line's text), or null when the click found no word.
+function caretAt(e){
+  if(document.caretPositionFromPoint){var p=document.caretPositionFromPoint(e.clientX,e.clientY);
+    return p?{n:p.offsetNode,o:p.offset}:null}
+  if(document.caretRangeFromPoint){var r=document.caretRangeFromPoint(e.clientX,e.clientY);
+    return r?{n:r.startContainer,o:r.startOffset}:null}
+  return null;
+}
+function quoted(b,e){
+  var hit=e?caretAt(e):null,mark=false,S='\u0001',E='\u0002';
+  if(hit&&!b.contains(hit.n))hit=null;
+  function walk(n){
+    if(n.nodeType===3){
+      var t=n.nodeValue;
+      if(hit&&n===hit.n&&!mark){
+        var o=Math.min(hit.o,t.length),i=o,j=o;
+        // a caret between a word and a space belongs to the word before it
+        if((i>=t.length||/\s/.test(t[i]))&&i>0&&!/\s/.test(t[i-1]))i--,j--;
+        while(i>0&&!/\s/.test(t[i-1]))i--;
+        while(j<t.length&&!/\s/.test(t[j]))j++;
+        while(i<j&&/[^\w$\\]/.test(t[i])&&!/[(\[{]/.test(t[i]))i++;
+        while(j>i&&/[.,;:!?)\]}"'’”]/.test(t[j-1]))j--;
+        if(j>i){mark=true;return t.slice(0,i)+S+t.slice(i,j)+E+t.slice(j)}
+      }
+      return t;
+    }
+    if(n.nodeType!==1)return '';
+    var m=null;
+    if(n.matches('span[data-math-style]:not([data-r])'))m='$'+n.textContent+'$';
+    else if(n.classList.contains('katex')){var a=n.querySelector('annotation');m=a?'$'+a.textContent+'$':''}
+    if(m!==null){
+      if(hit&&!mark&&n.contains(hit.n)&&m){mark=true;return S+m+E}
+      return m;
+    }
+    var out='';
+    for(var c=n.firstChild;c;c=c.nextSibling)out+=walk(c);
+    return out;
+  }
+  var raw=walk(b).replace(/\s+/g,' ').replace(/^ /,'').replace(/ $/,'');
+  var a=raw.indexOf(S),z=raw.indexOf(E),W=160;
+  if(a<0||z<a)return {quote:raw.replace(/[\u0001\u0002]/g,'').slice(0,W),word:'',col:-1};
+  var word=raw.slice(a+1,z),col=a;
+  // window over raw (markers count as two characters)
+  var st=0,en=raw.length;
+  if(raw.length-2>W){
+    st=Math.max(0,a-Math.floor((W-(z-a-1))/2));
+    en=Math.min(raw.length,st+W+2);
+    st=Math.max(0,en-W-2);
+  }
+  var q=raw.slice(st,en).replace(S,'⟨').replace(E,'⟩');
+  return {quote:(st>0?'…':'')+q+(en<raw.length?'…':''),word:word,col:col};
 }
 function comment(e){
   if(e.target.closest('a,form,button,textarea,.say,.ctx'))return;
   var b=e.target.closest('[data-line]');if(!b||!b.dataset.note)return;
-  var quote=quoted(b);
+  var qq=quoted(b,e),quote=qq.quote;
   // A short id of its own, right here in the quote, is what lets a deliberate `facet answer`
   // find its way back to this card — never a talk reply its poll merely happens to catch.
   var id='c'+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
   // only one card nothing has been said in is open at a time
   document.querySelectorAll('.say').forEach(function(o){if(fresh(o))o.remove()});
-  var d=card(b,{id:id,note:b.dataset.note,line:+b.dataset.line,quote:quote,kind:'comment'});
+  var d=card(b,{id:id,note:b.dataset.note,line:+b.dataset.line,quote:quote,word:qq.word,col:qq.col,kind:'comment'});
   d.querySelector('textarea').focus();
 }
 // iOS Safari does not fire `dblclick` reliably on a touch, so a coarse (touch) pointer gets
@@ -868,7 +911,8 @@ fn card_say(cfg: &Cfg, f: &[(String, String)]) -> Result<serde_json::Value, Stri
             let line: i64 = field(f, "line").parse().map_err(|_| "no line".to_string())?;
             let quote = field(f, "quote");
             cards::create(cfg, cards::New { id: Some(&id), note: &field(f, "note"), at: cards::At::Line(line),
-                text: &text, kind: "comment", fix: None, by: "user", quote: Some(&quote) })?;
+                text: &text, kind: "comment", fix: None, by: "user", quote: Some(&quote),
+                word: Some(&field(f, "word")).filter(|w| !w.is_empty()).map(|w| w.as_str()), col: field(f, "col").parse().ok().filter(|c: &i64| *c >= 0) })?;
             0
         }
     };
