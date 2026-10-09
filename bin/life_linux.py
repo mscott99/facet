@@ -1621,3 +1621,125 @@ def cmd_zot_add(a):
     if not ok:
         sys.exit("life: zotero did not create the item: " + json.dumps(res.get("failed"))[:300])
     print("created item key: " + list(ok.values())[0]["key"])
+
+
+# ---------------------------------------------------------------- zotero (files from WebDAV, read-only)
+import base64
+import io
+ZOT_DAV = "https://app.koofr.net/dav/Koofr/zotero/"
+
+
+def zot_files_dir():
+    return os.environ.get("LIFE_ZOTERO_FILES") or os.path.expanduser("~/.cache/life/zotero-files")
+
+
+def dav_request(name, method="GET"):
+    """GET (or PROPFIND depth 1 on the base) from the Zotero WebDAV share. Only these two methods exist here."""
+    assert method in ("GET", "PROPFIND")
+    d = os.path.dirname(config_path())
+    user, pw = _secret(os.path.join(d, "koofr_user")), _secret(os.path.join(d, "koofr_app_password"))
+    tok = base64.b64encode(f"{user}:{pw}".encode()).decode()
+    h = {"Authorization": "Basic " + tok}
+    if method == "PROPFIND":
+        h["Depth"] = "1"
+    req = urllib.request.Request(ZOT_DAV + name, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        sys.exit(f"life: webdav {name or '/'} -> HTTP {e.code}")
+
+
+def dav_keys():
+    """Attachment keys that have a .zip on the share."""
+    body = (dav_request("", "PROPFIND") or b"").decode("utf-8", "replace")
+    return sorted(set(re.findall(r"/?([A-Z0-9]{8})\.zip", body)))
+
+
+def dav_hash(prop):
+    m = re.search(r"<hash>([^<]*)</hash>", prop or "")
+    return m.group(1) if m else ""
+
+
+def zot_fetch_file(akey):
+    """Local paths of the files in KEY.zip, downloading only when the cached copy's .prop hash differs.
+    Returns None when the share has no zip for this key."""
+    prop = (dav_request(akey + ".prop") or b"").decode("utf-8", "replace")
+    dest = os.path.join(zot_files_dir(), akey)
+    stamp = os.path.join(dest, ".hash")
+    h = dav_hash(prop)
+    if h and os.path.exists(stamp) and open(stamp).read() == h:
+        files = [f for f in sorted(os.listdir(dest)) if not f.startswith(".")]
+        if files:
+            return [os.path.join(dest, f) for f in files]
+    blob = dav_request(akey + ".zip")
+    if blob is None:
+        return None
+    import zipfile
+    os.makedirs(dest, mode=0o700, exist_ok=True)
+    out = []
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        for i in z.infolist():
+            name = os.path.basename(i.filename.replace("\\", "/"))
+            if i.is_dir() or not name or name.startswith("."):
+                continue
+            p = os.path.join(dest, name)
+            with open(p, "wb") as f:
+                f.write(z.read(i))
+            out.append(p)
+    open(stamp, "w").write(h)
+    return out
+
+
+def zot_pdf_attachments(item_key):
+    """[(attachment key, filename, contentType)] of file attachments under an item, via the API."""
+    out = []
+    for r in zot_children(None, item_key):
+        d = r["data"]
+        if d.get("itemType") == "attachment" and d.get("linkMode") in ("imported_file", "imported_url"):
+            out.append((r["key"], d.get("filename") or d.get("title", ""), d.get("contentType", "")))
+    return out
+
+
+def cmd_zot_pdf(a):
+    if a.list:
+        for k in dav_keys():
+            print(k)
+        return
+    if not a.what:
+        sys.exit("life: zot pdf needs an item key, citekey or search text (or --list)")
+    ident = " ".join(a.what)
+    items = zot_sync()["items"]
+    k = zot_match_item(items, ident)
+    if k:
+        atts, title = zot_pdf_attachments(k), items[k]["data"].get("title", "")
+    elif len(a.what) == 1 and re.fullmatch(r"[A-Z0-9]{8}", ident):
+        atts, title = [(ident, "", "application/pdf")], ident        # a bare attachment key
+    else:
+        rows = zot_search_items(items, ident)
+        if not rows:
+            sys.exit(f"life: nothing in the library matches {ident!r}")
+        if len(rows) > 1:
+            for kk, it in rows[:10]:
+                print(zot_line(kk, it), file=sys.stderr)
+            sys.exit(f"life: {len(rows)} items match {ident!r}; give a key or citekey")
+        k = rows[0][0]
+        atts, title = zot_pdf_attachments(k), rows[0][1]["data"].get("title", "")
+    pdfs = [x for x in atts if x[2] == "application/pdf" or x[1].lower().endswith(".pdf")]
+    if not pdfs:
+        sys.exit(f"life: {title!r} has no PDF attachment")
+    if not a.all:
+        pdfs = pdfs[:1]
+    missing = 0
+    for akey, fname, ctype in pdfs:
+        paths = zot_fetch_file(akey)
+        if paths is None:
+            missing += 1
+            print(f"life: attachment {akey} ({fname or 'file'}) is not on the WebDAV share (only on the Mac, not synced)", file=sys.stderr)
+            continue
+        for p in paths:
+            print(p if a.path_only else f"{p}  [{akey}]")
+    if missing == len(pdfs):
+        sys.exit(1)

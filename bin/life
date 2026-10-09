@@ -280,6 +280,7 @@ def cmd_zot_match(a): pass
 def cmd_zot_sync(a): pass
 def cmd_zot_find(a): pass
 def cmd_zot_add(a): pass
+def cmd_zot_pdf(a): pass
 
 
 def cmd_cal_delete(a):
@@ -396,6 +397,11 @@ def main():
     s.add_argument("what", help="arXiv id/url, DOI/doi.org url, or web page url")
     s.add_argument("--collection", help="collection key"); s.add_argument("--tag", action="append", default=[])
     s.add_argument("--yes", action="store_true", help="really create it"); s.set_defaults(fn=cmd_zot_add)
+    s = z.add_parser("pdf", help="local path of an item's PDF, fetched on demand from the Zotero WebDAV share (read-only)")
+    s.add_argument("what", nargs="*", help="item key, citekey, attachment key, or search text")
+    s.add_argument("--all", action="store_true", help="every PDF attachment, not just the first")
+    s.add_argument("--path-only", action="store_true"); s.add_argument("--list", action="store_true", help="attachment keys on the share")
+    s.set_defaults(fn=cmd_zot_pdf)
 
     w = sub.add_parser("web").add_subparsers(dest="c", required=True)
     s = w.add_parser("get"); s.add_argument("url"); s.add_argument("--chars", type=int, default=6000)

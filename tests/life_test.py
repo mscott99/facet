@@ -498,5 +498,75 @@ class ZoteroAddTest(ZoteroTest):
             self.assertIn("OLD1", out)
 
 
+class ZoteroPdfTest(ZoteroTest):
+    test_search_show_cache = test_match = None
+
+    def setUp(self):
+        super().setUp()
+        os.environ["LIFE_ZOTERO_FILES"] = os.path.join(self.d, "files")
+        open(os.path.join(self.d, "koofr_user"), "w").write("u@x\n")
+        open(os.path.join(self.d, "koofr_app_password"), "w").write("a b c\n")
+        import zipfile
+        b = io.BytesIO()
+        with zipfile.ZipFile(b, "w") as z:
+            z.writestr("sub/paper.pdf", b"%PDF-1.4 fake")
+        self.zip = b.getvalue()
+        self.dav = {"ATT00001.zip": self.zip, "ATT00001.prop": b'<properties><mtime>1</mtime><hash>h1</hash></properties>',
+                    "": b"<D:href>/dav/Koofr/zotero/ATT00001.zip</D:href><D:href>/dav/Koofr/zotero/ATT00001.prop</D:href>"}
+        self.gets = []
+        self.kids = [{"key": "ATT00001", "data": {"itemType": "attachment", "linkMode": "imported_file", "filename": "paper.pdf", "contentType": "application/pdf"}},
+                     {"key": "ATT00002", "data": {"itemType": "attachment", "linkMode": "imported_file", "filename": "gone.pdf", "contentType": "application/pdf"}},
+                     {"key": "NOTE0001", "data": {"itemType": "note"}}]
+
+    def run_pdf(self, **kw):
+        ns = dict(what=["K1"], all=False, path_only=False, list=False); ns.update(kw)
+        out = io.StringIO()
+        def dav(name, method="GET"):
+            self.gets.append((name, method))
+            return self.dav.get(name)
+        with mock.patch.object(L, "zot_get", lambda path, params=None, key=None: self.fake_get(path, params, key) if "children" not in path else (self.kids, {})), \
+                mock.patch.object(L, "dav_request", dav), contextlib.redirect_stdout(out):
+            L.cmd_zot_pdf(argparse.Namespace(**ns))
+        return out.getvalue()
+
+    def test_fetch_and_cache(self):
+        out = self.run_pdf(what=["smithGaussianRecovery2020"], path_only=True).strip()
+        self.assertTrue(out.endswith("ATT00001/paper.pdf"))
+        self.assertEqual(open(out, "rb").read()[:4], b"%PDF")
+        n = len([g for g in self.gets if g[0].endswith(".zip")])
+        self.run_pdf(path_only=True)
+        self.assertEqual(len([g for g in self.gets if g[0].endswith(".zip")]), n)   # same hash: no re-download
+        self.dav["ATT00001.prop"] = b"<hash>h2</hash>"
+        self.run_pdf(path_only=True)
+        self.assertEqual(len([g for g in self.gets if g[0].endswith(".zip")]), n + 1)
+        self.assertTrue(all(m in ("GET", "PROPFIND") for _, m in self.gets))
+
+    def test_all_and_missing(self):
+        out = io.StringIO()
+        with contextlib.redirect_stderr(out):
+            res = self.run_pdf(all=True)
+        self.assertIn("ATT00001", res)
+        self.assertIn("ATT00002", out.getvalue())
+        self.assertIn("not on the WebDAV share", out.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.dav.pop("ATT00001.zip")
+            self.kids = self.kids[1:2]
+            self.run_pdf()
+
+    def test_list_and_errors(self):
+        self.assertEqual(self.run_pdf(list=True, what=[]).split(), ["ATT00001"])
+        with self.assertRaises(SystemExit):
+            self.run_pdf(what=["nonexistentxyz"])
+
+    def test_zip_slip(self):
+        import zipfile
+        b = io.BytesIO()
+        with zipfile.ZipFile(b, "w") as z:
+            z.writestr("../../evil.pdf", b"%PDF")
+        self.dav["ATT00001.zip"] = b.getvalue()
+        out = self.run_pdf(path_only=True).strip()
+        self.assertTrue(out.startswith(os.path.join(self.d, "files", "ATT00001")))
+
+
 if __name__ == "__main__":
     unittest.main()

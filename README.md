@@ -140,6 +140,12 @@ copy `bin/life.accounts.example.json`.
     new key. Also prints a suggested Better BibTeX-style citekey (first author's lowercase surname + first three
     non-skipword title words CamelCased, hyphen compounds joined, + year) and whether `<vault>/mybib.bib` already has it.
     mybib.bib is never edited (Better BibTeX on the Mac exports it).
+  - `zot pdf <itemKey|citekey|attachmentKey|search text> [--all] [--path-only]`, `zot pdf --list`: local path of the item's PDF.
+    Attachments sync via Zotero WebDAV to Koofr (`https://app.koofr.net/dav/Koofr/zotero/`: `KEY.zip` + `KEY.prop`, KEY = attachment
+    key); credentials in `~/.config/life/koofr_user` and `koofr_app_password`. The API maps item -> PDF attachment keys; the zip
+    is fetched on demand to `~/.cache/life/zotero-files/<KEY>/` (stdlib zipfile; re-fetched only when the `.prop` hash changes).
+    Read-only on both services (only GET/PROPFIND exist in the code). A PDF only on the Mac is reported as not synced.
+    Several matches by search text: lists them, asks for a key. `--list`: attachment keys with a zip on the share.
 - Tests: `python3 tests/life_test.py` (fake ICS, fake IMAP/SMTP; no network).
 
 A Linux box (the Hetzner one this branch was built against: Ubuntu 24.04 x86, cloned at
