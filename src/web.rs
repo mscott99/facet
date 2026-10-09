@@ -306,10 +306,12 @@ function anchor(c){
 // On /d/, a card sits under its note's name and the lines it is about.
 function ctx(list,c){
   var x=document.createElement('div');x.className='ctx';x.dataset.for=c.id;
-  x.innerHTML='<div class=at><a class=wl></a> · L'+c.line+'</div><pre></pre>';
+  x.innerHTML='<div class=at><a class=wl></a> · L'+c.line+' · <a class=go>open in note</a></div><pre></pre>';
   var a=x.querySelector('a');a.textContent=c.note;a.href=TOK+'/n/'+encodeURIComponent(c.note);
+  x.querySelector('.go').href=a.href+'#card='+c.id;
   x.querySelector('pre').textContent=c.ctx||'';
   list.appendChild(x);return x}
+var JUMPED=0;
 function place(cs,t0){
   var seen={},list=document.getElementById('cardlist');
   cs.forEach(function(c){
@@ -318,6 +320,9 @@ function place(cs,t0){
     var d=document.querySelector('.say[data-id="'+c.id+'"]');
     if(!d){var b=list?ctx(list,c):anchor(c);if(!b)return;d=card(b,c)}
     fill(d,c,t0);
+    // come from "open in note" on /d/: bring this card to the middle of the screen, once
+    if(!list&&!JUMPED&&location.hash=='#card='+c.id){JUMPED=1;
+      setTimeout(function(){d.scrollIntoView({block:'center',behavior:'instant'})},50)}
   });
   // a card closed (or applied) elsewhere goes here too — unless it is being written in, or
   // this answer was asked for before the page knew the card at all
@@ -414,7 +419,7 @@ document.addEventListener('keydown',function(e){
   if(isnote){localStorage.lastnote=here;localStorage.lasttitle=document.title}
   if(a&&localStorage.lastnote){a.href=localStorage.lastnote;a.textContent=localStorage.lasttitle||'note';a.hidden=false}
   if(!isnote)return;
-  var key='scroll:'+here,y=+localStorage[key]||0,t=0;
+  var key='scroll:'+here,y=/^#card=/.test(location.hash)?0:+localStorage[key]||0,t=0;
   if(y){var go=function(){scrollTo({top:y,behavior:'instant'})};go();addEventListener('load',function(){go();setTimeout(go,300)})}
   addEventListener('scroll',function(){clearTimeout(t);t=setTimeout(function(){localStorage[key]=scrollY},200)},{passive:true});
 })();
