@@ -102,7 +102,14 @@ pub struct Mem {
     pub held: HashSet<(usize, usize)>,
     /// the chat directory, where `view.json` is saved
     pub dir: PathBuf,
-    lo: Vec<usize>,
+    /// The queues of §4 ("keep the nodes that are ready to build in queues; never scan the
+    /// tree for work"): per level, the nodes whose sources exist and that are not built yet.
+    /// A node enters when it becomes ready (its message is logged, or its second half is
+    /// built) and leaves when it is built; the pump reads only these.
+    pub todo: Vec<std::collections::BTreeSet<usize>>,
+    /// Nodes that have just become ready, not yet looked at: built on the spot if free (a
+    /// source of at most NODE bytes is its own node, §2), else queued in `todo`.
+    pub fresh: Vec<(usize, usize)>,
     /// Wall clock, not `Instant`: on macOS `Instant` stops while the machine sleeps, so a
     /// pause until the limit resets would outlast the reset by however long the lid was shut.
     pause: Option<(SystemTime, String)>,
@@ -110,34 +117,72 @@ pub struct Mem {
 
 impl Mem {
     pub fn new(dir: PathBuf, store: Store, view: View, cview: View) -> Mem {
-        Mem { store, view, cview, busy: HashSet::new(), failed: HashMap::new(), held: HashSet::new(), dir, lo: Vec::new(), pause: None }
+        // the queues at start: one pass over what is on file (once, not per pump)
+        let mut fresh = Vec::new();
+        let t = store.t();
+        let mut l = 0;
+        while (1usize << l) <= t {
+            for i in 0..(t >> l) { if !store.built(l, i) && store.ready(l, i) { fresh.push((l, i)); } }
+            l += 1;
+        }
+        Mem { store, view, cview, busy: HashSet::new(), failed: HashMap::new(), held: HashSet::new(), dir, todo: Vec::new(), fresh, pause: None }
+    }
+
+    /// Node (l, i) is built: off its queue, and its parent is ready once the sibling is built too.
+    fn on_built(&mut self, l: usize, i: usize) {
+        if let Some(q) = self.todo.get_mut(l) { q.remove(&i); }
+        if self.store.built(l, i ^ 1) && !self.store.built(l + 1, i / 2) { self.fresh.push((l + 1, i / 2)); }
+    }
+
+    /// Save a node a call built, and move the queues on.
+    pub fn put(&mut self, l: usize, i: usize, text: &str) -> std::io::Result<()> {
+        self.store.put(l, i, text)?;
+        self.on_built(l, i);
+        Ok(())
+    }
+
+    /// Look at the nodes that have just become ready: a free one is built now (which may make
+    /// its parent ready, and free, in turn); any other goes on its level's queue. Returns
+    /// whether a node was built.
+    pub fn settle_fresh(&mut self) -> std::io::Result<bool> {
+        let mut grew = false;
+        while let Some((l, i)) = self.fresh.pop() {
+            if self.store.built(l, i) || !self.store.ready(l, i) { continue }
+            match self.store.free(l, i) {
+                Some(text) => { self.put(l, i, &text)?; grew = true; }
+                None => {
+                    if self.todo.len() <= l { self.todo.resize(l + 1, Default::default()); }
+                    self.todo[l].insert(i);
+                }
+            }
+        }
+        Ok(grew)
     }
 
     /// A new message: its line is appended to both views, then both are fitted (§3.2, §4).
     pub fn append(&mut self, i: usize, budget: usize) {
         self.view.parts.push(super::view::Part { l: 0, i });
         self.cview.parts.push(super::view::Part { l: 0, i });
+        self.fresh.push((0, i));
         self.refit(budget);
+        self.save();
+    }
+
+    /// The view to `view.json` (§3.2 of the gist).
+    pub fn save(&self) {
+        if let Err(e) = super::view::save(&self.dir, &self.view) { eprintln!("cannot save view.json: {}", e); }
     }
 
     /// Fit the chat's view (a batch past its budget); when it merges, the compactions' view is
-    /// cut from it again, else that one only runs its own batch past CVIEW. Then both are saved.
+    /// cut from it again, and the view is saved; else the compactions' view only runs its own
+    /// batch past CVIEW.
     pub fn refit(&mut self, budget: usize) {
         if self.view.fit(&self.store, budget) {
             self.cview = super::view::compaction_view(&self.view, &self.store);
+            self.save();
         } else {
             self.cview.fit(&self.store, super::CVIEW);
         }
-        if let Err(e) = super::view::save(&self.dir, &self.view, &self.cview) {
-            eprintln!("cannot save view.json: {}", e);
-        }
-    }
-
-    /// Below this index every node of level l is built: where the pump starts scanning.
-    pub fn lo(&mut self, l: usize) -> usize {
-        if self.lo.len() <= l { self.lo.resize(l + 1, 0); }
-        while self.store.built(l, self.lo[l]) { self.lo[l] += 1; }
-        self.lo[l]
     }
     pub fn paused(&mut self) -> Option<SystemTime> {
         if let Some((u, _)) = &self.pause { if *u <= SystemTime::now() { self.pause = None; } }
@@ -198,15 +243,27 @@ impl Engine {
     }
 
     /// Append to the log, extend the view, and let the compactor at it.
-    pub fn log(self: &Arc<Self>, kind: &str, text: &str) { self.log_at(kind, text, &super::store::now_iso()) }
+    pub fn log(self: &Arc<Self>, kind: &str, text: &str) { self.log_at(kind, text, &super::store::now_iso()); }
 
     /// §1 of the gist: a text too long for one message is never cut, it is logged as several
     /// messages in a row, each at most CAP characters (tool output is clipped before this).
-    pub fn log_at(self: &Arc<Self>, kind: &str, text: &str, date: &str) {
-        for part in split(text, super::CAP) { self.log_one(kind, part, date); }
+    /// Returns the first message's id (None if the write failed).
+    pub fn log_at(self: &Arc<Self>, kind: &str, text: &str, date: &str) -> Option<usize> {
+        let mut first = None;
+        for part in split(text, super::CAP) { let i = self.log_one(kind, part, date); if first.is_none() { first = i; } }
+        first
     }
 
-    fn log_one(self: &Arc<Self>, kind: &str, text: &str, date: &str) {
+    /// A message with images (a tool result that returned some): its text is logged as any
+    /// other, and its images are kept beside the log, `chat/images/<id>.json`, so that
+    /// zoom(id, 1) gives the message "whole, with its images" (§3 of the gist's prompt).
+    pub fn log_images(self: &Arc<Self>, kind: &str, text: &str, images: &[Value]) {
+        let Some(i) = self.log_at(kind, text, &super::store::now_iso()) else { return };
+        if images.is_empty() { return }
+        if let Err(x) = super::store::put_images(&self.dir, i, images) { self.notice(&format!("cannot keep the images of message {}: {}", i, x)); }
+    }
+
+    fn log_one(self: &Arc<Self>, kind: &str, text: &str, date: &str) -> Option<usize> {
         let r = {
             let mut m = self.mem.lock().unwrap();
             let mm = &mut *m;
@@ -217,11 +274,12 @@ impl Engine {
             self.changed.notify_all();
             r
         };
-        match r {
-            Ok(i) => self.emit(json!({"ev": "msg", "i": i, "kind": kind, "text": text})),
-            Err(e) => self.notice(&format!("LOG WRITE FAILED ({}): {}: {}", e, kind, text)),
-        }
+        let id = match r {
+            Ok(i) => { self.emit(json!({"ev": "msg", "i": i, "kind": kind, "text": text})); Some(i) }
+            Err(e) => { self.notice(&format!("LOG WRITE FAILED ({}): {}: {}", e, kind, text)); None }
+        };
         compact::pump(self);
+        id
     }
 
     /// Record a request's cost; park the compactor if the hourly budget is spent.
@@ -335,14 +393,18 @@ pub fn serve() -> ! {
     if let Some(n) = &vnote { eprintln!("load: {}", n); }
     eprintln!("{} messages, view of {} lines / {} bytes, compactions' view {} lines / {} bytes, in {} ms",
         store.t(), view.parts.len(), view.size(&store), cview.parts.len(), cview.size(&store), t0.elapsed().as_millis());
-    if vnote.is_some() { let _ = super::view::save(&dir, &view, &cview); }
+    // saved at once: a first start, or a file in an earlier version's format, is written as
+    // the gist's list of pairs
+    let _ = super::view::save(&dir, &view);
     // §10: on start, print the view
     println!("{}", view.render(&store));
 
     let sd = state_dir(&dir);
     std::fs::create_dir_all(&sd).expect("state dir");
-    let compact_sys = sd.join("compact.txt");
-    std::fs::write(&compact_sys, prompts::named(prompts::COMPACT, &conf.name)).expect("compact prompt");
+    // one system prompt for turns and compactions (§5 of the gist); the compactor reads it
+    // from the same file the turns do
+    let compact_sys = sd.join("system.txt");
+    std::fs::write(&compact_sys, prompts::system(&conf.name)).expect("system prompt");
 
     let e = Arc::new(Engine {
         dir: dir.clone(), conf,
@@ -374,7 +436,7 @@ pub fn serve() -> ! {
                      "budget_hour_eq": c.budget_hour, "cwd": c.cwd.display().to_string()},
         }));
     }
-    super::events::system(&dir, "compact", &prompts::named(prompts::COMPACT, &e.conf.name));
+    super::events::system(&dir, "system", &prompts::system(&e.conf.name));
     let url = mcp::start(e.clone());
     let _ = e.mcp_url.set(url);
     compact::pump(&e);
@@ -448,8 +510,11 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
             "view" => { let m = e.mem.lock().unwrap(); json!({"view": m.view.render(&m.store)}) }
             // zoom(id, n) as the agent sees it (§7.1), for a person
             "zoom" => {
-                let m = e.mem.lock().unwrap();
-                json!({"text": super::mcp::zoom(&m.store, v["id"].as_i64().unwrap_or(-1), v["n"].as_i64().unwrap_or(1))})
+                // a name (zoom("Name")) gives that agent's whole run
+                if let Some(name) = v["id"].as_str() { json!({"text": super::agent::transcript(e, name)}) } else {
+                    let m = e.mem.lock().unwrap();
+                    json!({"text": super::mcp::zoom(&m.store, v["id"].as_i64().unwrap_or(-1), v["n"].as_i64().unwrap_or(1))})
+                }
             }
             // the master model for the next turns; kept in the state dir across restarts (it wins
             // over chat.model). A new model starts with a cold cache once: its first turn writes
@@ -585,6 +650,43 @@ pub fn ensure(dir: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ready_nodes_are_queued_not_scanned_for() {
+        let d = std::env::temp_dir().join(format!("facet-queues-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut s = super::Store::open(&d);
+        // 0, 1 short (free); 2, 3 long (need a model)
+        for t in ["a", "b", &"x".repeat(600), &"y".repeat(600)] { s.log("user", t).unwrap(); }
+        let v = super::View::fold(&s, 100_000);
+        let mut m = super::Mem::new(d.clone(), s, v.clone(), v);
+        assert!(m.settle_fresh().unwrap());
+        // the free messages and their free parent are built at once; the long ones are queued
+        assert!(m.store.built(0, 0) && m.store.built(0, 1) && m.store.built(1, 0));
+        assert_eq!(m.todo[0].iter().copied().collect::<Vec<_>>(), vec![2, 3]);
+        assert!(m.todo.get(1).is_none_or(|q| q.is_empty()));
+        // one half built: its parent is not ready yet; both: the parent is queued (not free)
+        m.put(0, 2, &"p".repeat(400)).unwrap();
+        m.settle_fresh().unwrap();
+        assert_eq!(m.todo[0].iter().copied().collect::<Vec<_>>(), vec![3]);
+        assert!(m.todo.get(1).is_none_or(|q| q.is_empty()));
+        m.put(0, 3, &"q".repeat(400)).unwrap();
+        m.settle_fresh().unwrap();
+        assert!(m.todo[0].is_empty());
+        assert_eq!(m.todo[1].iter().copied().collect::<Vec<_>>(), vec![1]);
+        // a new message enters the queue when it is appended
+        let i = m.store.log("user", &"z".repeat(600)).unwrap();
+        m.append(i, 100_000);
+        m.settle_fresh().unwrap();
+        assert_eq!(m.todo[0].iter().copied().collect::<Vec<_>>(), vec![4]);
+        // a restart finds the same queues from what is on file
+        let s2 = super::Store::open(&d);
+        let v2 = super::View::fold(&s2, 100_000);
+        let mut m2 = super::Mem::new(d.clone(), s2, v2.clone(), v2);
+        m2.settle_fresh().unwrap();
+        assert_eq!(m2.todo[0].iter().copied().collect::<Vec<_>>(), vec![4]);
+        assert_eq!(m2.todo[1].iter().copied().collect::<Vec<_>>(), vec![1]);
+    }
+
     #[test]
     fn long_text_is_split_not_cut() {
         assert_eq!(super::split("short", 10), vec!["short"]);

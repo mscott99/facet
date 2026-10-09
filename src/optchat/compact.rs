@@ -21,48 +21,28 @@ pub struct Job { pub l: usize, pub i: usize, pub chat: String, pub step: String 
 
 /// Start whatever can start (§4 of the gist, "The order"): a message's node once fewer than
 /// AHEAD lines before it are still unbuilt, a merge once both its halves are built, up to JOBS
-/// at once. Free nodes are built on the spot: they need no model. The levels are walked from
-/// their low-water marks (`Mem::lo`), below which everything is built, so a pump costs the
-/// nodes still to build, not the tree (see README, "Departures").
+/// at once. Work is found in the queues of ready nodes (`Mem::todo`), never by scanning the
+/// tree. Free nodes are built on the spot: they need no model.
 pub fn pump(e: &Arc<Engine>) {
     let mut jobs = Vec::new();
     {
         let mut m = e.mem.lock().unwrap();
-        let mut grew = false;
-        // free nodes, bottom-up, in one pass: a free child can make its parent free
-        let t = m.store.t();
-        let mut l = 0;
-        while (1usize << l) <= t {
-            let mut i = m.lo(l);
-            while ((i + 1) << l) <= t {
-                if !m.store.built(l, i) && m.store.ready(l, i) {
-                    if let Some(text) = m.store.free(l, i) {
-                        if let Err(err) = m.store.put(l, i, &text) { e.notice(&format!("cannot write tree: {}", err)); return }
-                        grew = true;
-                    }
-                }
-                i += 1;
-            }
-            l += 1;
-        }
+        let grew = match m.settle_fresh() {
+            Ok(g) => g,
+            Err(err) => { drop(m); e.notice(&format!("cannot write tree: {}", err)); return }
+        };
         if grew { let budget = e.conf.view; m.refit(budget); e.changed.notify_all(); }
         if m.paused().is_some() { return }
-        // the starts of the view's unbuilt lines, oldest first (only level-0 lines can be unbuilt)
-        let unbuilt: Vec<usize> = m.view.parts.iter().filter(|p| !m.store.built(p.l, p.i)).map(|p| p.start()).collect();
-        let mut l = 0;
-        'levels: while (1usize << l) <= t {
-            let mut i = m.lo(l);
-            while ((i + 1) << l) <= t {
-                if m.busy.len() >= e.conf.jobs { break 'levels }
-                // a message: fewer than AHEAD unbuilt lines before it; `i` only grows
-                if l == 0 && unbuilt.partition_point(|&x| x < i) >= AHEAD { break }
-                if !m.store.built(l, i) && !m.busy.contains(&(l, i)) && !m.held.contains(&(l, i)) && m.store.ready(l, i) {
-                    m.busy.insert((l, i));
-                    jobs.push(job(&m, l, i));
-                }
-                i += 1;
-            }
-            l += 1;
+        let mm = &mut *m;
+        // level 0: the queue holds every unbuilt message (running and failed ones included,
+        // until built), so the first AHEAD of it are those with fewer than AHEAD before them
+        let mut cand: Vec<(usize, usize)> = mm.todo.first().map(|q| q.iter().take(AHEAD).map(|&i| (0, i)).collect()).unwrap_or_default();
+        for (l, q) in mm.todo.iter().enumerate().skip(1) { cand.extend(q.iter().map(|&i| (l, i))); }
+        for (l, i) in cand {
+            if mm.busy.len() >= e.conf.jobs { break }
+            if mm.busy.contains(&(l, i)) || mm.held.contains(&(l, i)) { continue }
+            mm.busy.insert((l, i));
+            jobs.push(job(mm, l, i));
         }
     }
     for j in jobs {
@@ -131,7 +111,7 @@ fn run(e: &Arc<Engine>, j: Job) {
         Ok(text) => {
             let mut m = e.mem.lock().unwrap();
             let mm = &mut *m;
-            if let Err(err) = mm.store.put(j.l, j.i, &text) { drop(m); e.notice(&format!("cannot write tree: {}", err)); return }
+            if let Err(err) = mm.put(j.l, j.i, &text) { drop(m); e.notice(&format!("cannot write tree: {}", err)); return }
             mm.refit(e.conf.view);
             mm.busy.remove(&(j.l, j.i));
             mm.failed.remove(&(j.l, j.i));

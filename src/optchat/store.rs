@@ -152,6 +152,36 @@ impl Store {
     }
 }
 
+/// The images of message `i`, as content blocks `{type: "image", media_type, data}` (base64),
+/// in `chat/images/<i>.json`, written once beside the log (whose lines stay the gist's
+/// `{i, kind, text, size, date}`).
+pub fn put_images(dir: &Path, i: usize, images: &[serde_json::Value]) -> std::io::Result<()> {
+    let d = dir.join("chat/images");
+    fs::create_dir_all(&d)?;
+    let f = d.join(format!("{}.json", i));
+    if f.exists() { return Ok(()) }
+    let tmp = f.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::Value::Array(images.to_vec()).to_string())?;
+    fs::File::open(&tmp)?.sync_all()?;
+    fs::rename(&tmp, &f)
+}
+
+/// The images of message `i`, if it has any.
+pub fn images(dir: &Path, i: usize) -> Vec<serde_json::Value> {
+    fs::read_to_string(dir.join("chat/images").join(format!("{}.json", i))).ok()
+        .and_then(|b| serde_json::from_str::<Vec<serde_json::Value>>(&b).ok()).unwrap_or_default()
+}
+
+/// An image content block from Claude Code's stream (`{type: image, source: {type: base64,
+/// media_type, data}}`) or from MCP (`{type: image, data, mimeType}`), in the one shape kept.
+pub fn image_block(b: &serde_json::Value) -> Option<serde_json::Value> {
+    if b["type"] != "image" { return None }
+    let (mt, data) = if b["source"].is_object() {
+        (b["source"]["media_type"].as_str()?, b["source"]["data"].as_str()?)
+    } else { (b["mimeType"].as_str()?, b["data"].as_str()?) };
+    Some(json!({"type": "image", "media_type": mt, "data": data}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +213,17 @@ mod tests {
         let line = fs::read_to_string(&f).unwrap().lines().find(|l| l.contains("\"i\":1")).unwrap().to_string();
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["size"], 9); // "talk: hé": é is 2 bytes
+    }
+
+    #[test]
+    fn images_beside_the_log() {
+        let d = tmp("images");
+        assert!(images(&d, 3).is_empty());
+        let a = image_block(&json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBO"}})).unwrap();
+        let b = image_block(&json!({"type": "image", "mimeType": "image/jpeg", "data": "/9j/"})).unwrap();
+        assert!(image_block(&json!({"type": "text", "text": "x"})).is_none());
+        put_images(&d, 3, &[a.clone(), b.clone()]).unwrap();
+        assert_eq!(images(&d, 3), vec![a, b]);
     }
 
     #[test]

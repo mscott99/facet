@@ -329,7 +329,7 @@ fn settle(e: &Arc<Engine>) -> bool {
 fn args(e: &Engine, view: &str) -> Vec<String> {
     let sd = state_dir(&e.dir);
     let sys = prompts::system(&e.conf.name);
-    super::events::system(&e.dir, "master", &sys);
+    super::events::system(&e.dir, "system", &sys);
     let f = sd.join("system.txt");
     if std::fs::read_to_string(&f).ok().as_deref() != Some(sys.as_str()) { let _ = std::fs::write(&f, &sys); }
     let mut a = claude::base_args(&e.model(), &e.conf.effort, &f.to_string_lossy(), &e.conf.tools);
@@ -458,6 +458,9 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
         // either (no `stream_event` carries a parent), so the meter above never sees them:
         // each of the subagent's messages is one request, and is counted here instead.
         if let Some(id) = ev["parent_tool_use_id"].as_str() {
+            // its own log (§6 of the gist: "its own steps stay in its own log"), out of the
+            // chat, for zoom("Name")
+            if let Some(a) = agents.get(id) { keep_step(e, a, id, &ev); }
             if ev["type"] == "assistant" {
                 let m = &ev["message"];
                 let r = claude::Req { model: m["model"].as_str().unwrap_or("").into(), usage: m["usage"].clone() };
@@ -527,7 +530,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                     let report = if said.trim().is_empty() {
                         format!("(no report; the subagent ended {})", a.status)
                     } else { cap(said) };
-                    let name = if a.task.is_empty() { id.clone() } else { a.task.clone() };
+                    let name = run_name(e, &a, &id);
                     done(e, &a, &id, &report, tr);
                     e.notice(&format!("subagent {} reported after the reply: it starts a turn of its own", name));
                     input(e, format!("[{}] {}", name, report), true);
@@ -605,6 +608,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                     if b["type"] != "tool_result" { continue }
                     let id = b["tool_use_id"].as_str().unwrap_or("");
                     let text = cap(&result_text(&b["content"]));
+                    let images: Vec<Value> = b["content"].as_array().into_iter().flatten().filter_map(super::store::image_block).collect();
                     // A backgrounded spawn's result is only Claude Code's receipt for it: an
                     // internal id and a warning never to quote it. It is not a report and
                     // does not end the agent, which stays out until its notification.
@@ -617,10 +621,17 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                     let ok = silent || (quiet.remove(id) && (text == super::mcp::SENT || text.starts_with(super::mcp::ANSWERED)));
                     if !bg && !ok {
                         // a subagent's report is the one thing it leaves behind: its own kind (§9)
-                        let sent = agents.remove(id);
-                        let kind = if sent.is_some() { "work" } else { "echo" };
-                        if let Some(a) = sent { done(e, &a, id, &text, tr); }
-                        e.log(kind, &text);
+                        match agents.remove(id) {
+                            Some(a) => {
+                                // the gist's `work` message, "[Name] report": the name is the
+                                // one zoom("Name") opens its run by
+                                let name = run_name(e, &a, id);
+                                let report = strip_receipt(&text);
+                                done(e, &a, id, &report, tr);
+                                e.log("work", &format!("[{}] {}", name, report));
+                            }
+                            None => e.log_images("echo", &text, &images),
+                        }
                     }
                     if !id.is_empty() { e.turn.lock().unwrap().pending.remove(id); }
                 }
@@ -741,6 +752,45 @@ fn done(e: &Arc<Engine>, a: &Agent, id: &str, report: &str, tr: &mut Trace) {
     }));
 }
 
+/// A Task subagent's name: Claude Code's id for it (`agentId`, the `task_id` of its
+/// `task_started`), which is also the id its tool result shows the master; the tool call's id
+/// if Claude Code never gave one.
+fn name_of(a: &Agent, id: &str) -> String { if a.task.is_empty() { id.to_string() } else { a.task.clone() } }
+
+/// One step of a Task subagent's run, appended to its own log under the state directory
+/// (`agents/<name>.jsonl`, where `facet spawn` runs are kept too), never to the chat's.
+fn keep_step(e: &Engine, a: &Agent, id: &str, ev: &Value) {
+    let f = super::agent::dir(e).join(format!("{}.jsonl", super::agent::safe(&name_of(a, id))));
+    if let Ok(mut h) = std::fs::OpenOptions::new().create(true).append(true).open(f) { let _ = writeln!(h, "{}", ev); }
+}
+
+/// The name a finished Task subagent's run is kept under. Steps written under the tool call's
+/// id before Claude Code named the agent are moved to its name.
+fn run_name(e: &Engine, a: &Agent, id: &str) -> String {
+    let name = name_of(a, id);
+    if name != id {
+        let d = super::agent::dir(e);
+        let early = d.join(format!("{}.jsonl", super::agent::safe(id)));
+        if let Ok(body) = std::fs::read_to_string(&early) {
+            let late = d.join(format!("{}.jsonl", super::agent::safe(&name)));
+            let rest = std::fs::read_to_string(&late).unwrap_or_default();
+            if std::fs::write(&late, format!("{}{}", body, rest)).is_ok() { let _ = std::fs::remove_file(&early); }
+        }
+    }
+    name
+}
+
+/// A Task subagent's tool result, without what Claude Code appends to the report itself: the
+/// `agentId: ... (use SendMessage ...)` line (the name now leads the message) and the
+/// `<usage>...</usage>` block (kept in the `agent` event instead).
+pub fn strip_receipt(t: &str) -> String {
+    let mut t = t.trim_end();
+    if t.ends_with("</usage>") { if let Some(k) = t.rfind("<usage>") { t = t[..k].trim_end(); } }
+    if let Some(k) = t.rfind('\n') { if t[k + 1..].starts_with("agentId: ") { t = t[..k].trim_end(); } }
+    else if t.starts_with("agentId: ") { t = ""; }
+    t.to_string()
+}
+
 fn result_text(c: &Value) -> String {
     match c {
         Value::String(s) => s.clone(),
@@ -812,6 +862,17 @@ mod logged_call_tests {
         assert!(c.contains("--desc D") && !c.contains("SECRET"), "{}", c);
         let c = logged_call("Bash", &json!({"command": "ls -la"}));
         assert_eq!(c, "Bash {\"command\":\"ls -la\"}");
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    #[test]
+    fn claude_codes_receipt_is_cut_from_a_report() {
+        let r = "Found it in a.rs:3.\nagentId: a613998538b31dc9f (use SendMessage with to: 'a613998538b31dc9f', summary: '<5-10 word recap>' to continue this agent)\n<usage>subagent_tokens: 96319\ntool_uses: 5\nduration_ms: 76110</usage>";
+        assert_eq!(super::strip_receipt(r), "Found it in a.rs:3.");
+        assert_eq!(super::strip_receipt("plain report"), "plain report");
+        assert_eq!(super::strip_receipt("x\nagentId: abc"), "x");
     }
 }
 

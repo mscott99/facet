@@ -116,55 +116,59 @@ impl View {
         out
     }
 
-    /// The view as saved in `view.json` (§3.2 of the gist): its `[l, i]` pairs, and whether a
-    /// batch is still under way.
+    /// The view as saved in `view.json` (§3.2 of the gist): its `[l, i]` pairs, nothing else.
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({"parts": self.parts.iter().map(|p| [p.l, p.i]).collect::<Vec<_>>(), "cutting": self.cutting})
+        serde_json::Value::Array(self.parts.iter().map(|p| serde_json::json!([p.l, p.i])).collect())
     }
 
     /// A saved view, checked against the log: it must tile the chat from message 0 on, every
     /// part above level 0 built. Messages logged after it was saved (a crash between the two
-    /// writes) are appended as their own lines. None if it does not fit this log.
+    /// writes) are appended as their own lines. None if it does not fit this log. Takes the
+    /// gist's bare list of pairs, and the object an earlier version saved (`{"view": {"parts":
+    /// [...]}, ...}`), so the first start after the switch keeps the view it had.
     pub fn from_json(v: &serde_json::Value, s: &Store) -> Option<View> {
+        let list = match v {
+            serde_json::Value::Array(a) => a,
+            _ => v["view"]["parts"].as_array().or_else(|| v["parts"].as_array())?,
+        };
         let mut parts = Vec::new();
         let mut at = 0;
-        for x in v["parts"].as_array()? {
+        for x in list {
             let p = Part { l: x[0].as_u64()? as usize, i: x[1].as_u64()? as usize };
             if p.start() != at || p.end() > s.t() || (p.l > 0 && !s.built(p.l, p.i)) { return None }
             at = p.end();
             parts.push(p);
         }
         for i in at..s.t() { parts.push(Part { l: 0, i }); }
-        Some(View { parts, cutting: v["cutting"].as_bool().unwrap_or(false) })
+        Some(View { parts, cutting: false })
     }
 }
 
-/// Where the saved views live: `chat/view.json`, beside `chat/main/` and `chat/tree/`.
+/// Where the saved view lives: `chat/view.json`, beside `chat/main/` and `chat/tree/`.
 pub fn path(dir: &std::path::Path) -> std::path::PathBuf { dir.join("chat").join("view.json") }
 
-/// Save the chat's view and the compactions' view, whole, by write-then-rename.
-pub fn save(dir: &std::path::Path, view: &View, cview: &View) -> std::io::Result<()> {
+/// Save the chat's view, whole, by write-then-rename: the gist's `view.json`, `[l, i]` pairs.
+pub fn save(dir: &std::path::Path, view: &View) -> std::io::Result<()> {
     let p = path(dir);
     if let Some(d) = p.parent() { std::fs::create_dir_all(d)?; }
     let tmp = p.with_extension("json.tmp");
-    let body = serde_json::json!({"view": view.to_json(), "compact": cview.to_json()}).to_string();
-    std::fs::write(&tmp, body)?;
+    std::fs::write(&tmp, view.to_json().to_string())?;
     std::fs::rename(&tmp, &p)
 }
 
-/// The views at start: loaded from `view.json`; folded from the log only when there is none
-/// that fits it (the first start of a chat, or a file that does not match this log), with a
-/// note saying so. The compactions' view, if missing, is cut from the chat's view (§4).
+/// The views at start: the chat's loaded from `view.json`; folded from the log only when there
+/// is none that fits it (the first start of a chat, or a file that does not match this log),
+/// with a note saying so. A batch left open by unbuilt parents is not saved: it starts again
+/// once the view next passes its budget. The compactions' view is not saved either (the gist
+/// saves only the view): it is cut from the chat's again (§4), which costs the compactions one
+/// cache write of at most CVIEW/2 bytes.
 pub fn load(dir: &std::path::Path, s: &Store, budget: usize) -> (View, View, Option<String>) {
     let saved = std::fs::read_to_string(path(dir)).ok().and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok());
-    let (view, note) = match saved.as_ref().and_then(|v| View::from_json(&v["view"], s)) {
+    let (view, note) = match saved.as_ref().and_then(|v| View::from_json(v, s)) {
         Some(mut v) => { v.fit(s, budget); (v, None) }
         None => (View::fold(s, budget), Some(if saved.is_some() { "view.json does not fit the log: view folded again" } else { "no view.json: view folded from the log" }.to_string())),
     };
-    let cview = match saved.as_ref().and_then(|v| View::from_json(&v["compact"], s)) {
-        Some(mut c) if note.is_none() => { c.fit(s, super::CVIEW); c }
-        _ => compaction_view(&view, s),
-    };
+    let cview = compaction_view(&view, s);
     (view, cview, note)
 }
 
@@ -315,11 +319,21 @@ mod tests {
         // a live view that differs from a fold: grown with a smaller budget, then saved
         let live = View::fold(&s, 1_500);
         let c = compaction_view(&live, &s);
-        save(&d, &live, &c).unwrap();
+        save(&d, &live).unwrap();
+        // the gist's format: a bare list of [l, i] pairs
+        let body: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path(&d)).unwrap()).unwrap();
+        assert_eq!(body[0], serde_json::json!([live.parts[0].l, live.parts[0].i]));
         let (v, cv, note) = load(&d, &s, 3_000);
         assert!(note.is_none());
         assert_eq!(v.parts, live.parts);
         assert_eq!(cv.parts, c.parts);
+        // the object an earlier version saved loads as the same view (migration)
+        let old = serde_json::json!({"view": {"parts": live.to_json(), "cutting": false}, "compact": {"parts": [], "cutting": false}});
+        std::fs::write(path(&d), old.to_string()).unwrap();
+        let (vo, _, no) = load(&d, &s, 3_000);
+        assert!(no.is_none());
+        assert_eq!(vo.parts, live.parts);
+        save(&d, &live).unwrap();
         assert_ne!(View::fold(&s, 3_000).parts, live.parts);
         // messages logged after the save come in as their own lines
         s.msgs.push(crate::optchat::store::Msg { kind: "user".into(), text: "new".into(), date: String::new() });
@@ -327,7 +341,7 @@ mod tests {
         assert_eq!(v2.parts.last(), Some(&Part { l: 0, i: 40 }));
         assert_eq!(&v2.parts[..v2.parts.len() - 1], &live.parts[..]);
         // a file that does not fit the log is folded again, and says so
-        std::fs::write(path(&d), r#"{"view":{"parts":[[0,5]]}}"#).unwrap();
+        std::fs::write(path(&d), r#"[[0,5]]"#).unwrap();
         assert!(load(&d, &s, 3_000).2.is_some());
         // no file: folded
         std::fs::remove_file(path(&d)).unwrap();

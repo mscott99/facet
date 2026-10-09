@@ -18,6 +18,7 @@
 #   "CHAT x"   -> calls the engine's MCP send_chat with "x" (as the real CLI would, over HTTP to
 #                 the --mcp-config URL), then a reply "said it"
 #   "ZOOM"     -> calls MCP zoom (id 0), then a reply "zoomed"
+#   "IMAGE"    -> one Read call whose result carries an image block, then a reply "seen"
 #   "CARD id"  -> calls MCP answer_card for card id with "card answer", then a reply "noted"
 #   "NEWCARD at x" -> calls MCP new_card on "Other Note" (anchor x, warn, with a fix "LINE FIVE"),
 #                 then a reply "opened"
@@ -187,6 +188,13 @@ def run_turn(msg):
     n = int(t.split("TOOLS ")[1].split()[0]) if "TOOLS " in t else 0
     if "BGAGENT" in t: return run_bg_agent()
     if "AGENT" in t: run_agent()
+    if "IMAGE" in t:
+        tid = "toolu_img_%f" % time.time()
+        step([{"type": "tool_use", "id": tid, "name": "Read", "input": {"file_path": "/tmp/pic.png"}}], stop="tool_use")
+        out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tid, "content": [
+            {"type": "text", "text": "a picture"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoFAKE"}}]}]}})
+        time.sleep(0.2); step([{"type": "text", "text": "seen"}]); result("seen"); return
     if "ZOOM" in t:
         output_tool("zoom", {"id": 0, "n": 1})
         time.sleep(0.2); step([{"type": "text", "text": "zoomed"}]); result("zoomed"); return

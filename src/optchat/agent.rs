@@ -139,15 +139,23 @@ fn run(e: Arc<Engine>, mut p: Proc, rec: Rec) {
     super::engine::restart_if_idle(&e);
 }
 
-/// zoom("Name") (§6 of the gist): a detached agent's whole run, from its captured stream: its
-/// text, its tool calls and their results (each clipped as the log clips tool output). Task
-/// subagents leave no stream behind (their events are dropped), so only `facet spawn` ids work.
+/// A name as a file name: letters, digits, `_` and `-` only, so no name can reach outside
+/// the agents directory.
+pub fn safe(name: &str) -> String {
+    name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect()
+}
+
+/// zoom("Name") (§6 of the gist): an agent's whole run, from its own log: a `facet spawn`
+/// agent's (spawn_...) or a Task subagent's (Claude Code's agentId, the name its `work`
+/// message starts with). Its text, its tool calls and their results (each clipped as the log
+/// clips tool output).
 pub fn transcript(e: &Engine, name: &str) -> String {
-    let name = name.trim();
-    if !name.starts_with("spawn_") || !name[6..].chars().all(|c| c.is_ascii_hexdigit()) || name.len() == 6 {
-        return format!("No agent {}: zoom takes a `facet spawn` id (spawn_...).", name);
+    let name = name.trim().trim_start_matches('[').trim_end_matches(']');
+    let f = safe(name);
+    if f.is_empty() || f != name {
+        return format!("No agent {}: zoom takes an agent's name, as its report starts \"[Name]\".", name);
     }
-    let Ok(body) = std::fs::read_to_string(dir(e).join(format!("{}.jsonl", name))) else {
+    let Ok(body) = std::fs::read_to_string(dir(e).join(format!("{}.jsonl", f))) else {
         return format!("No agent {}.", name);
     };
     let mut out = Vec::new();

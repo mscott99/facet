@@ -223,7 +223,7 @@ try:
     eng = subprocess.Popen([BIN, "engine"], env=env, stdout=subprocess.DEVNULL, stderr=open(os.path.join(D, "engine2.err"), "w"))
     wait(lambda: os.path.exists(os.path.join(D, "lock")) and any(m["text"] == "SURVIVOR" for m in log()[n0:]), 30, "survivor logged after restart")
     err2 = open(os.path.join(D, "engine2.err")).read()
-    check("view of" in err2 and "folded" not in err2 and len(saved["view"]["parts"]) > 0, "the view is loaded from view.json at a restart, not folded again (§3.2)")
+    check("view of" in err2 and "folded" not in err2 and isinstance(saved, list) and len(saved) > 0 and all(len(p) == 2 for p in saved), "the view is loaded from view.json at a restart, not folded again, saved as the gist's [l, i] pairs (§3.2)")
     wait(idle, 60, "idle after restart")
     L = [(m["kind"], m["text"]) for m in log()[n0:]]
     k = L.index(("user", "SURVIVOR"))
@@ -276,7 +276,7 @@ try:
     wait(idle, 60, "idle after the subagent turn")
     L = log()[n0:]
     work = [m for m in L if m["kind"] == "work"]
-    check(len(work) == 1 and work[0]["text"].startswith("REPORT:"), "the subagent's report is logged, as kind work")
+    check(len(work) == 1 and work[0]["text"].startswith("[task_fake_1] REPORT:"), "the subagent's report is logged, as kind work, \"[Name] report\"")
     check(not any("SUBAGENT PROSE" in m["text"] or "grep -r thing" in m["text"] for m in L),
           "the subagent's own steps and prose are not logged")
     ev = events()
@@ -284,13 +284,13 @@ try:
     check(len(a) == 1 and a[0]["reqs"] == 2 and a[0]["eq"] > 0 and a[0]["status"] == "completed",
           "one agent record, with the requests we counted: %r" % (a[-1] if a else None))
     check(a and a[0]["tokens"] == 4321 and a[0]["tools"] == 1 and a[0]["task_ms"] == 1234
-          and a[0]["report_bytes"] == len(work[0]["text"]) and a[0]["ask_bytes"] > 0 and a[0]["task"] == "task_fake_1",
+          and a[0]["report_bytes"] == len(work[0]["text"]) - len("[task_fake_1] ") and a[0]["ask_bytes"] > 0 and a[0]["task"] == "task_fake_1",
           "the agent record keeps what it was asked, what it cost and what it left behind")
     ar = [x for x in ev if x["ev"] == "req" and x["kind"] == "agent"]
     check(len(ar) == 2 and all(x["tool_use_id"].startswith("toolu_agent") for x in ar),
           "each subagent request is logged on its own, under the agent that made it (%d)" % len(ar))
     t = [x for x in ev if x["ev"] == "turn"][-1]
-    check(t["agents"] == 1 and t["agent_reqs"] == 2 and t["agent_eq"] > 0 and t["agent_bytes"] == len(work[0]["text"]),
+    check(t["agents"] == 1 and t["agent_reqs"] == 2 and t["agent_eq"] > 0 and t["agent_bytes"] == len(work[0]["text"]) - len("[task_fake_1] "),
           "the turn record totals what its subagents cost")
     av = [v.get("argv", []) for v in fake()]
     # --agents is a path: the view is too big for one argv string on Linux (128 KiB)
@@ -307,6 +307,26 @@ try:
     check(defs and all({"mcp__optchat__zoom", "mcp__optchat__date"} <= set(a["tools"])
                        for d in defs for a in d.values()),
           "a subagent may open a line of the view, as the master may")
+
+    # its run is kept out of the chat, for zoom("Name") (§6 of the gist)
+    z = req({"op": "zoom", "id": "task_fake_1"})["text"]
+    check("SUBAGENT PROSE" in z and "grep -r thing" in z, "zoom(\"task_fake_1\") gives the subagent's whole run: %r" % z[:200])
+    mcp_url = json.loads(av[-1][av[-1].index("--mcp-config") + 1])["mcpServers"]["optchat"]["url"]
+    def mcp(name, args):
+        import urllib.request
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}).encode()
+        return json.loads(urllib.request.urlopen(urllib.request.Request(mcp_url, body, {"Content-Type": "application/json"})).read())["result"]["content"]
+    check("SUBAGENT PROSE" in mcp("zoom", {"id": "task_fake_1"})[0]["text"], "the master's zoom tool opens it too")
+
+    # images: a tool result's image is kept, and zoom(id, 1) gives it back (§5 of the gist)
+    n0 = len(log())
+    req({"op": "send", "text": "IMAGE please"})
+    wait(lambda: any(m["kind"] in ("talk", "chat") for m in log()[n0:]), 30, "reply after the image")
+    wait(idle, 60, "idle after the image turn")
+    im = [m for m in log()[n0:] if m["kind"] == "echo" and "a picture" in m["text"]]
+    got = mcp("zoom", {"id": im[0]["i"], "n": 1}) if im else []
+    check(im and "[image]" in im[0]["text"] and len(got) == 2 and got[1] == {"type": "image", "data": "iVBORw0KGgoFAKE", "mimeType": "image/png"},
+          "zoom(id, 1) gives a message whole, with its images: %r" % got)
 
     u = [json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))]
     check({"compact", "prime", "turn", "agent"} <= {x["kind"] for x in u}, "usage logged per request for compact, prime, turn and agent")

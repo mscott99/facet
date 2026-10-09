@@ -144,6 +144,14 @@ fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
             let a = &v["params"]["arguments"];
             let num = |k: &str| a[k].as_i64().or_else(|| a[k].as_str().and_then(|s| s.trim().parse().ok()));
             let st = |k: &str| a[k].as_str().map(String::from).or_else(|| a[k].as_i64().map(|x| x.to_string())).unwrap_or_default();
+            // zoom(id, 1) gives the message whole, with its images (§5 of the gist)
+            let mut pics: Vec<Value> = Vec::new();
+            if v["params"]["name"] == "zoom" && num("n") == Some(1) {
+                if let Some(i) = num("id").filter(|&i| i >= 0) {
+                    pics = super::store::images(&e.dir, i as usize).iter()
+                        .map(|b| json!({"type": "image", "data": b["data"], "mimeType": b["media_type"]})).collect();
+                }
+            }
             let (text, err) = match v["params"]["name"].as_str().unwrap_or("") {
                 "zoom" => (match (num("id"), num("n")) {
                     (Some(i), Some(n)) => zoom(&e.mem.lock().unwrap().store, i, n),
@@ -171,7 +179,9 @@ fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
                 }
                 other => (format!("No tool {}.", other), true),
             };
-            json!({"content": [{"type": "text", "text": text}], "isError": err})
+            let mut content = vec![json!({"type": "text", "text": text})];
+            content.extend(pics);
+            json!({"content": content, "isError": err})
         }
         _ => return Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}})),
     };

@@ -386,7 +386,10 @@ The engine follows the gist exactly where it can. These are the places it does n
 with its reason. The gist was rewritten on 2026-10-08 (revision 3c190e0; earlier ones
 2026-10-04); items 1-21 cite the section numbers of the first version, items 22 on those of
 the rewrite (§1 log, §2 tree, §3 view, §3.3 cache, §4 compactions, §5 prompt, §6 turn,
-§7 mistakes). Item 22 is the line-by-line audit against the rewrite. Measurements: Claude Code 2.1.268, subscription (OAuth), Sonnet 5.5, through
+§7 mistakes). Item 22 is the first line-by-line audit against the rewrite; item 23 the
+second, under the rule now in force: follow the gist, and depart only for the user's own
+decisions or for an issue with the gist demonstrated in this setting. Numbers are kept stable
+for the references to them; the gaps (4, 20) are departures since gone. Measurements: Claude Code 2.1.268, subscription (OAuth), Sonnet 5.5, through
 a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 
 **Forced by `claude -p`**
@@ -404,14 +407,9 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
    gist's: the context in blocks of 4 lines, one mark on its last whole block, one on the
    request's end (the step, which also serves the size retries). The next call finds this
    mark within the API's 20-block lookback and pays only for the lines after it.
-3. *No chain (dropped).* The context's tail after the last fraction mark used to go as one
-   block per call increment so the next end mark could find it within the lookback. With
-   4-line blocks the last-whole-block mark does that by itself, so the chain is gone. Still
-   ours: `</chat>` opens the step block instead of closing the context block, so one call's
-   context is a prefix of the next one's.
-4. *The gate (the gist's).* Compactor calls whose marked prefixes are not cached yet wait (until its
-   first response) for the call already writing them, instead of all writing the same tens of
-   thousands of tokens in parallel. JOBS stays 8.
+3. *`</chat>` opens the task block (§4).* The bytes are the gist's; only the cache block
+   boundary sits before `</chat>` instead of after it, so one compaction's context is a prefix
+   of the next one's.
 5. *Mid-run messages (§7).* A message written to `claude` while the model writes its final
    reply is run by Claude Code as a follow-up turn of the same conversation, with a stale view.
    So a message is written only while a tool runs (it rides on that tool's result, in the
@@ -444,11 +442,13 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     costs one miss.
 11. *Tools* are Claude Code's own (Bash, Read, Edit, Write, Glob, Grep, WebFetch,
     WebSearch, Task) plus zoom and date served over MCP from the engine (§9 suggests MCP
-    over HTTP). A subagent gets zoom and date too, named in its definition (see 19).
+    over HTTP), with the gist's descriptions verbatim. A subagent gets zoom and date too,
+    named in its definition (see 19).
 
 **Choices the gist leaves open, and safety additions**
 
-12. *MASTER's subagent line keeps the gist's free hand, with a nudge (§7.2).* There is no
+12. *The system prompt's subagent paragraph keeps the gist's free hand, with a nudge (§7.2;
+    the user's decision).* There is no
     spawn, tell or computer tool, so the gist's wording would describe tools that do not
     exist, and its "use subagents only when the user asks for them" is a caution about
     delegating blind, not about price. A spawn here carries the whole view, as the gist's
@@ -489,12 +489,17 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 
 19. *Subagents are Claude Code's Task tool, not the gist's spawn and tell (§9).* The engine
     does not start them and cannot talk to one while it runs. Every event carrying a
-    `parent_tool_use_id` is dropped, so a subagent's own calls, results and prose never enter
-    the log: what is remembered is the report it hands back, logged as one message of kind
-    `work` (the gist's own kind for it) when it comes back inside the turn, and as the gist's
-    own `[id] ` user message when it comes back after the turn is over (below).
+    `parent_tool_use_id` stays out of the chat's log, as the gist has it ("its own steps stay
+    in its own log"): it goes to the subagent's own log, `<state dir>/agents/<agentId>.jsonl`,
+    where `zoom("<agentId>")` opens the whole run (§6). What the chat remembers is the report
+    it hands back, logged as the gist's one `work` message, `[<agentId>] report`, whether it
+    comes back inside the turn or after it (below). The agentId is Claude Code's own (the
+    `task_id` of its `task_started`), the same id its tool result shows the master; the
+    `agentId: ... (use SendMessage ...)` line and `<usage>` block Claude Code appends to that
+    result are cut from the logged report (the name leads it; the usage is in the `agent`
+    event).
     Exploration that would have been twenty tool/echo pairs in the log costs one line.
-    MASTER therefore keeps the gist's free hand and states the one quantity the choice turns
+    The system prompt therefore keeps the gist's free hand and states the one quantity the choice turns
     on (see 12): how much of the work will be worth remembering. Little, and it is sent out
     (a search, a survey, a fact, a contained piece of programming); much, and it stays here,
     as does anything whose next step depends on the last or that the user is waiting on. The
@@ -513,7 +518,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     sent it, so it cannot be that turn's: it goes in as the gist has it, one message of kind
     `user` whose text starts `[id] `, queued the way a message sent for a turn of its own is
     (so it is durable too, see 15) and answered by a fresh call whose view already has it.
-    Backgrounding buys the turn nothing, which is why MASTER steers away from it: Claude Code
+    Backgrounding buys the turn nothing, which is why the system prompt steers away from it: Claude Code
     withholds the call's `result` until every background task has ended (measured: the reply
     at 9 s, the notification at 49 s, `result` and exit at 51 s), so the call waits for the
     subagent whether the master does or not. All it adds is the follow-up turn Claude Code
@@ -543,7 +548,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     steps leave no line to summarize — but every node the compactor has already built is
     there, so the depth of the chat is open to it while only the summary is pushed on it.
     Because that reading is free, the `AGENT` prompt tells the subagent so and tells it to
-    zoom freely rather than guess from a summary line — the same stance `MASTER` takes.
+    zoom freely rather than guess from a summary line — the same stance the system prompt takes.
     Both prompts also say the view is true as a working rule: act on it without checking it
     over again, and zoom for what a line leaves out rather than to confirm what it says.
     The cheap call is the one that recovers a dropped detail; re-reading what the summary
@@ -554,7 +559,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     the top-level `--tools` at all — a connected `--mcp-config` server is exposed to the
     session, and the definition's `tools` array is what grants it. What the subagent still
     cannot do is ask: it cannot be told more once sent, which is what AGENT says to it and
-    what MASTER tells the master to expect. The master's own prefix is untouched by
+    what the system prompt tells the master to expect. The master's own prefix is untouched by
     this: an agent definition's prompt never enters the master's request at all — the same
     call with a 60k-character agent prompt and with a 29-byte one hit one cache entry, byte
     for byte, 10468 tokens written then read — so a view that changes every turn cannot move
@@ -577,35 +582,6 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     (`agents`, `agent_reqs`, `agent_eq`, `agent_bytes`). So the question the default answers by
     assumption — how much to send out versus do here — becomes measurable: the subagent's own
     eq against the compaction its report avoided, over real turns.
-
-20. *The view's batch and its cache marks are the gist's (§5.2, §8).* As in the
-    gist, nothing merges until the view passes VIEW = 128,000 bytes; one batch then merges the
-    most due pair whose parent is built, again and again, until the view is at most VIEW/2 =
-    64,000 bytes (`inner`). If unbuilt parents stop it short, the batch stays open
-    (`View::cutting`) and every later fit (a new message, a node built) merges what it can until
-    it gets there. Due is the gist's, `(T - last) / 2^l`, with `last` the pair's last message
-    (inclusive: the second line's end - 1) and `l` the level of the two lines; compared exactly,
-    the oldest of equals kept. The view so climbs 64k -> 128k by appends alone, its prefix
-    byte-identical for the whole climb. The marks follow it the gist's way: the view (and a
-    compactor's context) goes out in blocks of BLOCK = 4 lines, marked on the last whole block
-    and on the request's end, two marks a call; each call reads the previous one's mark from
-    within the 20-block lookback. Dropped with this: the fraction marks of VIEW (MARKS =
-    15/32, 23/32, 15/16, i.e. 60k/92k/120k characters, whose tail past the last mark was
-    rewritten on every primed turn) and the compactor's chain (item 3). Known cost of the
-    gist's scheme: a turn or context that grows by more than 20 blocks (80 lines) since the
-    last mark finds no entry and rewrites the whole prefix; so does a compactor context that
-    ends more than 80 lines short of every marked one.
-
-    History: commit 5c252fb gave the view an 8% band instead (collapse past 128k * 27/25 back
-    to 128k) and measured due from the pair's start, `(T - start) / 2^(l+2)`. That rested on a
-    misreading — that the gist collapses on nearly every append — when the gist already batches
-    128k -> 64k. Reverted to the gist. A rough replay over this chat (3895 messages, real node
-    sizes, all nodes taken as built, 2.15 compactor calls a message, chain reset every 16
-    increments, Sonnet rates; not comparable to the earlier replay's dollars): the band
-    invalidates the cached prefix on 2.5% of messages and costs $127; the gist's batch with
-    these marks 1.3% and $85, keeping less history on average (92 kB against 125 kB). Marks all
-    under 64k (24/40/60k) invalidate less (0.5%) but cost more ($102), the chain carrying up to
-    68k of tail; the old marks (48/80/120k) $89.
 
 21. *A subagent that outlives its turn (§9, partial spawn).* A Task subagent lives and dies
     inside the master's own `claude -p` process: when the call's reply ends, Claude Code kills
@@ -646,9 +622,8 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     plain log line, no turn), so a task passed by file is not lost; `--add-dir /tmp` on the
     master's and spawns' calls keeps work in /tmp from resetting the shell's directory, and a
     trailing "Shell cwd was reset to ..." line is stripped from a tool result before it is logged
-    as `echo`; COMPACT tells the compactor that a summary is never longer than what it stands
-    for and may lean on the lines before it, never the ones after. (The invented length example,
-    `prompts::SCALE`, is gone: the gist's 512-dash ruler replaced it, see 22.)
+    as `echo`. (The invented length example, `prompts::SCALE`, is gone: the gist's 512-dash
+    ruler replaced it, see 22.)
 
 22. *Audit against the rewritten gist (2026-10-08), and what changed to match it.*
     Matched by this audit: the compactor is Claude Haiku at xhigh effort (`compact_model`
@@ -674,40 +649,53 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     navigate the tree", "its latest word on a thing is the truth" and "Never wait for one (no
     sleep, no polling)"; `zoom("spawn_...")` gives a detached agent's whole run (§6).
 
-    Kept, with the gist's argument answered:
-    - *The compactor has its own system prompt and no tools* (§4, §5, mistake 6: "a compaction
-      ... with its own system prompt (it loses the turns' cache)"). The gist's gain is that a
-      compaction reads tools and system prompt from the turns' cache entry. A prompt cache is
-      per model, and here the turns run sonnet or opus while compactions run haiku (the gist's
-      own choice too), so no compaction could ever read the turns' entry; sharing would only
-      add Claude Code's master prefix (its tool definitions, the date block) to every
-      compaction. The compactions share their own constant prefix with each other, which is
-      the part of the gist's argument that still applies. If `compact_model` is ever set to
-      the master's model this should be revisited.
-    - *Queues (§4, mistake 13: "never scan the tree for work: over a long chat, that is
-      O(N²)").* The pump walks each level from a low-water mark below which every node is
-      built (`Mem::lo`), and level 0 stops at the 8th unbuilt line, so one pump costs the nodes
-      still to build plus one step per level, not the tree: the O(N) per pump that makes the
-      gist's O(N²) is not there.
-    - *`view.json` holds an object*, `{"view": {"parts": [[l, i], ...], "cutting": bool},
-      "compact": {...}}`, not a bare list of pairs: the compactions' view and an unfinished
-      batch (§3.2, "it merges what it can at each new message until it does") must survive a
-      restart too, or the next start would differ from the live view the gist says to keep.
-    - *MASTER's subagent paragraph* (12) and *the view as a working rule* (the user's own
-      decisions in this chat): the gist's "use subagents only when the user asks" and "zoom
-      until you have it whole ... before you act" stand against them; kept because the user
-      asked for both after weighing them, and the gist's reason ("without it, models guess from
-      a summary") is answered in the prompt by "zoom freely ... whenever a summary only
-      mentions something you need".
-    - *No user instructions after the prompt* (§5): the user removed the instructions file on
-      purpose; the chat is the memory of how they want work done ("A correction given in chat
-      survives up the tree, so most of an AGENTS.md becomes unneeded", the gist's own line).
-    - *One paragraph added to COMPACT* (lines never longer than what they stand for; lean on
-      the lines before; never "result unseen"): each fixes a failure seen in this chat's
-      summaries, and none contradicts the gist's text.
-    - *zoom("Name")* works only for `facet spawn` agents: a Task subagent's events are dropped
-      (19), so there is no run to give. *Images* (`zoom(id, 1)` "with its images") are not
-      logged by this engine.
+    What it kept is settled by item 23.
+
+23. *Second audit (2026-10-09): follow the gist unless the user decided otherwise or an issue
+    is demonstrated.* Changed to match the gist:
+    - *One system prompt for turns and compactions* (§5, mistake 6): `prompts::SYSTEM` is the
+      gist's prompt (intro, view, turns, compactions), kinds renamed, the computers paragraph
+      left out (no device tools); the compactor reads the same `system.txt` the turns do
+      (`compact.txt` and `COMPACT` are gone, and with them the paragraph of ours on line
+      length and "result unseen", which did not stop lines saying "result unseen" anyway).
+    - *Queues, not a walk of the tree* (§4, mistake 13): a node enters its level's queue
+      (`Mem::todo`) when it becomes ready — its message logged, or its second half built — and
+      leaves when built; the pump reads only the queues (level 0: the first AHEAD of its
+      queue). The queues are filled once at start from what is on file.
+    - *`view.json` is the gist's list of `[l, i]` pairs*, nothing else. The compactions' view is
+      not saved (the gist saves only the view): at start it is cut again from the chat's view,
+      one compaction cache write of at most CVIEW/2 bytes. A batch that unbuilt parents left
+      open is not saved either: it starts again when the view next passes 128 KB. An earlier
+      `{"view": ..., "compact": ...}` file is read once and rewritten as pairs, view unchanged.
+    - *`work` messages read `[Name] report`*, Task subagents' too, and *their runs are kept*
+      for `zoom("Name")` (see 19); the zoom tool's description is the gist's verbatim.
+    - *Images* (§5: `zoom(id, 1)` gives a message "whole, with its images"): an image a tool
+      returns (Read on a picture, say) is kept beside the log, `chat/images/<id>.json`, and
+      zoom(id, 1) returns it as an MCP image block, which Claude Code hands the model.
+
+    Still departing, each for one reason:
+    - *Compactions run without tools, under `--safe-mode`* (§4: "same system prompt and
+      tools"): the tools are shared only for the turns' cache, and a cache is per model.
+      Measured 2026-10-09: one system-prompt file, no tools, Sonnet wrote 35,696 tokens and read
+      them back; Haiku, right after, read 0 and wrote 35,694. With Haiku compactions (the gist's
+      own model) nothing of the turns' entry can be read, and the tools would only hand a
+      summarizer live Bash under `bypassPermissions`. Revisit if `compact_model` = `model`.
+    - *Subagent paragraph, Task subagents in the foreground, `facet spawn`* (12, 19, 21): the
+      user's decision; `claude -p` kills a backgrounded Task subagent with the turn.
+    - *"Act on the view without checking it over again"*, added to the gist's "zoom until you
+      have it whole": the user's decision.
+    - *No user instructions after the prompt* (§5): the user removed the file; the e-mail rule
+      is the one line kept, in the prompt.
+    - *The prompt's paragraphs on send_chat, cards and `facet restart`*: the user's features.
+    - *AGENT, a subagent's own system prompt*: the gist does not give one; a Task subagent's
+      definition prompt is its only channel for the view (19).
+    - *A copied `id+n|` head and a copied `| ← LIMIT` are cut from a compaction's reply*:
+      measured, Haiku copied the cut marker back (Haiku vs Sonnet comparison, 39 jobs).
+    - *Free nodes are built at once* (13), *safety pauses* (14), *durable queued messages*
+      (15), *browse, import, /model* (16-18): the gist is silent or the result is the same.
+
+    Gaps: images come only from tool results (no route takes an image from the user, and a
+    subagent's images stay in its run); `--safe-mode` and no tools are kept as above.
 
 Not implemented: computer use, and `tell` — a running `facet spawn` cannot be messaged once
 sent, only awaited for its report (§9); `facet spawn` itself (21) is this engine's answer to
@@ -715,7 +703,7 @@ the gist's `spawn`.
 
 ## measured and rejected
 
-Three cheaper-looking ideas, each measured against this chat's own logs (1098 messages,
+Cheaper-looking ideas, each measured against this chat's own logs (1098 messages,
 $240 of model time at list prices) and each dropped. Kept here so they are not tried twice.
 
 1. *Freezing the view for the length of a turn.* The hope was that holding the view still
@@ -723,9 +711,9 @@ $240 of model time at list prices) and each dropped. Kept here so they are not t
    current collapse-to-budget rule invalidates the cached prefix on 75.8% of appends and
    costs $111 of compaction; freezing to the turn's start brings that to 38.2% and $81, but
    the view overshoots its own budget (153 kB against VIEW = 128 kB) because nothing may
-   collapse while a turn runs. Collapsing in one batch (§20) does better on both counts
+   collapse while a turn runs. Collapsing in one batch (item 4 below) does better on both counts
    (31.1%, $52) and freezing on top of it adds nothing (31.1%, $54). (That batch was the 8%
-   band, since reverted to the gist's 128k -> 64k batch, §20.)
+   band, since reverted to the gist's 128k -> 64k batch, item 4 below.)
    Worse than useless: nodes are built on top of nodes built in the same turn, so a parent
    and its own children would both be written against the turn's starting view, and the
    parent's line would summarize children it cannot see. Batching the collapse is the fix;
@@ -746,6 +734,12 @@ $240 of model time at list prices) and each dropped. Kept here so they are not t
    limit, fits 80.1%; a third try fits 45%. More words about the limit will not move the
    first number, because the second is not counting either, only copying up to a visible
    cut. Shortening without a new call is the only real fix.
+4. *An 8% band instead of the gist's batch* (commit 5c252fb: collapse past 128k * 27/25 back
+   to 128k, due from the pair's start, `(T - start) / 2^(l+2)`). It rested on a misreading,
+   that the gist collapses on nearly every append. Rough replay over this chat (3895
+   messages, real node sizes, Sonnet rates): the band invalidated the cached prefix on 2.5%
+   of messages for $127; the gist's 128k -> 64k batch with its 4-line-block marks, 1.3% for
+   $85, keeping less history on average (92 kB against 125 kB). Reverted to the gist.
 
 ## logs
 
@@ -763,9 +757,11 @@ Append-only, one JSON object per line, fsynced; never edit or delete a line.
                                  venue; answer: sent to a card — see **stream and venues**)
     chat/tree/YYYY-MM-DD.jsonl   {l, i, text, size}            summary node (l, i) covers messages
                                  [i·2^l, (i+1)·2^l); shown as id+n with id = i·2^l, n = 2^l
-    chat/view.json               {view, compact}               the chat's view and the compactions'
-                                 view as [l, i] parts (+ whether a batch is under way); rewritten
-                                 (write, rename) at every change, loaded at start, never refolded
+    chat/view.json               [[l, i], ...]                 the chat's view (the gist's format);
+                                 rewritten (write, rename) at every change, loaded at start,
+                                 never refolded
+    chat/images/<i>.json         [{type, media_type, data}]    the images of message i (a tool
+                                 result's), base64; zoom(i, 1) returns them
     usage.jsonl                  {date, kind, model, usage}    one line per API request the engine
                                  caused; kind is turn | prime | compact; usage is the API's own
                                  usage object (input, cache read, cache write by TTL, output)
@@ -785,7 +781,9 @@ here is the old file, already absorbed.)
     notes.json     notes imported during a turn, not yet in the log; added at start
     limits.json    the last rate_limit_info Claude Code reported
     model          the /model choice, if any (wins over chat.model)
-    system.txt     the master system prompt as last sent; compact.txt the compactor's
+    system.txt     the system prompt as last sent, turns and compactions alike
+    agents/        each subagent's own run, <name>.jsonl (spawn_... for `facet spawn`, Claude
+                   Code's agentId for a Task subagent), read by zoom("Name")
     prompts/       every distinct system prompt ever sent, named <name>-<hash>.txt
     memory.html    the last /tree page written by `facet chat`
     engine.log     stdout/stderr of an engine started by `facet chat` (under launchd, the
