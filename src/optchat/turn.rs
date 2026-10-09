@@ -347,10 +347,12 @@ fn args(e: &Engine, view: &str) -> Vec<String> {
 }
 
 /// §8 with `claude -p`: Claude Code's own cache marks leave no room for marks in the view,
-/// so a priming request (Claude Code's marks off, ours on each view piece) writes the view
-/// into the cache, and is killed as soon as the API has accepted it. The real call's first
-/// request then reads the whole view back.
-fn prime(e: &Arc<Engine>, args: &[String], pieces: &[&str], tr: &mut Trace) {
+/// so a priming request (Claude Code's marks off, ours as in the gist: on the view's last
+/// whole block of BLOCK lines and on the request's end) writes the view into the cache, and
+/// is killed as soon as the API has accepted it. The real call sends the same blocks, so its
+/// first request reads the whole view back from the end mark; the next turn's priming finds
+/// this one's last-whole-block mark within the API's 20-block lookback.
+fn prime(e: &Arc<Engine>, args: &[String], pieces: &[&str], marks: &[bool], tr: &mut Trace) {
     tr.primed = true;
     let mut cc = String::new();
     phase(e, "priming");
@@ -358,7 +360,7 @@ fn prime(e: &Arc<Engine>, args: &[String], pieces: &[&str], tr: &mut Trace) {
         Ok(p) => p,
         Err(x) => { e.notice(&format!("priming: spawn failed: {}", x)); return }
     };
-    let content: Vec<Value> = pieces.iter().map(|t| json!({"type": "text", "text": t, "cache_control": {"type": "ephemeral"}})).collect();
+    let content: Vec<Value> = pieces.iter().zip(marks).map(|(t, m)| if *m { json!({"type": "text", "text": t, "cache_control": {"type": "ephemeral"}}) } else { json!({"type": "text", "text": t}) }).collect();
     if p.send(Value::Array(content)).is_err() { return }
     let mut meter = Meter::default();
     let t0 = Instant::now();
@@ -389,7 +391,8 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     tr.outcome = "error";
     let a = args(e, view_text);
     let pieces = view::pieces(view_text);
-    if e.conf.prime && pieces.len() > 1 { prime(e, &a, &pieces, tr); }
+    // with no whole block there is nothing worth priming: the call's own end mark covers it
+    if e.conf.prime && pieces.len() > 1 { prime(e, &a, &pieces, &view::marked(view_text), tr); }
     if cancelled(e) { tr.outcome = "cancelled"; return }
     phase(e, "calling");
     let ttl = e.conf.ttl.clone();

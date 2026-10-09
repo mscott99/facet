@@ -390,22 +390,23 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 
 1. *Priming instead of cache marks inside the view (§8).* From its second step on, a call
    uses all 4 of the API's cache breakpoints itself (2 on the system prompt, 2 rolling); one
-   more is a `400`. So before each turn whose view passes the first mark (3/8 of the budget,
-   48k characters), a
+   more is a `400`. So before each turn whose view holds at least one whole block, a
    priming request goes out: the same arguments, Claude Code's own marks off
-   (`DISABLE_PROMPT_CACHING=1`), ours on each view piece. It is killed as soon as the API
+   (`DISABLE_PROMPT_CACHING=1`), ours placed as the gist places them: the view in blocks of 4
+   lines, one mark on the last whole block, one on the request's end. It is killed as soon as the API
    accepts it; the real call then reads the whole view back (measured: read 30,003 of 30,003
    tokens, wrote 350). One per turn, right before it, writing only what changed: not one of
    the "renewal pings" §8 forbids.
-2. *The compactor sets its own marks (§4.2, §8).* Claude Code's marks are off; ours go on the
-   view pieces and the end of the context, and a spare one on the step, so the size retries
-   read everything.
-3. *The chain.* `</chat>` opens the step block instead of closing the context block, and the
-   context's tail after its last mark goes as one block per call increment. The next call's
-   end mark then finds the previous call's whole context within the API's 20-block lookback.
-   The text the model sees is identical. Measured: each call after the first reads ~22k tokens
-   and writes ~500.
-4. *The gate.* Compactor calls whose marked prefixes are not cached yet wait (until its
+2. *The compactor sets its own marks (§4.2, §8).* Claude Code's marks are off; ours are the
+   gist's: the context in blocks of 4 lines, one mark on its last whole block, one on the
+   request's end (the step, which also serves the size retries). The next call finds this
+   mark within the API's 20-block lookback and pays only for the lines after it.
+3. *No chain (dropped).* The context's tail after the last fraction mark used to go as one
+   block per call increment so the next end mark could find it within the lookback. With
+   4-line blocks the last-whole-block mark does that by itself, so the chain is gone. Still
+   ours: `</chat>` opens the step block instead of closing the context block, so one call's
+   context is a prefix of the next one's.
+4. *The gate (the gist's).* Compactor calls whose marked prefixes are not cached yet wait (until its
    first response) for the call already writing them, instead of all writing the same tens of
    thousands of tokens in parallel. JOBS stays 8.
 5. *Mid-run messages (§7).* A message written to `claude` while the model writes its final
@@ -570,21 +571,34 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     assumption — how much to send out versus do here — becomes measurable: the subagent's own
     eq against the compaction its report avoided, over real turns.
 
-20. *The view has two limits, and the cache marks sit under the budget (§5.2, §8).* The gist
-    collapses whenever the view is over its budget, which in practice is nearly every append:
-    each collapse merges a pair at the front, every cache mark moves, and the compactor's
-    context is written from scratch again. Instead, appends may carry the view up to 8% past
-    the budget (`over`) and a collapse then takes it back to the budget in one batch, so the
-    marked prefix is byte-identical across the appends in between. The marks moved with it:
-    they are now fractions of the budget (3/8, 5/8, 15/16) rather than fixed offsets, so a view
-    sitting at its budget has nearly all of itself inside the cacheable prefix instead of 28 kB
-    of it past the last mark. Replayed over this chat's own logs (1100 messages, 2.15 compactor
-    calls each, per-token Sonnet rates): the old rule invalidates the cached prefix on 39% of
-    calls, collapses 592 times and costs $83; the two limits with the marks moved invalidate on
-    17%, collapse 24 times and cost $40. The view keeps its whole budget of history — it averages
-    more of it than before (108 kB against 105 kB), which a floor below the budget would not have
-    done (97 kB for the same $37). Nothing else changes: the merge order, the tiling and the
-    equality of a folded and a grown view are all as they were.
+20. *The view's batch and its cache marks are the gist's (§5.2, §8).* As in the
+    gist, nothing merges until the view passes VIEW = 128,000 bytes; one batch then merges the
+    most due pair whose parent is built, again and again, until the view is at most VIEW/2 =
+    64,000 bytes (`inner`). If unbuilt parents stop it short, the batch stays open
+    (`View::cutting`) and every later fit (a new message, a node built) merges what it can until
+    it gets there. Due is the gist's, `(T - last) / 2^l`, with `last` the pair's last message
+    (inclusive: the second line's end - 1) and `l` the level of the two lines; compared exactly,
+    the oldest of equals kept. The view so climbs 64k -> 128k by appends alone, its prefix
+    byte-identical for the whole climb. The marks follow it the gist's way: the view (and a
+    compactor's context) goes out in blocks of BLOCK = 4 lines, marked on the last whole block
+    and on the request's end, two marks a call; each call reads the previous one's mark from
+    within the 20-block lookback. Dropped with this: the fraction marks of VIEW (MARKS =
+    15/32, 23/32, 15/16, i.e. 60k/92k/120k characters, whose tail past the last mark was
+    rewritten on every primed turn) and the compactor's chain (item 3). Known cost of the
+    gist's scheme: a turn or context that grows by more than 20 blocks (80 lines) since the
+    last mark finds no entry and rewrites the whole prefix; so does a compactor context that
+    ends more than 80 lines short of every marked one.
+
+    History: commit 5c252fb gave the view an 8% band instead (collapse past 128k * 27/25 back
+    to 128k) and measured due from the pair's start, `(T - start) / 2^(l+2)`. That rested on a
+    misreading — that the gist collapses on nearly every append — when the gist already batches
+    128k -> 64k. Reverted to the gist. A rough replay over this chat (3895 messages, real node
+    sizes, all nodes taken as built, 2.15 compactor calls a message, chain reset every 16
+    increments, Sonnet rates; not comparable to the earlier replay's dollars): the band
+    invalidates the cached prefix on 2.5% of messages and costs $127; the gist's batch with
+    these marks 1.3% and $85, keeping less history on average (92 kB against 125 kB). Marks all
+    under 64k (24/40/60k) invalidate less (0.5%) but cost more ($102), the chain carrying up to
+    68k of tail; the old marks (48/80/120k) $89.
 
 21. *A subagent that outlives its turn (§9, partial spawn).* A Task subagent lives and dies
     inside the master's own `claude -p` process: when the call's reply ends, Claude Code kills
@@ -644,7 +658,8 @@ $240 of model time at list prices) and each dropped. Kept here so they are not t
    costs $111 of compaction; freezing to the turn's start brings that to 38.2% and $81, but
    the view overshoots its own budget (153 kB against VIEW = 128 kB) because nothing may
    collapse while a turn runs. Collapsing in one batch (§20) does better on both counts
-   (31.1%, $52) and freezing on top of it adds nothing (31.1%, $54).
+   (31.1%, $52) and freezing on top of it adds nothing (31.1%, $54). (That batch was the 8%
+   band, since reverted to the gist's 128k -> 64k batch, §20.)
    Worse than useless: nodes are built on top of nodes built in the same turn, so a parent
    and its own children would both be written against the turn's starting view, and the
    parent's line would summarize children it cannot see. Batching the collapse is the fix;
@@ -719,8 +734,9 @@ the engine's work, never read back by it; a write that fails is dropped silently
              summaries), ms, steps, primed, prime_read, prime_write, midrun_delivered,
              queue_after, outcome (done | cancelled | error | followup, the call killed at a
              second init), model, effort, view_bytes,
-             view_lines, view_marks, shared_bytes (prefix shared with the previous turn's
-             view), shared_to_mark (the last cache mark inside that prefix), and what its
+             view_lines, view_blocks (whole 4-line blocks), shared_bytes (prefix shared with
+             the previous turn's view), shared_to_mark (the last block end inside that
+             prefix), and what its
              subagents cost: agents, agent_reqs, agent_eq, agent_bytes (reports logged);
              fallback (its final text was sent to the chat for it)
     agent    one subagent, from the tool call that sent it to the report it handed back:

@@ -50,7 +50,7 @@ pub fn req(dir: &Path, kind: &str, r: &super::claude::Req, cc: &str, ms: u128, m
 }
 
 /// View measurements for a turn: size, lines, and the prefix shared with the previous turn's
-/// view (in bytes, and as the last cache mark inside it: what priming could read back).
+/// view (in bytes, and as the last whole block inside it: where a cache entry could be read back).
 pub fn view_stats(view: &str, parts: usize) -> Value {
     let mut prev = PREV_VIEW.lock().unwrap_or_else(|p| p.into_inner());
     let shared = prev.bytes().zip(view.bytes()).take_while(|(a, b)| a == b).count();
@@ -58,7 +58,7 @@ pub fn view_stats(view: &str, parts: usize) -> Value {
     let mark = cuts.iter().rev().find(|&&c| c <= shared).copied().unwrap_or(0);
     let had = !prev.is_empty();
     *prev = view.to_string();
-    json!({"view_bytes": view.len(), "view_lines": parts, "view_marks": cuts.len(),
+    json!({"view_bytes": view.len(), "view_lines": parts, "view_blocks": cuts.len(),
            "shared_bytes": if had { json!(shared) } else { Value::Null }, "shared_to_mark": mark})
 }
 
