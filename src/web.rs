@@ -20,6 +20,7 @@ static POSTING: Mutex<()> = Mutex::new(());
 const SHELL: &str = r#"<!DOCTYPE html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>{{TITLE}}</title>
+<script>if(top!==window)document.documentElement.className='fr'</script>
 <link rel=stylesheet href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <script src="{{TOK}}/static/htmx.js"></script>
@@ -37,6 +38,7 @@ header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:.3rem 1.1
  padding:.7rem 1.1rem;background:var(--bg);font:12.5px/1.4 var(--mono)}
 header a{color:var(--dim);text-decoration:none;border:0}
 header a:hover{color:var(--fg)}header a.on{color:var(--acc)}
+html.fr header{display:none}
 header .sp{flex:1}#lastnote{max-width:16em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 main{max-width:var(--measure);margin:0 auto;padding:.6rem 1.1rem 8rem}
 h1,h2,h3,h4{font-weight:600;line-height:1.3}
@@ -430,7 +432,23 @@ document.addEventListener('keydown',function(e){
   var to=e.code=='KeyC'?'chat':e.code=='KeyN'?'notes':'';if(!to)return;
   var l=document.getElementById('lastnote');
   var a=to=='notes'&&l&&!l.hidden?l:[].find.call(document.querySelectorAll('header a'),function(a){return a.textContent==to});
+  if(top!==window){e.preventDefault();parent.postMessage({facet:1,t:'tab',to:to},location.origin);return}
   if(a){e.preventDefault();location.href=a.href}},true);
+// Inside the tab host (see HOST): tell it where this pane is and what the status line says, and
+// let a link to a note, followed from any other pane, open in the note tab.
+if(top!==window){(function(){
+  var isnote=function(p){return /\/(n|m)\/[^\/]+$/.test(p)};
+  var tell=function(){var at=document.querySelector('header .at');
+    parent.postMessage({facet:1,t:'loc',path:location.pathname+location.search+location.hash,title:document.title,at:at?at.innerHTML:''},location.origin)};
+  tell();addEventListener('hashchange',tell);
+  var at=document.querySelector('header .at');if(at)new MutationObserver(tell).observe(at,{childList:true,subtree:true,characterData:true});
+  document.addEventListener('click',function(e){
+    var a=e.target.closest&&e.target.closest('a[href]');
+    if(!a||e.defaultPrevented||e.button||e.ctrlKey||e.metaKey||e.shiftKey||a.target)return;
+    var u=new URL(a.href,location.href);
+    if(u.origin!=location.origin||!isnote(u.pathname)||isnote(location.pathname))return;
+    e.preventDefault();parent.postMessage({facet:1,t:'open',url:u.pathname+u.search+u.hash},location.origin)});
+})()}
 // Vim keys for reading: d/u a half page, j/k a few lines, gg and G the ends. Every jump is
 // instant — no animation to sit through — and none of them fire while typing somewhere.
 var gg=0;
@@ -536,7 +554,70 @@ if(matchMedia('(pointer: coarse)').matches){
 }
 </script></body></html>"#;
 
-fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> String {
+/// The tab host: a top-level page load of any of the main pages gets this instead, with the page
+/// itself in an iframe. Each tab visited keeps its iframe, shown or hidden, so switching back
+/// reloads nothing and every pane keeps its scroll, its polling and its compose box. A browser
+/// that sends no `Sec-Fetch-Dest: document` gets the page itself, as before.
+const HOST: &str = r#"<!DOCTYPE html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Facet</title><style>
+:root{--bg:#15161a;--fg:#bdbcb8;--dim:#75767a;--acc:#8fa8c8;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;color-scheme:dark}
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);display:flex;flex-direction:column}
+header{display:flex;flex-wrap:wrap;gap:.3rem 1.1rem;align-items:baseline;padding:.7rem 1.1rem;background:var(--bg);font:12.5px/1.4 var(--mono)}
+header a{color:var(--dim);text-decoration:none;border:0}
+header a:hover{color:var(--fg)}header a.on{color:var(--acc)}
+header .sp{flex:1}#lastnote{max-width:16em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#panes{flex:1;position:relative;min-height:0}
+#panes iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:var(--bg);visibility:hidden;pointer-events:none}
+#panes iframe.on{visibility:visible;pointer-events:auto}
+@media (max-width:30rem){header{gap:.3rem .85rem;padding:.6rem .9rem}}
+</style></head><body>
+<header>{{NAV}}<span class=sp></span><span class=at>{{STATUS}}</span></header>
+<div id=panes></div>
+<script>
+var TOK='{{TOK}}',panes={},cur=null;
+var hdr=document.querySelector('header'),lastnote=document.getElementById('lastnote'),atEl=hdr.querySelector('.at');
+function tabOf(u){var p=u.split('?')[0].split('#')[0].slice(TOK.length)||'/';
+  if(p=='/chat')return 'chat';if(p=='/d'||p=='/d/')return 'cards';if(p=='/tree')return 'tree';
+  if(p=='/m'||p=='/m/')return 'notes';if(/^\/(n|m)\//.test(p))return 'note';return 'home'}
+var links={};[].forEach.call(hdr.querySelectorAll('a'),function(a){
+  var k=a.id=='lastnote'?'note':tabOf(a.getAttribute('href'));links[k]=a});
+function syncNote(){var u=localStorage.lastnote;
+  if(u){lastnote.href=u;lastnote.textContent=localStorage.lasttitle||'note';lastnote.hidden=false}}
+syncNote();
+function show(tab,url,mode){ // mode: 'push' (default), 'pop' (history moved), 'init'
+  var p=panes[tab];
+  if(!p){var f=document.createElement('iframe');p=panes[tab]={f:f,url:url||links[tab].getAttribute('href'),title:'',at:null};
+    f.src=p.url;document.getElementById('panes').appendChild(f);
+    f.addEventListener('load',function(){if(cur==tab)try{f.contentWindow.focus()}catch(e){}})}
+  else if(url&&url!=p.url){p.url=url;p.f.src=url}
+  for(var k in panes)panes[k].f.classList.toggle('on',k==tab);
+  for(var k in links)links[k].classList.toggle('on',k==tab);
+  cur=tab;
+  if(mode!='pop'){history[mode=='init'?'replaceState':'pushState']({tab:tab},'',p.url)}
+  document.title=p.title||'Facet';if(p.at!=null)atEl.innerHTML=p.at;
+  try{p.f.contentWindow.focus()}catch(e){}}
+hdr.addEventListener('click',function(e){var a=e.target.closest('a');if(!a||e.button||e.ctrlKey||e.metaKey||e.shiftKey)return;
+  var k=a==lastnote?'note':tabOf(a.getAttribute('href'));e.preventDefault();
+  if(a==lastnote){syncNote();show('note',panes.note?null:a.getAttribute('href'))}else show(k,null)});
+function key(to){if(to=='chat')show('chat');else if(localStorage.lastnote){syncNote();show('note',panes.note?null:localStorage.lastnote)}else show('notes')}
+addEventListener('message',function(e){var m=e.data;if(e.origin!=location.origin||!m||!m.facet)return;
+  if(m.t=='tab')return key(m.to);
+  if(m.t=='open'){var p=panes.note;
+    if(p&&p.url.split('#')[0]==m.url.split('#')[0]){p.url=m.url;p.f.contentWindow.location.replace(m.url);p.f.contentWindow.location.reload()}
+    syncNote();return show('note',m.url)}
+  if(m.t=='loc'){var k=null;for(var t in panes)if(panes[t].f.contentWindow==e.source)k=t;if(!k)return;
+    var p=panes[k];p.url=m.path;p.title=m.title;p.at=m.at;syncNote();
+    if(k==cur){history.replaceState(history.state,'',m.path);document.title=m.title||'Facet';atEl.innerHTML=m.at}}});
+addEventListener('popstate',function(e){show((e.state&&e.state.tab)||tabOf(location.pathname),null,'pop')});
+document.addEventListener('keydown',function(e){
+  if(!e.altKey||e.ctrlKey||e.metaKey||e.isComposing)return;
+  var to=e.code=='KeyC'?'chat':e.code=='KeyN'?'notes':'';if(to){e.preventDefault();key(to)}},true);
+show(tabOf(location.pathname),location.pathname+location.search+location.hash,'init');
+</script></body></html>"#;
+
+fn nav_html(cfg: &Cfg, nav_on: &str) -> String {
     let t = cfg.token_path();
     let item = |href: &str, label: &str, key: &str| {
         format!("<a href=\"{}{}\"{}>{}</a>", t, href,
@@ -550,6 +631,12 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
     nav.push_str(&format!("<a id=lastnote hidden{}></a>", if nav_on == "note" { " class=on" } else { "" }));
     nav.push_str(&item("/d/", "cards", "diag"));
     nav.push_str(&item("/tree", "memory", "tree"));
+    nav
+}
+
+fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> String {
+    let t = cfg.token_path();
+    let nav = nav_html(cfg, nav_on);
     let n = cards::open(cfg).len();
     let model = if compose {
         crate::optchat::engine::request(&crate::optchat::engine::dir(), serde_json::json!({"op": "status"}))
@@ -982,6 +1069,17 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
     let mut body = String::new();
     if post { let _ = rq.as_reader().read_to_string(&mut body); }
     let f = form(&body);
+
+    // a browser opening a main page itself gets the tab host, with the page in a pane
+    let dest = rq.headers().iter().find(|h| h.field.equiv("Sec-Fetch-Dest"))
+        .map(|h| h.value.as_str().to_string()).unwrap_or_default();
+    if dest == "document" && !post && matches!(rest.first().copied(), None | Some("home") | Some("chat") | Some("m") | Some("n") | Some("d") | Some("tree")) {
+        let n = cards::open(cfg).len();
+        let status = format!("{}{}", if tell::healthy(cfg) { "" } else { "input down · " },
+            if n > 0 { format!("{} cards", n) } else { String::new() });
+        return html(HOST.replace("{{NAV}}", &nav_html(cfg, "")).replace("{{STATUS}}", &status)
+            .replace("{{TOK}}", &cfg.token_path()), 200);
+    }
 
     match rest.as_slice() {
         // the root is the home page; /home stays as an alias for old links
