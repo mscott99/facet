@@ -469,12 +469,55 @@ class ZoteroAddTest(ZoteroTest):
         def fake_get(path, params=None, key=None):
             self.assertNotIn("SECRETKEY", json.dumps(params or {}))
             return list(find_rows), {}
-        with mock.patch.object(L, "zot_get", fake_get), mock.patch.object(L, "resolve_any", lambda s: L.parse_arxiv(ARXIV_XML, "2010.02264")), \
+        with mock.patch.object(L, "zot_get", fake_get), mock.patch.object(L, "resolve_any", lambda s, **k: L.parse_arxiv(ARXIV_XML, "2010.02264")), \
              mock.patch.object(L, "zot_post", lambda items, tok: posts.append((items, tok)) or {"successful": {"0": {"key": "NEWKEY1"}}}):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 L.cmd_zot_add(argparse.Namespace(what=what, yes=yes, tag=["t1"], collection=None))
         return out.getvalue(), posts
+
+    def ts_run(self, responses, what):
+        """resolve_any with a mocked translation-server; responses: list of (code, text) or an exception."""
+        calls = []
+        def fake_ts(path, body, ctype, timeout=60):
+            calls.append((path, body, ctype))
+            r = responses[len(calls) - 1]
+            if isinstance(r, Exception):
+                raise r
+            return r
+        with mock.patch.object(L, "ts_post", fake_ts):
+            return L.resolve_any(what), calls
+
+    def test_translation_server_search_and_web(self):
+        item = {"key": "ABC", "version": 0, "itemType": "conferencePaper", "title": "T", "date": "2021-03-01",
+                "creators": [], "tags": [{"tag": "x"}], "attachments": [{"x": 1}], "notes": [], "seeAlso": []}
+        it, calls = self.ts_run([(200, json.dumps([item]))], "10.1000/abc")
+        self.assertEqual(calls[0][0:3], ("/search", "10.1000/abc", "text/plain"))
+        self.assertEqual((it["itemType"], it["tags"]), ("conferencePaper", []))
+        for k in ("key", "version", "attachments", "notes", "seeAlso"):
+            self.assertNotIn(k, it)
+        it, calls = self.ts_run([(200, json.dumps([item]))], "https://arxiv.org/abs/2010.02264v2")
+        self.assertEqual(calls[0][0:2], ("/search", "arXiv:2010.02264"))
+        it, calls = self.ts_run([(200, json.dumps([item]))], "https://journal.example/paper/1")
+        self.assertEqual(calls[0][0], "/web")
+        self.assertEqual(json.loads(calls[0][1])["url"], "https://journal.example/paper/1")
+        self.assertIn("source: translation-server", L.NOTES)
+
+    def test_translation_server_multiple_choice(self):
+        item = {"itemType": "journalArticle", "title": "First"}
+        choice = (300, json.dumps({"url": "u", "session": "s", "items": {"u1": {"title": "First"}, "u2": {"title": "Second"}}}))
+        it, calls = self.ts_run([choice, (200, json.dumps([item]))], "https://journal.example/toc")
+        self.assertEqual(it["title"], "First")
+        self.assertEqual(list(json.loads(calls[1][1])["items"]), ["u1"])
+        self.assertTrue(any("Second" in n for n in L.NOTES))
+
+    def test_translation_server_down_falls_back(self):
+        for resp in ([ConnectionRefusedError("down")], [(500, "boom")], [(501, "No items returned from any translator")]):
+            with mock.patch.object(L, "resolve_old", lambda s: {"itemType": "preprint", "title": "old"}):
+                it, _ = self.ts_run(resp, "2010.02264")
+            self.assertEqual(it["title"], "old")
+        with mock.patch.object(L, "resolve_old", lambda s: {"title": "old"}), mock.patch.object(L, "ts_post", side_effect=AssertionError):
+            self.assertEqual(L.resolve_any("2010.02264", ts=False)["title"], "old")
 
     def test_dry_run_never_posts(self):
         out, posts = self.post_run("2010.02264", False)
