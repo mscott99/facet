@@ -119,8 +119,6 @@ form.busy textarea,form.busy button{opacity:.45}
 #older{min-height:1px}
 body{overflow-anchor:none}
 #toast{max-width:var(--measure);margin:.3rem auto 0;font:12px var(--mono);color:var(--dim);min-height:1em}
-.kx span[data-math-style]:not([data-r]){opacity:0}
-.kx span[data-math-style=display]:not([data-r]){display:block;min-height:2.6em}
 .katex{font-size:1.03em}.katex-display{overflow-x:auto;overflow-y:hidden;margin:1.3em 0}
 /* The line you can comment on says so only under the pointer, and only on the block a click
    would land on — never on touch, where there is no hover and every tap would light up. */
@@ -134,33 +132,16 @@ body{overflow-anchor:none}
 {{FOOT}}
 <script>
 var TOK="{{TOK}}";
-// Math is rendered where the reader is, not all at once: whatever is within a few screens of
-// the viewport first (an IntersectionObserver), the rest in idle moments, top to bottom. A
-// formula not yet rendered is hidden rather than shown as raw TeX, and holds the room it will
-// need; `data-r` marks one that is done.
-var MO=null,MQ=[],MI=0;
+// Math is rendered all at once, when the page (or a piece swapped into it) arrives: a note
+// comes whole and shows whole. `data-r` marks a formula that is done.
 function mrender(s){
-  if(s.dataset.r||typeof katex=='undefined')return;
+  if(s.dataset.r)return;
   s.dataset.r=1;
   try{katex.render(s.textContent,s,{displayMode:s.dataset.mathStyle=='display',throwOnError:false})}
   catch(e){}}
-function idle(){
-  if(MI)return;MI=1;
-  var ric=window.requestIdleCallback||function(f){return setTimeout(function(){f({timeRemaining:function(){return 8}})},80)};
-  ric(function pump(dl){
-    var n=0;
-    while(MQ.length&&n<12&&dl.timeRemaining()>3){var s=MQ.shift();if(!s.dataset.r){if(MO)MO.unobserve(s);mrender(s)}n++}
-    if(MQ.length)ric(pump);else MI=0;});}
 function mathify(r){
   if(typeof katex=='undefined')return;
-  document.documentElement.classList.add('kx');
-  var ss=r.querySelectorAll('span[data-math-style]:not([data-q])');
-  if(!ss.length)return;
-  if(!window.IntersectionObserver){ss.forEach(mrender);return}
-  if(!MO)MO=new IntersectionObserver(function(es){es.forEach(function(e){
-    if(e.isIntersecting){MO.unobserve(e.target);mrender(e.target)}})},{rootMargin:'1500px 0px'});
-  ss.forEach(function(s){s.dataset.q=1;MQ.push(s);MO.observe(s)});
-  idle();}
+  r.querySelectorAll('span[data-math-style]').forEach(mrender);}
 function atEnd(){return innerHeight+scrollY>document.body.scrollHeight-120}
 var stick=true;
 addEventListener('scroll',function(){stick=atEnd()});
