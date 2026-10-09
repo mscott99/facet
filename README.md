@@ -162,8 +162,8 @@ tailnet with `tailscale serve` (real TLS certificates, tailnet devices only), fo
     tailscale serve --bg --https=8443  127.0.0.1:8731    https://<host>.<tailnet>.ts.net:8443/<token>/    terminal
 
 One secret token in the path gates the web pages and the terminal (`token` in facet.json; the
-terminal script reads the same value from `~/.config/optchat-web/token`). Set `base_url` and
-`terminal_url` in facet.json to the published addresses, so pages and messages link to them.
+terminal script reads the same value from `~/.config/optchat-web/token`). Set `base_url` in facet.json
+to the published address, so pages and messages link to it.
 Wikilinks resolve on `/n/`, against the vault in `vault`.
 
 There is one viewer, not two: vault-phone — a separate note reader and tap-to-comment page,
