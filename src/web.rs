@@ -200,7 +200,7 @@ document.addEventListener('visibilitychange',function(){
 // — is one card, and one component shows it wherever it appears: under its line on a note, or
 // in the list on /d/.
 //   .say.<kind>[data-id,note,line]   kind (comment|info|warn|error) is the edge's colour only
-//     .hd   the quote, and the composer's `dismiss` (close)
+//     .hd   the quote, and the composer's `done` (close)
 //     .th   the thread, in order: what the user said (.t) and the server's (.msg.talk), each
 //           with data-k, its index in the card's thread on the server
 //     .fx   the fix, if the card has one: what would replace its lines, and `apply`
@@ -216,7 +216,7 @@ function card(b,o){
   var d=document.createElement('div');d.className='say '+(o.kind||'comment');
   d.dataset.id=o.id;d.dataset.note=o.note;d.dataset.line=o.line;
   d.innerHTML='<div class=hd><div class=q></div></div>'+
-    '<div class=th></div><div class=fx hidden></div><div class=cmp><textarea rows=1></textarea><button class=go type=button>send</button><button class=no type=button>dismiss</button></div>';
+    '<div class=th></div><div class=fx hidden></div><div class=cmp><textarea rows=1></textarea><button class=go type=button>send</button><button class=no type=button>done</button></div>';
   d._n=0;d._known=0;head(d,o);
   var t=d.querySelector('textarea'),go=d.querySelector('.go');
   var no=d.querySelector('.no');no.addEventListener('pointerdown',function(e){e.preventDefault()});
@@ -266,7 +266,7 @@ function submit(d){
       if(dup&&dup!==k)k.remove();else{k.dataset.k=r.k;k.classList.remove('pend')}},
     function(err){k.remove();if(!t.value)t.value=said;fit(t);cmp.classList.add('bad');cmp.title='not sent: '+err});
 }
-// Dismiss: closed on the server (off every page; kept on file), and gone from this one at once.
+// Done: closed on the server (off every page; kept on file), and gone from this one at once.
 function drop(d){
   var id=d.dataset.id;CLOSED[id]=1;
   if(d._known)post('/x/card','do=close&id='+id).then(null,function(e){delete CLOSED[id];toast('not closed: '+e)});
