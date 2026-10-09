@@ -92,8 +92,6 @@ textarea:focus{outline:1px solid var(--line)}
 .say .hd{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.35rem}
 .say .hd .q{flex:1;font:11.5px/1.5 var(--mono);color:var(--dim);
  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.say .hd .x{flex:none;font:16px/1 var(--mono);background:none;border:0;cursor:pointer;padding:0 4px;color:var(--dim)}
-.say .hd .x:hover{color:var(--err)}
 .say .th .t{white-space:pre-wrap;margin:.5rem 0 0}
 .say .th>:first-child{margin-top:0}
 .say .th .msg.talk{margin:.6rem 0 0;padding-left:.8rem;border-left:1px solid var(--line)}
@@ -104,6 +102,8 @@ textarea:focus{outline:1px solid var(--line)}
 .say .cmp{display:flex;gap:.7rem;align-items:flex-end;margin-top:.6rem}
 .say .cmp textarea{flex:1;min-width:0;max-height:40vh;overflow-y:auto}
 .say .cmp .go{flex:none;padding:.5rem .1rem;font:14px var(--mono);color:var(--acc)}
+.say .cmp .no{flex:none;padding:.5rem .1rem;font:14px var(--mono);background:none;border:0;cursor:pointer;color:var(--dim)}
+.say .cmp .no:hover{color:var(--err)}
 .say .cmp.bad textarea{outline:1px solid #c88}
 .say .t.pend{opacity:.4}
 .ctx{margin:2.2rem 0 .3rem}.ctx pre{margin:.3rem 0 0;white-space:pre-wrap}
@@ -200,7 +200,7 @@ document.addEventListener('visibilitychange',function(){
 // — is one card, and one component shows it wherever it appears: under its line on a note, or
 // in the list on /d/.
 //   .say.<kind>[data-id,note,line]   kind (comment|info|warn|error) is the edge's colour only
-//     .hd   the quote, and the X (close)
+//     .hd   the quote, and the composer's `dismiss` (close)
 //     .th   the thread, in order: what the user said (.t) and the server's (.msg.talk), each
 //           with data-k, its index in the card's thread on the server
 //     .fx   the fix, if the card has one: what would replace its lines, and `apply`
@@ -215,11 +215,12 @@ var CV=0,CC=null,CL=[],CG=0,CLOSED={};
 function card(b,o){
   var d=document.createElement('div');d.className='say '+(o.kind||'comment');
   d.dataset.id=o.id;d.dataset.note=o.note;d.dataset.line=o.line;
-  d.innerHTML='<div class=hd><div class=q></div><button class=x type=button title=close aria-label=close>&times;</button></div>'+
-    '<div class=th></div><div class=fx hidden></div><div class=cmp><textarea rows=1></textarea><button class=go type=button>send</button></div>';
+  d.innerHTML='<div class=hd><div class=q></div></div>'+
+    '<div class=th></div><div class=fx hidden></div><div class=cmp><textarea rows=1></textarea><button class=go type=button>send</button><button class=no type=button>dismiss</button></div>';
   d._n=0;d._known=0;head(d,o);
   var t=d.querySelector('textarea'),go=d.querySelector('.go');
-  d.querySelector('.x').addEventListener('click',function(){drop(d)});
+  var no=d.querySelector('.no');no.addEventListener('pointerdown',function(e){e.preventDefault()});
+  no.addEventListener('click',function(){drop(d)});
   // the button must not take the focus from the box (on a phone that would close the keyboard)
   go.addEventListener('pointerdown',function(e){e.preventDefault()});
   go.addEventListener('click',function(){submit(d)});
@@ -265,7 +266,7 @@ function submit(d){
       if(dup&&dup!==k)k.remove();else{k.dataset.k=r.k;k.classList.remove('pend')}},
     function(err){k.remove();if(!t.value)t.value=said;fit(t);cmp.classList.add('bad');cmp.title='not sent: '+err});
 }
-// The X: closed on the server (off every page; kept on file), and gone from this one at once.
+// Dismiss: closed on the server (off every page; kept on file), and gone from this one at once.
 function drop(d){
   var id=d.dataset.id;CLOSED[id]=1;
   if(d._known)post('/x/card','do=close&id='+id).then(null,function(e){delete CLOSED[id];toast('not closed: '+e)});
