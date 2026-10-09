@@ -1288,3 +1288,336 @@ def cmd_zot_match(a):
 def cmd_zot_sync(a):
     c = zot_sync(force=a.force)
     print(f"zotero cache: {len(c['items'])} top-level items, library version {c['version']} ({zot_cache_path()})")
+
+
+# ---------------------------------------------------------------- zotero (add / find)
+import html as _html
+import difflib
+import uuid
+from html.parser import HTMLParser
+
+ARXIV_RE = re.compile(r"(?:arxiv\.org/(?:abs|pdf)/|arxiv:\s*)?((?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?)(?:\.pdf)?$", re.I)
+DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"<>]+", re.I)
+SKIPWORDS = set("""a ab aboard about above across after against al along amid among an and anti around as at before behind below beneath beside besides between beyond but by d da das de del dell dello dei degli della delle dem den der des despite die do down du during ein eine einem einen einer eines el en et except for from gli i il in inside into is l la las le les like lo los near nor of off on onto or over per plus round save since so some sur than the through to toward towards un una unas under underneath une unlike uno unos until up upon versus via von while with within without yet zu zum""".split())  # Better BibTeX's title skip list ("using" is not on it)
+
+
+def http_get(url, headers=None, timeout=30):
+    req = urllib.request.Request(url, headers={"User-Agent": "life-zot/1.0 (mailto:m.valckescott@gmail.com)", **(headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode(r.headers.get_content_charset() or "utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        sys.exit(f"life: {url} -> HTTP {e.code}")
+    except urllib.error.URLError as e:
+        sys.exit(f"life: {url}: {e.reason}")
+
+
+def arxiv_id_of(s):
+    """Bare arXiv id (version stripped) from an id or arxiv.org url, else None."""
+    s = s.strip()
+    m = re.search(r"arxiv\.org/(?:abs|pdf)/([^?#\s]+?)(?:\.pdf)?(?:v\d+)?(?:[?#].*)?$", s, re.I)
+    t = m.group(1) if m else re.sub(r"^arxiv:\s*", "", s, flags=re.I)
+    t = re.sub(r"v\d+$", "", t)
+    return t if re.fullmatch(r"\d{4}\.\d{4,5}|[a-z\-]+(\.[A-Za-z]{2})?/\d{7}", t) else None
+
+
+def doi_of(s):
+    m = DOI_RE.search(s.strip())
+    return m.group(0).rstrip(".,;)") if m else None
+
+
+def split_name(n):
+    n = " ".join(n.split())
+    if "," in n:
+        last, first = [x.strip() for x in n.split(",", 1)]
+    else:
+        parts = n.split(" ")
+        last, first = parts[-1], " ".join(parts[:-1])
+    return {"creatorType": "author", "firstName": first, "lastName": last}
+
+
+def parse_arxiv(xml_text, aid):
+    import xml.etree.ElementTree as ET
+    ns = {"a": "http://www.w3.org/2005/Atom", "x": "http://arxiv.org/schemas/atom"}
+    e = ET.fromstring(xml_text).find("a:entry", ns)
+    if e is None or e.find("a:title", ns) is None:
+        raise ValueError("arXiv: no entry for " + aid)
+    g = lambda p: " ".join((e.findtext(p, "", ns) or "").split())
+    if g("a:title").lower() == "error":
+        raise ValueError("arXiv error: " + g("a:summary"))
+    it = {"itemType": "preprint", "title": g("a:title"),
+          "creators": [split_name(" ".join((a.findtext("a:name", "", ns) or "").split())) for a in e.findall("a:author", ns)],
+          "abstractNote": g("a:summary"), "date": g("a:published")[:10], "repository": "arXiv",
+          "archiveID": "arXiv:" + aid, "url": "https://arxiv.org/abs/" + aid}
+    cat = e.find("x:primary_category", ns)
+    if cat is not None:
+        it["extra"] = "arXiv:%s [%s]" % (aid, cat.get("term"))
+    d = e.findtext("x:doi", "", ns)
+    if d:
+        it["DOI"] = d.strip()
+    return it
+
+
+def resolve_arxiv(aid):
+    return parse_arxiv(http_get("https://export.arxiv.org/api/query?id_list=" + urllib.parse.quote(aid)), aid)
+
+
+CROSSREF_TYPES = {"journal-article": "journalArticle", "proceedings-article": "conferencePaper", "book": "book",
+                  "monograph": "book", "edited-book": "book", "book-chapter": "bookSection", "posted-content": "preprint",
+                  "dissertation": "thesis", "report": "report"}
+
+
+def parse_crossref(js, doi):
+    m = js["message"] if "message" in js else js
+    ty = CROSSREF_TYPES.get(m.get("type"), "journalArticle")
+    clean = lambda s: " ".join(_html.unescape(re.sub(r"<[^>]+>", "", s or "")).split())
+    first = lambda k: clean((m.get(k) or [""])[0])
+    dp = (m.get("issued") or m.get("published") or m.get("published-print") or {}).get("date-parts", [[]])[0]
+    date = "-".join("%02d" % x if i else str(x) for i, x in enumerate(dp)) if dp and dp[0] else ""
+    cre = []
+    for a in m.get("author", []):
+        if a.get("family"):
+            cre.append({"creatorType": "author", "firstName": a.get("given", ""), "lastName": a["family"]})
+        elif a.get("name"):
+            cre.append({"creatorType": "author", "name": a["name"]})
+    for a in m.get("editor", []) if ty in ("book", "bookSection") else []:
+        if a.get("family"):
+            cre.append({"creatorType": "editor", "firstName": a.get("given", ""), "lastName": a["family"]})
+    it = {"itemType": ty, "title": first("title"), "creators": cre, "date": date, "DOI": m.get("DOI", doi),
+          "url": m.get("URL", "https://doi.org/" + doi), "abstractNote": clean(m.get("abstract"))}
+    venue = first("container-title")
+    if ty == "journalArticle":
+        it.update(publicationTitle=venue, volume=m.get("volume", ""), issue=m.get("issue", ""), pages=m.get("page", ""),
+                  ISSN=(m.get("ISSN") or [""])[0])
+    elif ty == "conferencePaper":
+        it.update(proceedingsTitle=venue, volume=m.get("volume", ""), pages=m.get("page", ""),
+                  publisher=m.get("publisher", ""))
+    elif ty == "bookSection":
+        it.update(bookTitle=venue, publisher=m.get("publisher", ""), pages=m.get("page", ""))
+    elif ty == "book":
+        it.update(publisher=m.get("publisher", ""), ISBN=(m.get("ISBN") or [""])[0])
+    elif ty == "preprint":
+        it.update(repository=m.get("institution", [{}])[0].get("name", "") if m.get("institution") else m.get("publisher", ""))
+    return it
+
+
+def resolve_doi(doi):
+    js = json.loads(http_get("https://api.crossref.org/works/" + urllib.parse.quote(doi)))
+    return parse_crossref(js, doi)
+
+
+class MetaScraper(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.meta = []
+        self.title = ""
+        self._t = False
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "meta":
+            k = (a.get("name") or a.get("property") or "").strip().lower()
+            if k and a.get("content") is not None:
+                self.meta.append((k, a["content"].strip()))
+        elif tag == "title":
+            self._t = True
+
+    def handle_endtag(self, tag):
+        if tag == "title":
+            self._t = False
+
+    def handle_data(self, data):
+        if self._t:
+            self.title += data
+
+
+def parse_html(text, url):
+    """Item from page meta tags (citation_*, Dublin Core, og:), else webPage. May carry hints _doi/_arxiv."""
+    p = MetaScraper()
+    p.feed(text)
+    allv = lambda *ks: [v for k, v in p.meta if k in ks and v]
+    one = lambda *ks: (allv(*ks) or [""])[0]
+    hint = {}
+    d = doi_of(one("citation_doi", "dc.identifier", "dc.identifier.doi", "prism.doi") or "")
+    if d:
+        hint["_doi"] = d
+    ax = one("citation_arxiv_id")
+    if ax and arxiv_id_of(ax):
+        hint["_arxiv"] = arxiv_id_of(ax)
+    title = one("citation_title", "dc.title", "og:title") or " ".join(p.title.split())
+    authors = allv("citation_author", "dc.creator")
+    date = one("citation_publication_date", "citation_date", "citation_online_date", "dc.date", "article:published_time")
+    date = re.sub(r"/", "-", date)[:10]
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    journal = one("citation_journal_title")
+    if journal:
+        it = {"itemType": "journalArticle", "publicationTitle": journal, "volume": one("citation_volume"),
+              "issue": one("citation_issue"), "pages": "-".join(x for x in (one("citation_firstpage"), one("citation_lastpage")) if x)}
+    else:
+        it = {"itemType": "webPage", "websiteTitle": one("og:site_name", "citation_publisher")}
+    it.update(title=title, creators=[split_name(a) for a in authors], date=date, url=one("citation_abstract_html_url") or url,
+              abstractNote=one("citation_abstract", "dc.description", "og:description", "description"))
+    if d and journal:
+        it["DOI"] = d
+    if it["itemType"] == "webPage":
+        it["accessDate"] = today
+    return it, hint
+
+
+def resolve_url(url):
+    ax = arxiv_id_of(url)
+    if ax:
+        return resolve_arxiv(ax)
+    d = doi_of(url)
+    if d and re.search(r"doi\.org", url):
+        return resolve_doi(d)
+    it, hint = parse_html(http_get(url), url)
+    if hint.get("_arxiv"):
+        return resolve_arxiv(hint["_arxiv"])
+    if hint.get("_doi"):
+        try:
+            return resolve_doi(hint["_doi"])
+        except Exception:
+            pass
+    return it
+
+
+def resolve_any(s):
+    ax = arxiv_id_of(s)
+    if ax:
+        return resolve_arxiv(ax)
+    if re.match(r"https?://", s):
+        return resolve_url(s)
+    d = doi_of(s)
+    if d:
+        return resolve_doi(d)
+    raise ValueError("not an arXiv id, DOI or URL: " + s)
+
+
+def zot_citekey(item):
+    """Better BibTeX-style key as used in mybib.bib: first author's lowercased last name + first three
+    non-skipword title words in CamelCase (hyphenated compounds join, tail lowercased) + year."""
+    cs = [c for c in item.get("creators", []) if c.get("creatorType") in (None, "author")] or item.get("creators", [])
+    last = (cs[0].get("lastName") or cs[0].get("name") or "") if cs else ""
+    last = re.sub(r"[^a-z0-9]", "", unicodedata_ascii(last).lower())
+    words = []
+    for w in re.split(r"[\s:,;.!?()\[\]{}\"']+", re.sub(r"[${}\\]", "", item.get("title", ""))):
+        if not w or w.lower() in SKIPWORDS:
+            continue
+        parts = [x for x in re.split(r"-+", unicodedata_ascii(w)) if x]
+        parts = [re.sub(r"[^A-Za-z0-9]", "", x) for x in parts]
+        parts = [x for x in parts if x]
+        if parts:
+            words.append(parts[0].capitalize() + "".join(x.lower() for x in parts[1:]))
+    m = re.search(r"(1[5-9]|20)\d\d", item.get("date", ""))
+    return last + "".join(words[:3]) + (m.group(0) if m else "")
+
+
+def unicodedata_ascii(s):
+    import unicodedata
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+
+
+def bib_keys(path):
+    try:
+        return set(re.findall(r"^@\w+\{([^,\s]+),", open(path, errors="replace").read(), re.M))
+    except OSError:
+        return set()
+
+
+def norm_title(t):
+    return re.sub(r"[^a-z0-9]+", " ", t.lower()).strip()
+
+
+def zot_idents(d):
+    """Normalised identifiers an item carries: doi:, arxiv:, url:."""
+    out = set()
+    blob = " ".join(str(d.get(k, "")) for k in ("DOI", "url", "extra", "archiveID"))
+    for m in DOI_RE.finditer(blob):
+        out.add("doi:" + m.group(0).rstrip(".,;)").lower())
+    for m in re.finditer(r"arxiv(?:\.org/(?:abs|pdf)/|:\s*)([a-z\-]*[./]?\d{4,7}(?:\.\d{4,5})?)", blob, re.I):
+        a = arxiv_id_of(m.group(1))
+        if a:
+            out.add("arxiv:" + a.lower())
+    if d.get("url"):
+        out.add("url:" + d["url"].rstrip("/").lower())
+    return out
+
+
+def zot_find(q, item=None, limit=25):
+    """Live search of /items/top (qmode=everything). With `item`, keep only exact id matches or near-identical titles.
+    Returns [(key, data, why)]."""
+    key, uid = zot_creds()
+    rows, _ = zot_get(f"/users/{uid}/items/top", {"q": q, "qmode": "everything", "limit": limit, "include": "data"}, key)
+    if item is None:
+        return [(r["key"], r["data"], "") for r in rows]
+    mine = zot_idents(item)
+    out = []
+    for r in rows:
+        d = r["data"]
+        shared = {i for i in mine & zot_idents(d) if not i.startswith("url:") or True}
+        if shared:
+            out.append((r["key"], d, "same " + sorted(shared)[0]))
+        elif item.get("title") and difflib.SequenceMatcher(None, norm_title(item["title"]), norm_title(d.get("title", ""))).ratio() >= 0.93:
+            out.append((r["key"], d, "near-identical title"))
+    return out
+
+
+def zot_duplicates(item):
+    seen = {}
+    queries = [item.get("title", "")]
+    queries += [i.split(":", 1)[1] for i in zot_idents(item) if i.split(":")[0] in ("doi", "arxiv")]
+    for q in queries:
+        if q:
+            for k, d, why in zot_find(q, item):
+                seen.setdefault(k, (d, why))
+    return [(k, d, why) for k, (d, why) in seen.items()]
+
+
+def zot_post(items, token):
+    key, uid = zot_creds()
+    req = urllib.request.Request(ZOT + f"/users/{uid}/items", data=json.dumps(items).encode(), method="POST",
+                                 headers={"Zotero-API-Key": key, "Zotero-API-Version": "3", "Zotero-Write-Token": token,
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        sys.exit(f"life: zotero POST items -> HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
+
+
+def cmd_zot_find(a):
+    rows = zot_find(" ".join(a.query))
+    for k, d, _ in rows:
+        print(zot_line(k, {"data": d}))
+    if not rows:
+        print("no match")
+
+
+def clean_item(it):
+    return {k: v for k, v in it.items() if v not in ("", None, [])}
+
+
+def cmd_zot_add(a):
+    item = clean_item(resolve_any(a.what))
+    item["tags"] = [{"tag": t} for t in a.tag]
+    if a.collection:
+        item["collections"] = [a.collection]
+    dups = zot_duplicates(item)
+    ck = zot_citekey(item)
+    vault = zot_vault(load_config())
+    taken = ck in bib_keys(os.path.join(vault, "mybib.bib"))
+    print(f"suggested citekey: {ck}  ({'ALREADY in mybib.bib' if taken else 'not in mybib.bib'})")
+    if dups:
+        for k, d, why in dups:
+            print(f"already in library ({why}): {k}  {d.get('title', '')}  -- not added")
+        return
+    print(json.dumps(item, indent=2, ensure_ascii=False))
+    if not a.yes:
+        print("dry run; add --yes to create")
+        return
+    res = zot_post([item], uuid.uuid4().hex)
+    ok = res.get("successful") or {}
+    if not ok:
+        sys.exit("life: zotero did not create the item: " + json.dumps(res.get("failed"))[:300])
+    print("created item key: " + list(ok.values())[0]["key"])

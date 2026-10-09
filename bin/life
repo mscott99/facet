@@ -278,6 +278,8 @@ def cmd_zot_search(a): pass
 def cmd_zot_show(a): pass
 def cmd_zot_match(a): pass
 def cmd_zot_sync(a): pass
+def cmd_zot_find(a): pass
+def cmd_zot_add(a): pass
 
 
 def cmd_cal_delete(a):
@@ -375,7 +377,7 @@ def main():
     s.add_argument("--check", default=None, help="gmail | imap:ACCOUNT: IMAP login, prints OK/FAIL only")
     s.set_defaults(fn=cmd_secret)
 
-    z = sub.add_parser("zot", help="read-only Zotero (Web API; Linux): search, show, match, sync").add_subparsers(dest="c", required=True)
+    z = sub.add_parser("zot", help="read-only Zotero (Web API; Linux): search, show, match, sync, find, add").add_subparsers(dest="c", required=True)
     s = z.add_parser("search", help="query words (all must appear) over title/author/abstract/venue/tags/bibkey")
     s.add_argument("query", nargs="*"); s.add_argument("--author"); s.add_argument("--title"); s.add_argument("--tag")
     s.add_argument("--year"); s.add_argument("-n", type=int, default=25); s.add_argument("--refresh", action="store_true")
@@ -388,6 +390,12 @@ def main():
     s.set_defaults(fn=cmd_zot_match)
     s = z.add_parser("sync", help="update the local cache (~/.cache/life/zotero.json)")
     s.add_argument("--force", action="store_true"); s.set_defaults(fn=cmd_zot_sync)
+    s = z.add_parser("find", help="live search of the library (all fields; for dedupe)")
+    s.add_argument("query", nargs="+"); s.set_defaults(fn=cmd_zot_find)
+    s = z.add_parser("add", help="add an item from an arXiv id, DOI or URL (dry run unless --yes; never edits existing items)")
+    s.add_argument("what", help="arXiv id/url, DOI/doi.org url, or web page url")
+    s.add_argument("--collection", help="collection key"); s.add_argument("--tag", action="append", default=[])
+    s.add_argument("--yes", action="store_true", help="really create it"); s.set_defaults(fn=cmd_zot_add)
 
     w = sub.add_parser("web").add_subparsers(dest="c", required=True)
     s = w.add_parser("get"); s.add_argument("url"); s.add_argument("--chars", type=int, default=6000)

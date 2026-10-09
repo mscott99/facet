@@ -420,5 +420,83 @@ class ZoteroTest(unittest.TestCase):
         self.assertNotIn("SECRETKEY", out)
 
 
+ARXIV_XML = """<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+<entry><id>http://arxiv.org/abs/2010.02264v2</id><title>Subspace Embeddings
+ Under Nonlinear Transformations</title><summary> We study  embeddings. </summary>
+<published>2020-10-05T12:00:00Z</published><author><name>Aarshvi Gajjar</name></author><author><name>Cameron Musco</name></author>
+<arxiv:primary_category term="cs.LG"/><arxiv:doi>10.1000/jj</arxiv:doi></entry></feed>"""
+
+CROSSREF = {"message": {"type": "journal-article", "title": ["On <i>Cones</i> and Hulls"], "DOI": "10.1000/abc",
+            "container-title": ["J. Conv. An."], "volume": "3", "issue": "2", "page": "1-9", "URL": "http://dx.doi.org/10.1000/abc",
+            "issued": {"date-parts": [[2019, 5]]}, "author": [{"given": "Jo", "family": "Jones"}]}}
+
+PAGE = """<html><head><title>T page</title><meta name="citation_title" content="A Fine Paper">
+<meta name="citation_author" content="Lee, Ann"><meta name="citation_author" content="Bob Ray">
+<meta name="citation_publication_date" content="2021/03/04"><meta name="citation_journal_title" content="JJ">
+<meta name="citation_doi" content="10.5000/zz"></head></html>"""
+
+
+class ZoteroAddTest(ZoteroTest):
+    test_search_show_cache = test_match = None
+    def test_parsers(self):
+        it = L.parse_arxiv(ARXIV_XML, "2010.02264")
+        self.assertEqual((it["itemType"], it["title"], it["date"], it["DOI"]), ("preprint", "Subspace Embeddings Under Nonlinear Transformations", "2020-10-05", "10.1000/jj"))
+        self.assertEqual(it["archiveID"], "arXiv:2010.02264")
+        self.assertEqual(it["creators"][1], {"creatorType": "author", "firstName": "Cameron", "lastName": "Musco"})
+        c = L.parse_crossref(CROSSREF, "10.1000/abc")
+        self.assertEqual((c["itemType"], c["title"], c["date"], c["publicationTitle"]), ("journalArticle", "On Cones and Hulls", "2019-05", "J. Conv. An."))
+        h, hint = L.parse_html(PAGE, "http://x/y")
+        self.assertEqual((h["title"], h["date"], hint["_doi"]), ("A Fine Paper", "2021-03-04", "10.5000/zz"))
+        self.assertEqual(h["creators"][1]["lastName"], "Ray")
+        w, _ = L.parse_html("<html><title> Plain  page </title></html>", "http://x/")
+        self.assertEqual((w["itemType"], w["title"], w["url"]), ("webPage", "Plain page", "http://x/"))
+
+    def test_ids(self):
+        self.assertEqual(L.arxiv_id_of("https://arxiv.org/abs/2010.02264v3"), "2010.02264")
+        self.assertEqual(L.arxiv_id_of("arXiv:2010.02264"), "2010.02264")
+        self.assertIsNone(L.arxiv_id_of("10.1000/abc"))
+        self.assertEqual(L.doi_of("https://doi.org/10.1000/abc."), "10.1000/abc")
+
+    def test_citekey(self):
+        k = lambda t, y="2017", a="Bora": L.zot_citekey({"title": t, "date": y, "creators": [{"creatorType": "author", "lastName": a}]})
+        self.assertEqual(k("Compressed Sensing Using Generative Models"), "boraCompressedSensingUsing2017")
+        self.assertEqual(k("On Oracle-Type Local Recovery", "2021", "Adcock"), "adcockOracletypeLocalRecovery2021")
+        self.assertEqual(k("Fighting the Curse of Dimensionality", "2012", "Herrmann"), "herrmannFightingCurseDimensionality2012")
+        self.assertEqual(k("Stable and Robust Sampling Strategies", "2014", "Krahmer"), "krahmerStableRobustSampling2014")
+
+    def post_run(self, what, yes, find_rows=(), **kw):
+        posts = []
+        def fake_get(path, params=None, key=None):
+            self.assertNotIn("SECRETKEY", json.dumps(params or {}))
+            return list(find_rows), {}
+        with mock.patch.object(L, "zot_get", fake_get), mock.patch.object(L, "resolve_any", lambda s: L.parse_arxiv(ARXIV_XML, "2010.02264")), \
+             mock.patch.object(L, "zot_post", lambda items, tok: posts.append((items, tok)) or {"successful": {"0": {"key": "NEWKEY1"}}}):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                L.cmd_zot_add(argparse.Namespace(what=what, yes=yes, tag=["t1"], collection=None))
+        return out.getvalue(), posts
+
+    def test_dry_run_never_posts(self):
+        out, posts = self.post_run("2010.02264", False)
+        self.assertEqual(posts, [])
+        self.assertIn("dry run", out)
+        self.assertIn("suggested citekey: gajjarSubspaceEmbeddingsNonlinear2020", out)
+        self.assertIn('"tag": "t1"', out)
+
+    def test_yes_posts_once_with_token(self):
+        out, posts = self.post_run("2010.02264", True)
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(len(posts[0][1]), 32)
+        self.assertIn("created item key: NEWKEY1", out)
+
+    def test_dedupe_blocks_post(self):
+        for d in ({"title": "Other", "DOI": "10.1000/JJ"}, {"title": "x", "extra": "arXiv:2010.02264v1"},
+                  {"title": "Subspace embeddings under nonlinear transformations."}):
+            out, posts = self.post_run("2010.02264", True, find_rows=[{"key": "OLD1", "data": d}])
+            self.assertEqual(posts, [], d)
+            self.assertIn("already in library", out)
+            self.assertIn("OLD1", out)
+
+
 if __name__ == "__main__":
     unittest.main()

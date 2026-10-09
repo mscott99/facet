@@ -119,8 +119,8 @@ copy `bin/life.accounts.example.json`.
   `== subject [N msgs, account]` then per message `-- <id> <date> <from> -> <to>` and the body with quoted replies
   (`>` lines, `On ... wrote:` tails, Outlook headers) removed; `--full` keeps them. Bare logins (e.g. `matthewscott`)
   count as "me" as `login@<imap domain>`; add `"aliases": [...]` to an account for others.
-- `life zot ...`: **read-only** Zotero via the Web API (stdlib; key `~/.config/life/zotero_api_key`, user id
-  `zotero_user_id`, sent only as the `Zotero-API-Key` header; never writes). Library cached in
+- `life zot ...`: Zotero via the Web API (stdlib; key `~/.config/life/zotero_api_key`, user id
+  `zotero_user_id`, sent only as the `Zotero-API-Key` header; the only write is `zot add`, which creates items and never edits or deletes). Library cached in
   `~/.cache/life/zotero.json`, refreshed incrementally (`since=<Last-Modified-Version>`, `/deleted`, 100 per page).
   - `zot search [WORDS...] [--author A] [--title T] [--tag TAG] [--year Y] [-n N]`: one line per item,
     `bibkey  first author  year  title  [item key]` (words are ANDed over title/authors/abstract/venue/tags/bibkey).
@@ -131,6 +131,15 @@ copy `bin/life.accounts.example.json`.
     `Citation Key:` in `extra`), then DOI, then normalised title+year. Lists what has no library item, and library items
     with no bib entry or note.
   - `zot sync [--force]`: just update the cache.
+  - `zot find QUERY...`: live search of the personal library (`qmode=everything`), same line format as `search`.
+  - `zot add <arxiv-id|doi|url> [--collection KEY] [--tag T]... [--yes]`: resolves arXiv (arXiv API, `preprint`), DOI
+    (Crossref: journalArticle/conferencePaper/book/bookSection/...), or a page URL (stdlib scrape of `citation_*`/Dublin
+    Core/`og:` meta; a found DOI or arXiv id goes through those resolvers; else `webPage`; no translation-server).
+    Dedupe runs first (exact DOI/arXiv id/url in any field, or title ratio >= 0.93): on a hit it prints the existing key and
+    posts nothing. Default is a dry run printing the item JSON; `--yes` POSTs with a `Zotero-Write-Token` and prints the
+    new key. Also prints a suggested Better BibTeX-style citekey (first author's lowercase surname + first three
+    non-skipword title words CamelCased, hyphen compounds joined, + year) and whether `<vault>/mybib.bib` already has it.
+    mybib.bib is never edited (Better BibTeX on the Mac exports it).
 - Tests: `python3 tests/life_test.py` (fake ICS, fake IMAP/SMTP; no network).
 
 A Linux box (the Hetzner one this branch was built against: Ubuntu 24.04 x86, cloned at
