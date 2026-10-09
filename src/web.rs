@@ -653,12 +653,17 @@ fn note_fragment(cfg: &Cfg, d: &doc::Doc, name: &str, h: &str) -> String {
 /// (204) once `LONG` has passed, or at once when not asked to wait.
 fn live_doc(cfg: &Cfg, get: impl Fn() -> Option<doc::Doc>, v: i64, wait: bool,
             render: impl Fn(&doc::Doc) -> String) -> Response<std::io::Cursor<Vec<u8>>> {
+    // Woken by the vault watcher the moment any file changes (no action needed from whoever
+    // edits); the 1.5s timeout is only the fallback where inotify isn't available.
     let t0 = Instant::now();
+    crate::watch::ensure(&cfg.vault());
+    let mut seen = crate::watch::now();
     loop {
         let Some(d) = get() else { return html(String::new(), 204) };
         if doc_version(cfg, &d) as i64 != v { return html(render(&d), 200) }
         if !wait || t0.elapsed() >= LONG { return html(String::new(), 204) }
-        std::thread::sleep(Duration::from_millis(1500));
+        let n = crate::watch::wait(seen, Duration::from_millis(1500));
+        if n != seen { seen = n; std::thread::sleep(Duration::from_millis(40)); } // let a burst of writes settle
     }
 }
 
@@ -741,6 +746,7 @@ pub fn serve(cfg: Cfg) {
     let server = Server::http(&addr).unwrap_or_else(|e| { eprintln!("bind {}: {}", addr, e); std::process::exit(1) });
     println!("facet on {} ({})", cfg.url("/"), addr);
     crate::tg::spawn(&cfg);
+    crate::watch::ensure(&cfg.vault());
     // A thread to a request: a page waiting for news (`?wait=1`) holds its thread for up to
     // `LONG`, and nothing else should queue behind it. A panic in a handler ends its own
     // connection and nothing more.

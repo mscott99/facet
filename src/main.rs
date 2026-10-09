@@ -19,6 +19,7 @@ mod optchat;
 mod tell;
 mod tui;
 mod tg;
+mod watch;
 mod web;
 
 use cfg::Cfg;
