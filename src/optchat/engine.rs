@@ -124,7 +124,6 @@ pub struct Engine {
     /// signalled whenever the tree or the view changes, and on cancel
     pub changed: Condvar,
     pub gate: compact::Gate,
-    pub chain: Mutex<compact::Chain>,
     pub turn: Mutex<turn::State>,
     pub compact_sys: PathBuf,
     pub mcp_url: OnceLock<String>,
@@ -289,7 +288,7 @@ pub fn serve() -> ! {
     let e = Arc::new(Engine {
         dir: dir.clone(), conf,
         mem: Mutex::new(Mem { store, view, busy: HashSet::new(), failed: HashMap::new(), lo: Vec::new(), pause: None }),
-        changed: Condvar::new(), gate: Default::default(), chain: Default::default(),
+        changed: Condvar::new(), gate: Default::default(),
         turn: Mutex::new(turn::State::default()), compact_sys, mcp_url: OnceLock::new(),
         watchers: Mutex::new(Vec::new()), spend: Mutex::new(VecDeque::new()), tally: Default::default(),
         limits: Mutex::new(std::fs::read_to_string(sd.join("limits.json")).ok()

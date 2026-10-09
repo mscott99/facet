@@ -2,7 +2,7 @@
 // budget. It only ever appends at the end and coarsens (never splits), so consecutive views
 // share a long prefix, which is what makes them cacheable (§8).
 use super::store::Store;
-use super::{flat, inner, MARKS};
+use super::{flat, inner, BLOCK};
 
 pub const PLACEHOLDER: &str = "(not summarized yet: zoom it)";
 
@@ -123,31 +123,26 @@ impl View {
     }
 }
 
-/// Byte offsets where `s` is cut for the cache marks: at the last line end before each of
-/// MARKS characters, skipping a mark past the end (§8). Each offset is just after a `\n`.
+/// Byte offsets where `s` is cut into cache blocks (§8): just after every BLOCK-th `\n`.
+/// Only whole blocks are cut; what follows the last offset is the partial block.
 pub fn cuts(s: &str) -> Vec<usize> {
-    let mut out = Vec::new();
-    let mut chars = 0;
-    let mut last_nl = None;
-    let mut m = 0;
-    for (off, c) in s.char_indices() {
-        if m < MARKS.len() && chars == MARKS[m] {
-            if let Some(nl) = last_nl { if out.last() != Some(&nl) { out.push(nl) } }
-            m += 1;
-        }
-        chars += 1;
-        if c == '\n' { last_nl = Some(off + 1); }
-    }
-    out
+    s.match_indices('\n').enumerate().filter(|(k, _)| (k + 1) % BLOCK == 0).map(|(_, (o, _))| o + 1).collect()
 }
 
-/// `s` split at `cuts`.
+/// `s` split at `cuts`: its whole blocks, then the partial block if any.
 pub fn pieces(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut a = 0;
     for c in cuts(s) { out.push(&s[a..c]); a = c; }
     if a < s.len() { out.push(&s[a..]); }
     out
+}
+
+/// Which of `pieces(s)` carry a cache mark: the last whole block and the last piece (§8).
+pub fn marked(s: &str) -> Vec<bool> {
+    let n = pieces(s).len();
+    let whole = cuts(s).len();
+    (0..n).map(|k| k + 1 == whole || k + 1 == n).collect()
 }
 
 #[cfg(test)]
@@ -256,18 +251,22 @@ mod tests {
     }
 
     #[test]
-    fn cut_at_line_ends() {
-        let line = format!("{}\n", "a".repeat(99)); // 100 chars per line
-        let s = line.repeat(MARKS[2] / 100 + 100); // past the last mark
-        let c = cuts(&s);
-        // every mark is a whole number of lines in, so each cut lands on the mark itself
-        assert_eq!(c, MARKS.iter().map(|m| m / 100 * 100).collect::<Vec<_>>());
-        let s2 = format!("é{}", s); // one 2-byte char shifts lines: cut before the line crossing the mark
-        let c2 = cuts(&s2);
-        assert_eq!(c2, MARKS.iter().map(|m| (m - 1) / 100 * 100 + 2).collect::<Vec<_>>());
-        assert!(c2.iter().all(|&k| s2.as_bytes()[k - 1] == b'\n'));
-        assert_eq!(pieces(&s).concat(), s);
-        assert_eq!(cuts(&"x\n".repeat(100)), Vec::<usize>::new());
-        assert_eq!(pieces(&"short\n".to_string()).len(), 1);
+    fn blocks_of_four_lines_marked_at_last_whole_and_end() {
+        let s = "a\nb\nc\nd\ne\nf\ng\nh\ni\n</chat>";
+        assert_eq!(cuts(s), vec![8, 16]);
+        assert_eq!(pieces(s), vec!["a\nb\nc\nd\n", "e\nf\ng\nh\n", "i\n</chat>"]);
+        assert_eq!(marked(s), vec![false, true, true]);
+        assert_eq!(pieces(s).concat(), s);
+        // ends on a whole block: that block is both the last whole block and the end
+        let w = "é\n2\n3\n4\n5\n6\n7\n8\n";
+        assert_eq!(cuts(w), vec![9, 17]);
+        assert!(cuts(w).iter().all(|&k| w.as_bytes()[k - 1] == b'\n'));
+        assert_eq!(marked(w), vec![false, true]);
+        // shorter than a block: one piece, marked as the end
+        assert_eq!(pieces("x\ny\n"), vec!["x\ny\n"]);
+        assert_eq!(marked("x\ny\n"), vec![true]);
+        // appending lines never moves an earlier cut: consecutive calls share their blocks
+        let longer = format!("{}j\nk\n", &s[..s.len() - "</chat>".len()]);
+        assert_eq!(cuts(&longer)[..2], cuts(s)[..]);
     }
 }

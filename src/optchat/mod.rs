@@ -30,19 +30,18 @@ pub mod view;
 
 use std::time::Duration;
 
-// §1 constants. Sizes are UTF-8 bytes; the cache marks are characters.
+// §1 constants. Sizes are UTF-8 bytes.
 pub const NODE: usize = 512;
 pub const VIEW: usize = 128_000;
 pub const JOBS: usize = 8;
 pub const TRIES: usize = 5;
 pub const RETRY: Duration = Duration::from_secs(10);
 pub const CAP: usize = 30_000;
-/// Where the view is cut for the cache marks (characters). The view climbs from VIEW/2 to VIEW
-/// by appends alone and is then cut back to VIEW/2 in one batch (`inner`), so its prefix holds
-/// still for the whole climb. The first mark sits just under the post-cut size, so it is present
-/// from the first call after a cut; the other two follow the climb, so the tail past the last
-/// mark stays short through it (§8).
-pub const MARKS: [usize; 3] = [VIEW * 15 / 32, VIEW * 23 / 32, VIEW * 15 / 16];
+/// Lines per cache block (§8 of the gist): the view goes out as blocks of BLOCK lines, one
+/// cache mark on the last whole block and one on the request's end. The API looks back up to
+/// 20 blocks from a mark for an earlier entry, so the next call pays only for the lines after
+/// the previous call's mark.
+pub const BLOCK: usize = 4;
 
 /// What a batch cuts the view back to once it passes its budget: half of it, as in the gist
 /// (128 KB down to 64 KB).

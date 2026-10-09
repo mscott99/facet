@@ -2,13 +2,10 @@
 // the gist's order, up to JOBS at once; one `claude -p` call per node, with the view as
 // cached context, the size enforced by cut-at-limit feedback in the same conversation.
 //
-// Two things are added for `claude -p`, both about the cache and both invisible to the model
-// (see README.md, Departures from the gist):
-//   * the chain: the context's tail after the last view mark is kept as one block per call
-//     increment, so the next call's end mark finds the previous call's end within the 20-block
-//     lookback and reads the whole previous context instead of rewriting its tail;
-//   * the gate: calls whose marked prefixes are not in the cache yet wait for the one call
-//     already writing them, instead of all writing the same 30-40k tokens in parallel.
+// The cache is marked as in the gist (§8): the context goes out in blocks of BLOCK lines, one
+// mark on its last whole block and one on the request's end (the step). The gate is the
+// gist's too: calls whose marked prefixes are not in the cache yet wait for the one call
+// already writing them, instead of all writing the same 30-40k tokens in parallel.
 use super::claude::{self, Meter, Proc, Tick};
 use super::engine::Engine;
 use super::{cut_bytes, flat, prompts, view, NODE, RETRY, TRIES, CALL_TIMEOUT, WARM};
@@ -95,12 +92,8 @@ fn run(e: &Arc<Engine>, j: Job) {
     let t0 = Instant::now();
     let mut tr = Trace::default();
     let name = format!("{}+{}", j.i << j.l, 1usize << j.l);
-    let (blocks, keys) = {
-        let mut ch = e.chain.lock().unwrap();
-        let blocks = layout(&mut ch, &j.chat, &j.step);
-        let keys = keys(&e.conf.compact_model, &blocks);
-        (blocks, keys)
-    };
+    let blocks = layout(&j.chat, &j.step);
+    let keys = keys(&e.conf.compact_model, &blocks);
     let res = call(e, &blocks, &keys, &name, &mut tr);
     super::events::log(&e.dir, "node", json!({
         "node": name, "l": j.l, "i": j.i, "ok": res.is_ok(),
@@ -162,7 +155,7 @@ fn call(e: &Arc<Engine>, blocks: &[(String, bool)], keys: &[u64], name: &str, tr
         a.push("--safe-mode".into());
         a
     };
-    // Claude Code's own cache marks off: the four marks are ours
+    // Claude Code's own cache marks off: the two marks are ours
     let mut p = Proc::spawn(&args, &[("DISABLE_PROMPT_CACHING", "1")], &e.dir).map_err(|x| { e.gate.release(&claimed); fail(format!("spawn: {}", x)) })?;
     let content: Vec<Value> = blocks.iter().map(|(t, mark)| {
         if *mark { json!({"type": "text", "text": t, "cache_control": {"type": "ephemeral"}}) } else { json!({"type": "text", "text": t}) }
@@ -217,52 +210,19 @@ fn stderr_tail(p: &Proc) -> String {
     if t.is_empty() { String::new() } else { format!(": {}", &t[t.len().saturating_sub(300)..]) }
 }
 
-// ---- the chain -------------------------------------------------------------------------
-
-/// The tail blocks of the last context (after its last view mark), and what came before it.
-#[derive(Default)]
-pub struct Chain { base: u64, blocks: Vec<String> }
-
-const CHAIN_MAX: usize = 16;
 /// failures of one node after which the compactor parks
-const PARK: u32 = 5; // the API looks back 20 blocks from a mark
+const PARK: u32 = 5;
 
-fn h(s: &str) -> u64 { let mut x = DefaultHasher::new(); s.hash(&mut x); x.finish() }
-
-/// The blocks of a compactor call, each with whether it carries a cache mark.
-/// View pieces at the MARKS (60k/92k/120k characters) marked, the tail as chain blocks with the last one marked;
-/// a mark left over goes on the step, which then serves the size retries.
-pub fn layout(ch: &mut Chain, chat: &str, step: &str) -> Vec<(String, bool)> {
+/// The blocks of a compactor call, each with whether it carries a cache mark (§8): the
+/// context's whole blocks of BLOCK lines, the last of them marked, then its partial block,
+/// then the step, marked as the request's end (it also serves the size retries).
+pub fn layout(chat: &str, step: &str) -> Vec<(String, bool)> {
     let cuts = view::cuts(chat);
-    let split = cuts.last().copied().unwrap_or(0);
-    let mut out: Vec<(String, bool)> = Vec::new();
-    let mut a = 0;
-    for c in &cuts { out.push((chat[a..*c].to_string(), true)); a = *c; }
-    let tail = &chat[split..];
-    let base = h(&chat[..split]);
-    if ch.base != base { ch.base = base; ch.blocks.clear(); }
-    let mut off = 0;
-    let mut used = 0;
-    for b in &ch.blocks {
-        if tail[off..].starts_with(b.as_str()) { off += b.len(); used += 1; } else { break }
-    }
-    let mut tb: Vec<String> = ch.blocks[..used].to_vec();
-    if off < tail.len() { tb.push(tail[off..].to_string()); }
-    // a tail that extends the chain, or differs from it, becomes the chain; a shorter
-    // context (an older merge) leaves it alone
-    let shorter = used < ch.blocks.len() && ch.concat().starts_with(tail);
-    if !shorter && off < tail.len() {
-        if tb.len() > CHAIN_MAX { tb = vec![tail.to_string()]; }
-        ch.blocks = tb.clone();
-    }
-    let n = tb.len();
-    for (k, b) in tb.into_iter().enumerate() { out.push((b, k + 1 == n)); }
-    let marks = out.iter().filter(|b| b.1).count();
-    out.push((step.to_string(), marks < 4));
+    let mut out: Vec<(String, bool)> = view::pieces(chat).into_iter().enumerate()
+        .map(|(k, p)| (p.to_string(), k + 1 == cuts.len())).collect();
+    out.push((step.to_string(), true));
     out
 }
-
-impl Chain { fn concat(&self) -> String { self.blocks.concat() } }
 
 /// One key per marked prefix: what the cache holds an entry for once the call has started.
 pub fn keys(model: &str, blocks: &[(String, bool)]) -> Vec<u64> {
@@ -328,59 +288,26 @@ mod tests {
     fn lines(n: usize, tag: &str) -> String { (0..n).map(|k| format!("{} line {:04} {}\n", tag, k, "x".repeat(80))).collect() }
 
     #[test]
-    fn chain_grows_one_block_per_call_and_marks_stay_four() {
-        let mut ch = Chain::default();
-        let mut chat = format!("<chat>\n{}", lines(crate::optchat::MARKS[2] / 90 + 100, "a")); // past the last cut
-        let b1 = layout(&mut ch, &chat, "STEP1");
-        assert_eq!(b1.iter().filter(|b| b.1).count(), 4);
-        assert_eq!(b1.len(), 5); // 3 pieces, tail, step
-        assert!(!b1[4].1);
-        chat.push_str("new line one\n");
-        let b2 = layout(&mut ch, &chat, "STEP2");
-        assert_eq!(b2.len(), 6); // 3 pieces, old tail, increment, step
-        assert_eq!(b2[3], (b1[3].0.clone(), false));
-        assert_eq!(b2[4], ("new line one\n".to_string(), true));
-        assert_eq!(b2.iter().filter(|b| b.1).count(), 4);
-        // a merge's context equal to the current chat: same blocks
-        let b3 = layout(&mut ch, &chat, "MERGE");
-        assert_eq!(b3[..5], b2[..5]);
-        // the concatenation is always the chat, then the step
-        let all: String = b3.iter().map(|b| b.0.as_str()).collect();
-        assert_eq!(all, format!("{}MERGE", chat));
-        // a shorter context (an older merge) does not reset the chain
-        let short = chat[..chat.len() - "new line one\n".len()].to_string();
-        let b4 = layout(&mut ch, &short, "OLD");
-        assert_eq!(b4[3].0, b1[3].0);
-        chat.push_str("two\n");
-        let b5 = layout(&mut ch, &chat, "S");
-        assert_eq!(b5.len(), 7);
-        // a change inside the tail restarts the chain from the changed text
-        let changed = chat.replace("a line 1149", "b line 1149");
-        let b6 = layout(&mut ch, &changed, "S");
-        assert_eq!(b6.len(), 5);
-        assert_eq!(b6.iter().filter(|b| b.1).count(), 4);
+    fn two_marks_last_whole_block_and_step() {
+        let chat = format!("<chat>\n{}", lines(10, "a")); // 11 lines: 2 whole blocks + 3
+        let b = layout(&chat, "STEP");
+        assert_eq!(b.len(), 4);
+        assert_eq!(b.iter().map(|x| x.1).collect::<Vec<_>>(), vec![false, true, false, true]);
+        assert_eq!(b.iter().map(|x| x.0.as_str()).collect::<String>(), format!("{}STEP", chat));
+        // one more line keeps every earlier block: the next call reads this one's mark
+        let longer = format!("{}x\n", chat);
+        let b2 = layout(&longer, "STEP2");
+        assert_eq!((&b2[0].0, &b2[1].0), (&b[0].0, &b[1].0));
+        assert_eq!(b2.iter().filter(|x| x.1).count(), 2);
+        // 2 + 1 whole blocks at 12 lines: the mark moves one block on, within the lookback
+        assert!(b2[2].1);
     }
 
     #[test]
-    fn short_chat_marks_the_step() {
-        let mut ch = Chain::default();
-        let b = layout(&mut ch, "<chat>\nshort\n", "STEP");
-        assert_eq!(b, vec![("<chat>\nshort\n".into(), true), ("STEP".into(), true)]);
-        let b = layout(&mut ch, "<chat>\n", "STEP"); // node 0: nothing before it
-        assert_eq!(b.len(), 2);
-    }
-
-    #[test]
-    fn chain_is_capped() {
-        let mut ch = Chain::default();
-        let mut chat = String::from("<chat>\n");
-        let mut last = 0;
-        for k in 0..40 {
-            chat.push_str(&format!("l{}\n", k));
-            last = layout(&mut ch, &chat, "S").len();
-            assert!(last <= CHAIN_MAX + 2);
-        }
-        assert!(last >= 2);
+    fn short_chat_marks_only_the_step() {
+        let b = layout("<chat>\nshort\n", "STEP");
+        assert_eq!(b, vec![("<chat>\nshort\n".into(), false), ("STEP".into(), true)]);
+        assert_eq!(layout("<chat>\n", "STEP").len(), 2); // node 0: nothing before it
     }
 
     #[test]

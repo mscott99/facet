@@ -106,7 +106,10 @@ try:
     c = merges[0]["content"]
     check(all("|" not in b["text"].split("\n")[1][:12] for b in c[:-1] if b["text"].startswith("<chat>\n") and len(b["text"]) > 8), "no ids in compactor context")
     check(c[-1]["text"].startswith("</chat>\n\nFor length only, here is an invented example line about no real chat, exactly 512 bytes;"), "step block opens with </chat> and SCALE")
-    check(sum(1 for b in c if "cache_control" in b) <= 4, "at most 4 cache marks per compactor call")
+    check(sum(1 for b in c if "cache_control" in b) <= 2 and "cache_control" in c[-1], "at most 2 cache marks per compactor call, one on the step (the gist's)")
+    whole = [k for k, b in enumerate(c[:-1]) if b["text"].count("\n") == 4]
+    check(all(b["text"].count("\n") == 4 for b in c[:-2]) and [k for k, b in enumerate(c[:-1]) if "cache_control" in b] == whole[-1:],
+          "compactor context in blocks of 4 lines, the last whole one marked")
     check(all(x["env"]["DISABLE_PROMPT_CACHING"] == "1" for x in merges), "compactor runs with Claude Code marks off")
     retries = [x for x in fake() if x["kind"] == "compact-retry"]
     check(len(retries) == len(merges) and all(r["text"].startswith("That line is 600 bytes; the limit is 512. It must end where it is cut here:\n") and r["text"].endswith("| ← LIMIT") for r in retries),
@@ -129,7 +132,12 @@ try:
     pv = [b["text"] for b in primes[0]["content"]]
     tv = [b["text"] for b in turns[0]["content"]]
     check(pv == tv[:-1] and tv[-1] == "hello", "priming sends exactly the real call's view blocks")
-    check(all("cache_control" in b for b in primes[0]["content"]) and not any("cache_control" in b for b in turns[0]["content"]), "marks on the priming call only")
+    pc = primes[0]["content"]
+    pm = [k for k, b in enumerate(pc) if "cache_control" in b]
+    lw = max([k for k, b in enumerate(pc) if b["text"].count("\n") == 4 and b["text"].endswith("\n")], default=-1)
+    check(pm == sorted({lw, len(pc) - 1} - {-1}) and not any("cache_control" in b for b in turns[0]["content"]),
+          "marks on the priming call only: its last whole 4-line block and its end")
+    check(all(b["text"].count("\n") == 4 for b in pc[:-1]), "the view goes out in blocks of 4 lines")
     check(primes[0]["argv"] == turns[0]["argv"], "priming and real call use identical arguments")
     check(turns[0]["env"]["CLAUDE_CODE_PROMPT_CACHE_TTL"] == "5m" and primes[0]["env"]["DISABLE_PROMPT_CACHING"] == "1", "5m entries; priming with Claude Code marks off")
     check("hello" not in "".join(tv[:-1]), "the view is rendered before the new message is logged")

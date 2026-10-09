@@ -390,22 +390,23 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 
 1. *Priming instead of cache marks inside the view (§8).* From its second step on, a call
    uses all 4 of the API's cache breakpoints itself (2 on the system prompt, 2 rolling); one
-   more is a `400`. So before each turn whose view passes the first mark (15/32 of the budget,
-   60k characters), a
+   more is a `400`. So before each turn whose view holds at least one whole block, a
    priming request goes out: the same arguments, Claude Code's own marks off
-   (`DISABLE_PROMPT_CACHING=1`), ours on each view piece. It is killed as soon as the API
+   (`DISABLE_PROMPT_CACHING=1`), ours placed as the gist places them: the view in blocks of 4
+   lines, one mark on the last whole block, one on the request's end. It is killed as soon as the API
    accepts it; the real call then reads the whole view back (measured: read 30,003 of 30,003
    tokens, wrote 350). One per turn, right before it, writing only what changed: not one of
    the "renewal pings" §8 forbids.
-2. *The compactor sets its own marks (§4.2, §8).* Claude Code's marks are off; ours go on the
-   view pieces and the end of the context, and a spare one on the step, so the size retries
-   read everything.
-3. *The chain.* `</chat>` opens the step block instead of closing the context block, and the
-   context's tail after its last mark goes as one block per call increment. The next call's
-   end mark then finds the previous call's whole context within the API's 20-block lookback.
-   The text the model sees is identical. Measured: each call after the first reads ~22k tokens
-   and writes ~500.
-4. *The gate.* Compactor calls whose marked prefixes are not cached yet wait (until its
+2. *The compactor sets its own marks (§4.2, §8).* Claude Code's marks are off; ours are the
+   gist's: the context in blocks of 4 lines, one mark on its last whole block, one on the
+   request's end (the step, which also serves the size retries). The next call finds this
+   mark within the API's 20-block lookback and pays only for the lines after it.
+3. *No chain (dropped).* The context's tail after the last fraction mark used to go as one
+   block per call increment so the next end mark could find it within the lookback. With
+   4-line blocks the last-whole-block mark does that by itself, so the chain is gone. Still
+   ours: `</chat>` opens the step block instead of closing the context block, so one call's
+   context is a prefix of the next one's.
+4. *The gate (the gist's).* Compactor calls whose marked prefixes are not cached yet wait (until its
    first response) for the call already writing them, instead of all writing the same tens of
    thousands of tokens in parallel. JOBS stays 8.
 5. *Mid-run messages (§7).* A message written to `claude` while the model writes its final
@@ -570,7 +571,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     assumption — how much to send out versus do here — becomes measurable: the subagent's own
     eq against the compaction its report avoided, over real turns.
 
-20. *The view's batch is the gist's; only the cache marks are ours (§5.2, §8).* As in the
+20. *The view's batch and its cache marks are the gist's (§5.2, §8).* As in the
     gist, nothing merges until the view passes VIEW = 128,000 bytes; one batch then merges the
     most due pair whose parent is built, again and again, until the view is at most VIEW/2 =
     64,000 bytes (`inner`). If unbuilt parents stop it short, the batch stays open
@@ -578,10 +579,15 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     it gets there. Due is the gist's, `(T - last) / 2^l`, with `last` the pair's last message
     (inclusive: the second line's end - 1) and `l` the level of the two lines; compared exactly,
     the oldest of equals kept. The view so climbs 64k -> 128k by appends alone, its prefix
-    byte-identical for the whole climb. The marks are fractions of VIEW placed for that cycle:
-    15/32, 23/32, 15/16 (60k, 92k, 120k characters): the first just under the post-cut size, so
-    it is there from the first call after a cut; the other two follow the climb, so the tail the
-    chain carries past the last mark stays short.
+    byte-identical for the whole climb. The marks follow it the gist's way: the view (and a
+    compactor's context) goes out in blocks of BLOCK = 4 lines, marked on the last whole block
+    and on the request's end, two marks a call; each call reads the previous one's mark from
+    within the 20-block lookback. Dropped with this: the fraction marks of VIEW (MARKS =
+    15/32, 23/32, 15/16, i.e. 60k/92k/120k characters, whose tail past the last mark was
+    rewritten on every primed turn) and the compactor's chain (item 3). Known cost of the
+    gist's scheme: a turn or context that grows by more than 20 blocks (80 lines) since the
+    last mark finds no entry and rewrites the whole prefix; so does a compactor context that
+    ends more than 80 lines short of every marked one.
 
     History: commit 5c252fb gave the view an 8% band instead (collapse past 128k * 27/25 back
     to 128k) and measured due from the pair's start, `(T - start) / 2^(l+2)`. That rested on a
@@ -728,8 +734,9 @@ the engine's work, never read back by it; a write that fails is dropped silently
              summaries), ms, steps, primed, prime_read, prime_write, midrun_delivered,
              queue_after, outcome (done | cancelled | error | followup, the call killed at a
              second init), model, effort, view_bytes,
-             view_lines, view_marks, shared_bytes (prefix shared with the previous turn's
-             view), shared_to_mark (the last cache mark inside that prefix), and what its
+             view_lines, view_blocks (whole 4-line blocks), shared_bytes (prefix shared with
+             the previous turn's view), shared_to_mark (the last block end inside that
+             prefix), and what its
              subagents cost: agents, agent_reqs, agent_eq, agent_bytes (reports logged);
              fallback (its final text was sent to the chat for it)
     agent    one subagent, from the tool call that sent it to the report it handed back:
