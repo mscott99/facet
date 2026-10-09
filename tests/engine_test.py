@@ -9,6 +9,15 @@ D = tempfile.mkdtemp(prefix="facet-e2e-")
 FAKE_LOG = os.path.join(D, "fake.jsonl")
 DATA = os.path.join(D, "data")  # engine state lives here, not in the real ~/.local/share/facet
 env = dict(os.environ, OPTCHAT_DIR=D, FACET_DATA_DIR=DATA, FACET_CLAUDE=os.path.join(HERE, "fake_claude.py"), FAKE_LOG=FAKE_LOG)
+# Both processes (engine and serve) read facet.json from this HOME, never the real one: a
+# vault of two small notes, where the cards (`.claude/cards.json`) are written.
+HOME = os.path.join(D, "home"); VAULT = os.path.join(D, "vault"); PORT = __import__("random").randint(20000, 40000)
+os.makedirs(os.path.join(HOME, ".config/facet")); os.makedirs(VAULT)
+json.dump({"store": D, "port": PORT, "token": "tk", "vault": VAULT}, open(os.path.join(HOME, ".config/facet/facet.json"), "w"))
+open(os.path.join(VAULT, "Some Note.md"), "w").write("first\nsecond\nthird line\n")
+open(os.path.join(VAULT, "Other Note.md"), "w").write("Other\n\nline three\n\nline five\n\nline seven\n")
+env["HOME"] = HOME
+CARDS = os.path.join(VAULT, ".claude", "cards.json")
 fails = []
 REPORT = "BG REPORT: the thing is in three files"  # what the fake's backgrounded subagent says
 
@@ -356,28 +365,35 @@ try:
     u1 = sum(1 for x in (json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))) if x["kind"] == "agent")
     check(u1 > u0, "its own requests are priced as kind agent too (%d -> %d)" % (u0, u1))
 
-    # J: a deliberate answer to a line-comment card (§ the viewer's cards) — never a talk
-    # reply its poll merely happens to catch. The card itself is registered the way web.rs's
-    # `/x/send` does it (a file beside events.jsonl, not through the socket): this engine
-    # never learns of the vault, so `--apply` is exercised as a unit test in diag.rs instead.
-    sd = state_dir()
-    check(sd is not None, "the engine's state directory is found")
-    cards_f = os.path.join(sd, "cards.json")
-    json.dump({"c1": {"note": "Some Note", "line": 3, "answers": []}}, open(cards_f, "w"))
+    # J: cards (cards.rs). The agent opens and answers them through the engine (op `card`, the
+    # same call as its MCP card tools); what it does on one is logged as kind `answer`, never a
+    # chat message. The vault had no .claude directory: the first card must make it, not vanish.
     n0 = len(log())
-    r = req({"op": "answer", "id": "c1", "text": "looks right to me"})
-    check(r["ok"] is True and r.get("code") is None, "answering with no --apply attaches no fix: %r" % r)
+    r = req({"op": "card", "do": "new", "note": "Some Note", "line": 3, "text": "is this right?", "kind": "info"})
+    check(r["ok"] is True and r["line"] == 3, "the engine opens a card: %r" % r)
+    c1 = r["id"]
+    check(os.path.isfile(CARDS), "the card is on file, its directory made")
+    r = req({"op": "answer", "id": c1, "text": "looks right to me"})
+    check(r["ok"] is True and r.get("fix") is False, "answering with no fix attaches none: %r" % r)
     time.sleep(0.5)
-    L = log()[n0:]
-    check([(m["kind"], m["text"]) for m in L] == [("answer", "#c1 on [[Some Note]] L3: looks right to me")],
-          "the answer is in the stream as kind answer, naming its card: %r" % L)
-    card = json.load(open(cards_f))["c1"]
-    check(len(card["answers"]) == 1 and card["answers"][0]["text"] == "looks right to me" and card["answers"][0]["code"] is None,
-          "the answer is recorded against its card, not just the chat: %r" % card)
-    r2 = req({"op": "answer", "id": "no-such-card", "text": "hi"})
-    check(r2["ok"] is False and "no card" in r2["error"], "an unregistered id is refused, not silently dropped")
-    r3 = req({"op": "answer", "id": "c1", "text": ""})
-    check(r3["ok"] is False, "an empty answer is refused")
+    L = [(m["kind"], m["text"]) for m in log()[n0:]]
+    check(L == [("answer", "new info card #%s on [[Some Note]] L3: is this right?" % c1), ("answer", "#%s on [[Some Note]] L3: looks right to me" % c1)],
+          "what the agent does on a card is in the stream as kind answer, naming its card: %r" % L)
+    card = [c for c in json.load(open(CARDS))["cards"] if c["id"] == c1][0]
+    check([(m["by"], m["text"]) for m in card["thread"]] == [("server", "is this right?"), ("server", "looks right to me")] and card["fix"] is None,
+          "the thread is kept on the card: %r" % card)
+    r = req({"op": "card", "do": "fix", "id": c1, "fix": "third LINE"})
+    card = [c for c in json.load(open(CARDS))["cards"] if c["id"] == c1][0]
+    check(r["ok"] and card["fix"] == [{"start_line": 3, "end_line": 3, "old_text": "third line", "new_text": "third LINE"}],
+          "a fix is set on the card's own line, old text read from the note: %r" % card["fix"])
+    r2 = req({"op": "answer", "id": "nosuchcard", "text": "hi"})
+    check(r2["ok"] is False and "no card" in r2["error"], "an unknown id is refused, not silently dropped")
+    check(req({"op": "answer", "id": c1, "text": ""})["ok"] is False, "an empty answer is refused")
+    check(req({"op": "card", "do": "new", "note": "No Such Note", "line": 1, "text": "x"})["ok"] is False, "a card on a missing note is refused")
+    out = subprocess.run([BIN, "card", "list"], env=env, capture_output=True, text=True, timeout=10).stdout
+    check(("#" + c1) in out and "[fix]" in out, "`facet card list` shows it: %r" % out)
+    r = req({"op": "card", "do": "close", "id": c1})
+    check(r["ok"] and not any(c["id"] == c1 and not c["closed"] for c in json.load(open(CARDS))["cards"]), "a card closes")
 
     # K: stream and venues. The master's plain text is the stream's only; send_chat (an MCP
     # tool) is what reaches the chat venue; answer_card reaches the card and the stream, never
@@ -408,16 +424,16 @@ try:
     check(not any(k in ("tool", "echo") for k, _ in L) and not any("zoom" in x.lower() for k, x in L if k not in ("user", "talk", "chat")),
           "a zoom leaves no tool or echo line in the log, only the reply: %r" % L)
 
-    json.dump({"c2": {"note": "Other Note", "line": 7, "answers": []}}, open(cards_f, "w"))
+    c2 = req({"op": "card", "do": "new", "note": "Other Note", "line": 7, "text": "a comment"})["id"]
     n0 = len(log())
-    req({"op": "send", "text": '[[Other Note]] L7 #c2: "a line" CARD c2 please', "later": True})
+    req({"op": "send", "text": '[[Other Note]] L7 #%s: "a line" CARD %s please' % (c2, c2), "later": True})
     wait(lambda: any(m["kind"] in ("talk", "chat") and m["text"] == "noted" for m in log()[n0:]), 30, "reply after answer_card")
     wait(idle, 30, "idle after answer_card")
     L = [(m["kind"], m["text"]) for m in log()[n0:]]
-    check(L == [("user", '[[Other Note]] L7 #c2: "a line" CARD c2 please'), ("answer", "#c2 on [[Other Note]] L7: card answer"), ("talk", "noted")],
+    check(L == [("user", '[[Other Note]] L7 #%s: "a line" CARD %s please' % (c2, c2)), ("answer", "#%s on [[Other Note]] L7: card answer" % c2), ("talk", "noted")],
           "answer_card logs kind answer, and a card-only turn gets no chat fallback: %r" % L)
-    card = json.load(open(cards_f))["c2"]
-    check([a["text"] for a in card["answers"]] == ["card answer"], "answer_card lands on the card")
+    card = [c for c in json.load(open(CARDS))["cards"] if c["id"] == c2][0]
+    check([m["text"] for m in card["thread"]] == ["a comment", "card answer"], "answer_card lands on the card")
 
     n0 = len(log())
     req({"op": "send", "text": "CHATFAIL"})
@@ -429,11 +445,9 @@ try:
 
     # what the chat venue shows (the web chat page and Telegram share `Msg::in_chat`; Telegram
     # pushes kind chat alone, unit-tested in log.rs): the real binary's page, served against D
-    import random, urllib.request, urllib.parse
-    home = os.path.join(D, "home"); os.makedirs(os.path.join(home, ".config/facet"))
-    port = random.randint(20000, 40000)
-    json.dump({"store": D, "port": port, "token": "tk"}, open(os.path.join(home, ".config/facet/facet.json"), "w"))
-    srv = subprocess.Popen([BIN, "serve"], env=dict(env, HOME=home), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    import urllib.request, urllib.parse, threading, shutil
+    port = PORT
+    srv = subprocess.Popen([BIN, "serve"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         page = ""
         for _ in range(50):
@@ -444,15 +458,77 @@ try:
         check("said it" not in page and "noted" not in page, "the chat page hides the agent's plain text")
         check("card answer" not in page and "CARD c2" not in page, "the chat page hides card comments and card answers")
         check("send_chat failed" not in page and "seed message" not in page, "the chat page hides steps and notes")
-        # a card's answers, as its page asks for them: by id, saying where they start; and the
-        # whole card, thread and all, as a reload puts it back
-        get = lambda u: urllib.request.urlopen("http://127.0.0.1:%d/tk%s" % (port, u), timeout=5).read().decode()
-        rp = get("/f/reply?id=c2&since=0")
-        check('data-from="0" data-high="1"' in rp and "card answer" in rp, "a card's answers come by id, from where it asked: %r" % rp)
-        check("card answer" not in get("/f/reply?id=c2&since=1"), "an answer already shown is not sent again")
-        cs = json.loads(get("/f/cards?notes=" + urllib.parse.quote(json.dumps(["Other Note"]))))
-        check(len(cs) == 1 and cs[0]["id"] == "c2" and cs[0]["n"] == 1 and "card answer" in cs[0]["thread"],
-              "a reload puts the card back with its thread: %r" % cs)
+        get = lambda u: urllib.request.urlopen("http://127.0.0.1:%d/tk%s" % (port, u), timeout=40).read().decode()
+        def post(u, **f):
+            body = urllib.parse.urlencode(f).encode()
+            return json.loads(urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:%d/tk%s" % (port, u), body), timeout=10).read())
+        q = "/f/cards?notes=" + urllib.parse.quote(json.dumps(["Other Note"]))
+        cs = json.loads(get(q))
+        check([c["id"] for c in cs["cards"]] == [c2] and [m["by"] for m in cs["cards"][0]["msgs"]] == ["server", "server"]
+              and "card answer" in cs["cards"][0]["msgs"][1]["html"] and cs["cards"][0]["note"] == "Other Note",
+              "a page gets its notes' cards, each message rendered with its index: %r" % cs)
+        check(c1 not in get("/f/cards?all=1"), "a closed card is on no page")
+
+        # a page already open is waiting on its cards (held at version v); the agent opens a new
+        # card (MCP new_card), and the held request answers with it — no reload
+        held = {}
+        def hold():
+            t = time.time()
+            held["r"] = json.loads(get(q + "&wait=1&v=%d" % cs["v"])); held["s"] = time.time() - t
+        th = threading.Thread(target=hold); th.start()
+        time.sleep(1.5)
+        check("r" not in held, "with nothing new, the page's request is held")
+        n0 = len(log())
+        req({"op": "send", "text": "NEWCARD at line five"})
+        th.join(35)
+        new = [c for c in held.get("r", {}).get("cards", []) if c["id"] != c2]
+        check(len(new) == 1 and new[0]["kind"] == "warn" and new[0]["line"] == 5 and new[0]["by"] == "server"
+              and new[0]["fix"]["text"] == "LINE FIVE" and "katex" not in new[0]["msgs"][0]["html"] and "x^2" in new[0]["msgs"][0]["html"],
+              "a card the agent opens reaches the open page through the held request (%.1fs): %r" % (held.get("s", -1), new))
+        wait(idle, 30, "idle after new_card")
+        L = [(m["kind"], m["text"]) for m in log()[n0:]]
+        check(L[0] == ("user", "NEWCARD at line five") and L[1][0] == "answer" and L[1][1].startswith("new warn card #")
+              and not any(k in ("tool", "echo") for k, _ in L), "new_card is logged as kind answer, its call quiet: %r" % L)
+        s3 = new[0]["id"] if new else ""
+
+        # the page's own side: the first word on a new card opens it and goes to the
+        # conversation as a card message (queued); the X closes; apply puts the fix in
+        r = post("/x/card", **{"do": "say", "id": "cweb1", "note": "Other Note", "line": "3", "quote": "line three", "text": "why three?"})
+        check(r == {"ok": True, "k": 0}, "a word on a new card opens it: %r" % r)
+        wait(lambda: any(m["kind"] == "user" and m["text"].startswith('[[Other Note]] L3 #cweb1: "line three"\nwhy three?') for m in log()), 10, "card message logged")
+        r = post("/x/card", **{"do": "say", "id": "cweb1", "text": "and four?"})
+        check(r == {"ok": True, "k": 1}, "the next word on it is its next message: %r" % r)
+        r = post("/x/card", **{"do": "say", "id": s3, "text": "really?"})
+        wait(lambda: any(m["kind"] == "user" and "on your warn card: server card" in m["text"] and m["text"].endswith("really?") for m in log()), 10,
+             "a reply on the agent's card carries what it had said")
+        r = post("/x/card", **{"do": "apply", "id": s3})
+        check(r["ok"] and open(os.path.join(VAULT, "Other Note.md")).read().split("\n")[4] == "LINE FIVE", "apply puts the fix in: %r" % r)
+        check(s3 not in get(q), "an applied card closes")
+        check(post("/x/card", **{"do": "close", "id": "cweb1"})["ok"] and "cweb1" not in get(q), "the X closes a card")
+        check(post("/x/card", **{"do": "say", "id": "cweb2", "note": "No Such", "line": "1", "text": "x"})["ok"] is False,
+              "a card that cannot be kept says so")
+        wait(idle, 30, "idle after card messages")
+
+        # the same, in a page's DOM (jsdom, if there is a node with it: FACET_JSDOM=<node_modules>)
+        node = shutil.which("node")
+        if node and os.environ.get("FACET_JSDOM"):
+            p = subprocess.Popen([node, os.path.join(HERE, "cards_dom.js"), "http://127.0.0.1:%d" % port, "tk", "Other Note"],
+                                 env=dict(os.environ, NODE_PATH=os.environ["FACET_JSDOM"]), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            ready = ""
+            while True:
+                line = p.stdout.readline()
+                if not line or line.startswith("READY"): ready = line.strip(); break
+                if line.startswith(("ok ", "FAIL ")): check(line.startswith("ok "), "dom: " + line.split(" ", 1)[1].strip())
+            check(ready.startswith("READY"), "the page loads in jsdom: %r" % ready)
+            req({"op": "send", "text": "NEWCARD at line seven"})
+            p.stdin.write("go\n"); p.stdin.flush()
+            res = p.stdout.read(); p.wait(60)
+            for line in res.splitlines():
+                if line.startswith(("ok ", "FAIL ")): check(line.startswith("ok "), "dom: " + line.split(" ", 1)[1].strip())
+            check(p.returncode == 0, "the DOM test ran through: %r" % res[-500:])
+            wait(idle, 30, "idle after the DOM test")
+        else:
+            print("skip DOM test (no node, or FACET_JSDOM unset)")
     finally:
         srv.kill()
 

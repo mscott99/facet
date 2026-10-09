@@ -607,7 +607,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                     };
                     let text = strip_cwd_note(&text);
                     let silent = mute.remove(id);
-                    let ok = silent || (quiet.remove(id) && (text == super::mcp::SENT || text == super::mcp::ANSWERED));
+                    let ok = silent || (quiet.remove(id) && (text == super::mcp::SENT || text.starts_with(super::mcp::ANSWERED)));
                     if !bg && !ok {
                         // a subagent's report is the one thing it leaves behind: its own kind (§9)
                         let sent = agents.remove(id);
@@ -681,7 +681,9 @@ fn logged_call(name: &str, input: &Value) -> String {
     format!("{} {}", name, input)
 }
 
-fn is_output(name: &str) -> bool { name.ends_with("__send_chat") || name.ends_with("__answer_card") }
+fn is_output(name: &str) -> bool {
+    name.ends_with("__send_chat") || ["__new_card", "__answer_card", "__fix_card", "__close_card"].iter().any(|t| name.ends_with(t))
+}
 
 /// The safety net for the chat venue (README, "Stream and venues"): the agent's plain text
 /// reaches the stream only, so a turn that ends without a `send_chat` after a chat message

@@ -67,10 +67,16 @@ too, word for word, so do not restate it in plain text: text after
 your last send is dropped. A turn that ends without a send after a
 chat message has its last text sent for you.
 
-A line-comment from the viewer carries its own id, shaped `[[Note]]
-L<n> #<id>: \"quote\"`; answer it with answer_card, not send_chat:
-the reply belongs to that card alone. Give `apply` only when you mean
-to replace the line itself.
+A card is a conversation anchored to a line of a note, shown under
+that line in the viewer; its kind (comment, info, warn, error) is only
+a colour. A message the user writes on one is shaped `[[Note]] L<n>
+#<id>: \"quote\"`; answer it with answer_card, not send_chat: the reply
+belongs to that card alone. Open a card of your own with new_card (a
+note and a verbatim anchor, or a line) to say something about a line;
+an open page shows it at once. Give a card a fix (on new_card,
+answer_card or fix_card) only when you mean its lines replaced: the
+user applies it with a button. close_card takes one away, list_cards
+shows the open ones; `facet review` opens many on a note in one call.
 
 To have the engine restart itself (say after rebuilding facet, so the new
 binary runs), run `facet restart` (`--serve` also restarts the web/Telegram
@@ -89,7 +95,7 @@ The view: the whole chat between {NAME} and the user, oldest first, inside
 
 A summary tags each item with its kind: user (the user's words), talk
 ({NAME}'s text, for the log only), chat ({NAME}'s messages to the user),
-answer ({NAME}'s replies on a line-comment card), tool ({NAME}'s tool
+answer ({NAME}'s words on a card, a thread on a line of a note), tool ({NAME}'s tool
 calls), echo (their results), note
 (memories from before this chat), or work (the report of a subagent or
 a computer task, which the log holds as a user message starting
@@ -114,7 +120,7 @@ You write the memory of {NAME}, an AI agent that works for one user in one
 endless chat, through tools and subagents. Each message has a kind: user
 (the user's words),
 talk ({NAME}'s own text, which only the log sees), chat ({NAME}'s messages
-to the user), answer ({NAME}'s replies on a line-comment card), tool
+to the user), answer ({NAME}'s words on a card, a thread on a line of a note), tool
 ({NAME}'s tool calls), echo (tool results), note
 (memories from before this chat), work (a subagent's report).
 
@@ -185,7 +191,11 @@ pub const SCALE: &str = "user: wants the tide-chart widget to show sunrise too, 
 pub const ZOOM_DOC: &str = "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.";
 pub const DATE_DOC: &str = "The date and time of message id.";
 pub const SEND_DOC: &str = "Send text to the user in the chat (Telegram and the chat page). The only way your words reach them there; it is also logged.";
-pub const ANSWER_DOC: &str = "Answer the line-comment card with this id (from `[[Note]] L<n> #<id>`): the text appears on that card only, not in the chat; it is also logged. apply, only if you mean it: replacement text for the commented line, offered on the card as a fix.";
+pub const ANSWER_DOC: &str = "Say something on the card with this id (from `[[Note]] L<n> #<id>`): it appears on that card only, not in the chat; it is also logged. fix, only if you mean it: replacement text for the card's lines, which the user can apply with a button.";
+pub const NEW_CARD_DOC: &str = "Open a card on a line of a note: shown under that line, live on any open page. note: its name or path. anchor: verbatim text from the note, unique in it (preferred), or line: a 1-based line number. text: what you say (markdown, math). kind: comment (default), info, warn or error, only a colour. fix: replacement text for the anchored lines, only if you mean it. Returns the card's id.";
+pub const FIX_CARD_DOC: &str = "Set the fix of the card with this id: replacement text for its lines, applied when the user presses its button. An empty fix takes it off.";
+pub const CLOSE_CARD_DOC: &str = "Close the card with this id (off every page, kept on file); delete: true removes it outright.";
+pub const LIST_CARDS_DOC: &str = "The open cards, one line each (id, kind, note, line, last message, [fix]); note narrows to one note.";
 
 /// What a subagent is told (§9). As in the gist, it is sent the view as it stood when it
 /// was spawned, as context and nothing more; it has no memory of the chat and cannot ask,
@@ -215,7 +225,7 @@ oldest first, inside <chat> tags, as one-line summaries of the messages,
 each line \"id+n|text\" for the n messages from id on. A summary tags
 each item with its kind: user (the user's words), talk ({NAME}'s
 own text), chat ({NAME}'s messages to the user), answer ({NAME}'s
-replies on a line-comment card), tool ({NAME}'s tool calls), echo
+words on a card, a thread on a line of a note), tool ({NAME}'s tool calls), echo
 (their results), note
 (older memories), or work (an earlier subagent's report). No message
 appears in full, but you can open one: zoom(id, n) gives the two lines

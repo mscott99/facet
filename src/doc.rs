@@ -217,9 +217,11 @@ pub fn write(path: &Path, text: &str) -> Result<(), String> {
 /// same page, so there is no second code path for it.
 pub fn index(cfg: &Cfg) -> Doc {
     let mut rows: Vec<(String, String, u64, u64, usize)> = Vec::new();
+    let open = crate::cards::open(cfg);
     for (slug, path) in table(cfg) {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let nd = crate::diag::for_note(cfg, &path).len();
+        let rel = path.strip_prefix(cfg.vault()).unwrap_or(&path).to_string_lossy().to_string();
+        let nd = open.iter().filter(|c| c["note"] == rel.as_str()).count();
         rows.push((slug, title_of(&path, &text), mtime(&path), text.len() as u64, nd));
     }
     rows.sort_by(|a, b| b.2.cmp(&a.2));

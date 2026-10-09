@@ -19,6 +19,8 @@
 #                 the --mcp-config URL), then a reply "said it"
 #   "ZOOM"     -> calls MCP zoom (id 0), then a reply "zoomed"
 #   "CARD id"  -> calls MCP answer_card for card id with "card answer", then a reply "noted"
+#   "NEWCARD at x" -> calls MCP new_card on "Other Note" (anchor x, warn, with a fix "LINE FIVE"),
+#                 then a reply "opened"
 #   "CHATFAIL" -> calls send_chat with empty text (an error result), then a reply "ok"
 #   otherwise  -> one reply "ok"
 # A detached agent (`facet spawn`, FACET_SPAWN=1 in the environment): sleeps 1 s, then one
@@ -193,6 +195,10 @@ def run_turn(msg):
     elif "CHAT " in t:
         output_tool("send_chat", {"text": t.split("CHAT ", 1)[1].strip()})
         time.sleep(0.2); step([{"type": "text", "text": "said it"}]); result("said it"); return
+    if "NEWCARD" in t:
+        output_tool("new_card", {"note": "Other Note", "anchor": t.split("NEWCARD at ", 1)[1].strip(), "text": "server card on $x^2$",
+                                 "kind": "warn", "fix": "LINE FIVE"})
+        time.sleep(0.2); step([{"type": "text", "text": "opened"}]); result("opened"); return
     if "CARD " in t:
         output_tool("answer_card", {"id": t.split("CARD ", 1)[1].split()[0], "text": "card answer"})
         time.sleep(0.2); step([{"type": "text", "text": "noted"}]); result("noted"); return

@@ -15,8 +15,8 @@ Unix socket.
     log.rs    the memory, read-only: a fold over ~/.optchat/chat/main/*.jsonl
     doc.rs    output addressed by a slug — a vault note, published via its own frontmatter,
               and the vault read by name: its notes, their sections, their embeds
-    diag.rs   output addressed by a code, anchored to a live line — a comment, triaged
-    cards.rs  a line-comment card's id, and the deliberate answer addressed to it
+    cards.rs  cards: a conversation anchored to a line of a note — a comment, a review's
+              warning, a fix to apply — whoever opened it (see **cards**, below)
     tell.rs   input: one funnel, from any route, into the engine socket
     md.rs     one markdown renderer (comrak: math and wikilinks are parsed, never regexed)
     web.rs    the route with a screen (server-rendered HTML + HTMX)
@@ -148,26 +148,7 @@ its own Python server on 127.0.0.1:8765/tailnet :9443 — is retired (archived a
     for the note itself, which through an embed is not the page's own note but the one the
     embed quotes (see **a longform**, below). A double-click (double-tap; a touch-screen gets
     its own detector, since iOS Safari does not fire `dblclick` reliably) on one opens a card
-    under the line, given a short id of its own there and then, and sends through the ordinary
-    `POST /x/send`, shaped `[[Note]] L<line> #<id>: "quoted line text"` followed by what was
-    typed, so it reads the same as a reply typed by hand. The id is what lets an answer find
-    its way back to the right card instead of to every card at once: the master's MCP tool
-    `answer_card`, or `facet answer <id> <text>` (`cards.rs`, engine op `answer`), is the only
-    thing that can put a reply inside one. The answer is the card venue's (see **stream and
-    venues**, below): it is logged into the stream as kind `answer`, so the memory has it, but
-    never reaches Telegram or the chat page; the comment that asked is hidden from the chat
-    page too, and a turn started by card comments alone gets no fallback reply in the chat.
-    A card is one component wherever it appears (a new comment, a reply inside one, one put
-    back on reload): the quote and a quiet `remove`, then the thread — what was said and what
-    was answered, in order — then the composer, always last (Enter or its `send` button
-    sends, Shift-Enter is a new line), then a status line (sending / queued / not sent). A
-    card nothing was said in goes on Escape or a click away; a sent card shows no composer
-    until its first answer comes, and every reply carries the same id, so the thread
-    stays attached to where it started. `cards.json` counts a card's sends and records with
-    each answer how many it came after, so a reload rebuilds the thread in order. `--apply <replacement>` on the answer, given only when there truly is one to
-    offer (never guessed from prose), becomes a diagnostic fix (`diag::propose`) the card can
-    then apply, through the same `/x/diag` route and the same stale-text guard a review's fix
-    gets.
+    under that line (see **cards**, below).
   - A labelled embed is closed where it ends (a tombstone `∎` on a proof, a plainer `□` on
     anything else) rather than left for the reader to guess at a page boundary that is not
     there.
@@ -180,8 +161,8 @@ What vault-phone did that was judged not worth porting: live diff-patched re-ren
 server-sent events (facet's doc fragment instead asks `/f/doc/<slug>?wait=1`, held until the
 note or anything it embeds changes, and swaps the whole thing — coarser, but needs no new
 transport); a dot at the diagnostic's exact source line with a
-bottom sheet for Apply/Dismiss/Reply (facet's comment card already sits right after the block
-it anchors to and carries apply/dismiss/discuss, so the dot would be a second UI for the same
+bottom sheet for Apply/Dismiss/Reply (facet's card already sits right after the block it
+anchors to and carries apply, close and reply, so the dot would be a second UI for the same
 triage, not a new capability); whole-tree-snapshot `/undo` of the last agent turn (needs the
 vault to be its own git repo — myVault is one — but recovering a bad edit by hand or through
 Obsidian's own history already covers it, and the stale-text guard on `apply` already stops
@@ -199,30 +180,29 @@ Web pages (`facet serve`, all under `/<token>`):
     /n/<note>          any note of the vault by its own name, read-only; `?h=<section>` one
                        section of it. Where every `[[wikilink]]` goes
                        both carry `data-line`/`data-note` on every block (a double-click
-                       comments on it, into `POST /x/send`, below)
-    /d/                open comments on notes
+                       opens a card on it; the page places the note's cards itself)
+    /d/                every open card, under its note and the lines it is about
     POST /x/send       a message into the conversation (form field `text`; `later=1`: a turn of
                        its own; in the box, Enter sends, Shift-Enter sends later, Alt-Enter is
-                       a new line; `id`/`note`/`line` from a line-comment card register it,
-                       see **one viewer**, above)
-    POST /x/diag       apply | dismiss | discuss a comment (`code`, `note`, `do`)
-    /f/log, /f/doc/<slug>, /f/note/<name>, /f/reply, /f/cards, /static/htmx.js
+                       a new line)
+    POST /x/card       a card, from its page (`do`=say: `id`, `text`, and for the first word
+                       `note`/`line`/`quote`; close; apply) -> JSON {ok, k | text | error}
+    /f/log, /f/doc/<slug>, /f/note/<name>, /f/cards, /static/htmx.js
                        fragments and assets the pages ask for. With `wait=1` a request is held
                        (up to 25s, a thread of its own: the server runs one per request) until
-                       there is news - a chat message, a changed note or embed, a card answer -
-                       then the page asks again; a hidden tab stops asking. The log is parsed
-                       once and then only from where it stopped. The memory tree is folded once
-                       per change to its files. `/f/cards?notes=[..]` returns a note's sent
-                       comment cards (one thread, words from the log and answers from cards.json,
-                       in order) so a reload puts them back; `POST /x/hide` removes one for good.
-                       (`/f/reply?id=&since=`: a card's own answers past what it has shown)
+                       there is news - a chat message, a changed note or embed, any card
+                       changed - then the page asks again; a hidden tab stops asking. The log is
+                       parsed once and then only from where it stopped. The memory tree is
+                       folded once per change to its files. `/f/cards?notes=[..]` (or `all=1`)
+                       `&v=` answers JSON {v, cards}: the open cards of those notes, each message
+                       rendered, held while the cards file's version is still `v`.
 
 Telegram (bot `telegram.username`, polled by `facet serve`; only the paired chat is heard):
 plain text is a message into the conversation; what the agent sends to the chat (kind
 `chat`, see **stream and venues**) is pushed as it is logged — never its plain text or a card's
-answer — and new notes and comments are announced. Commands are answered on the spot and ride along with
+answer — and new notes and new cards the agent opened are announced. Commands are answered on the spot and ride along with
 the next message: `/help`, `/ping` (= `/usage`: engine state and usage left), `/last N`,
-`/link`, `/notes`, `/diag`, `/cal N`, `/mail [query]`, `/buffer`, `/flush`.
+`/link`, `/notes`, `/diag` (= `/cards`), `/cal N`, `/mail [query]`, `/buffer`, `/flush`.
 
 A message typed on a phone is usually the next thing to deal with, not an interruption of the
 turn it lands in, so this route sends it with `later` by default (`telegram.queue`, default
@@ -240,10 +220,11 @@ Telegram and every `facet chat` use it):
                         a cancel logs the waiting ones unanswered
     note {text, date}   an imported note (during a turn, queued until it is done; the same text twice
                         is added once)
-    answer {id, text, apply?}   a deliberate reply to a line-comment card, never a talk reply
-                        its poll might otherwise catch; `apply`, given only when there is a
-                        concrete replacement to offer, becomes a fix the card can apply;
-                        logged as kind `answer` (the same call as MCP `answer_card`)
+    card {do, ...}      a card (see **cards**): do = new {note, anchor | line, text, kind?, fix?}
+                        | reply {id, text, fix?} | fix {id, fix} | kind {id, kind} | close {id,
+                        reason?} | delete {id} | apply {id} | list {note?}; what the agent does on
+                        one is logged as kind `answer` (the same call as the MCP card tools)
+    answer {id, text, apply?}   the old name of card/reply
     cancel / resume     stop the turn or the wait / lift a compactor pause
     view / status       the rendered view / engine state, usage left
     zoom {id, n}        a line of the view opened, as the agent's zoom
@@ -252,10 +233,68 @@ Telegram and every `facet chat` use it):
 
 The MCP server listens on a random loopback port with a random secret path, for the engine's
 own `claude` calls and the subagents they spawn only. The master's path (`/<secret>/mcp`) serves
-`zoom`, `date`, `send_chat {text}` and `answer_card {id, text, apply?}`; a detached subagent
-(`facet spawn`) is given `/<secret>/agent`, which lists and serves `zoom` and `date` only, and
-Task subagents' definitions leave the two output tools out of their tool lists.
+`zoom`, `date`, `send_chat {text}` and the card tools — `new_card {note, anchor | line, text,
+kind?, fix?}`, `answer_card {id, text, fix?}`, `fix_card {id, fix}`, `close_card {id, delete?}`,
+`list_cards {note?}`; a detached subagent (`facet spawn`) is given `/<secret>/agent`, which
+lists and serves `zoom` and `date` only, and Task subagents' definitions leave the output tools
+out of their tool lists.
 Zoom and date leave no trace in the stream (no step, no result): their content is already memory.
+
+### cards
+
+Everything said about a line of a note is one **card**, whoever started it: a double-click in
+the viewer, a review (`facet review`), the agent's `new_card`. There used to be two systems —
+review *diagnostics* in `.claude/diagnostics.json` (apply/dismiss/discuss) and the viewer's
+*comment cards* (words in the log, answers in the engine's `cards.json`) — and they are now one
+model, in one file, `<vault>/.claude/cards.json` (`{"cards": [..]}`, git-ignored in the vault):
+
+    { id, note, line, end, quote, kind, by, thread, fix, closed, applied?, at }
+      note     vault-relative path; line..end the lines it is about (1-based)
+      quote    the line as it read when the card was opened
+      kind     comment | info | warn | error — the colour of its edge, and nothing else
+      by       who opened it: user | server
+      thread   [{by: user|server, text, at}], in order
+      fix      null, or [{start_line, end_line, old_text, new_text}]: what Apply puts in.
+               old_text is read from the note when the fix is set, never typed, so the
+               stale-text guard is right by construction; applying shifts every other
+               card's lines on the note by what the edit did
+      closed   the X: off every page, kept on file (`delete` removes it outright)
+
+Every card looks the same: a coloured edge under its line, the quote dim at the top with an X
+(close) beside it, the thread, the fix with an `apply` button if there is one, and a one-row
+box that grows (16px, so iOS does not zoom), always last. Enter or `send` sends, Shift-Enter is
+a new line; what is sent shows grey at once and firms up when the server has it (it is the
+card's message `k` from then on, so the held request bringing it back does not show it twice);
+a failure takes it back out and returns the words to the box. A card nothing was said in goes
+on Escape or a click away.
+
+What the user writes on a card is kept on it and told to the conversation, queued for a turn of
+its own, shaped `[[Note]] L<n> #<id>: "quote"` then the words (on a card the agent opened, also
+`(on your <kind> card: <what it said>)`), so the agent answers with `answer_card`, on the card
+alone — never the chat (see **stream and venues**). A send the conversation refuses is taken
+back off the card. Nothing about a card fails silently: no vault, a `.claude` that cannot be
+made, a note or anchor not found, an unknown id — each is an error to whoever asked.
+
+A page places its cards itself, from `/f/cards` (held until any card changes), under the last
+block of the card's note starting at or before its line — through embeds too, since every block
+carries its own note. So a card the agent opens shows on a page already open, a reply lands in
+its card, and one closed or applied elsewhere leaves, with no reload; the note's own markup
+never has to be rendered again for a card. `/d/` is the same component over every open card.
+
+The CLI (through the engine when it is up, so the stream has it; else straight on the file):
+
+    facet card new <note> (--line N | --at "verbatim text") [--kind K] [--fix R] <text>|-
+    facet card reply <id> <text>|- [--fix R]      (`facet answer` is the same)
+    facet card fix <id> [R]                        set, or with nothing take off, the fix
+    facet card close|delete|apply <id> [reason]
+    facet card list [note]                         (`facet diag` is the same)
+    facet review <note> [--replace] < spec         many server cards at once (see below)
+
+Closing a server card that was not applied writes the objection to `review_memory` (as
+dismissing a diagnostic did), so the next review does not raise it again. Migration is on load
+and idempotent: anything in an old `diagnostics.json` (which an editor or review skill may
+still write) is absorbed as server cards and the file left as `{}`; the engine's old
+`cards.json` is rebuilt into threads from the log once and renamed `cards.json.migrated`.
 
 ### stream and venues
 
@@ -265,11 +304,13 @@ and card answers, chat sends. A **venue** is where some of it is also delivered.
 
   - **chat**: Telegram and the web chat page, one venue. It shows the user's messages and what
     the agent sent with `send_chat` (logged as kind `chat`), nothing else.
-  - **card**: a line-comment card on a note (`cards.json`). It shows the answers sent with
-    `answer_card` / `facet answer` (logged as kind `answer`, text `#<id> on [[Note]] L<n>: ...`).
+  - **card**: a card on a line of a note (`<vault>/.claude/cards.json`). It shows what the
+    agent says with the card tools / `facet card` (logged as kind `answer`, text `#<id> on
+    [[Note]] L<n>: ...`, or `new <kind> card #<id> on ...`), and the user's own words on it.
 
-The agent's plain text (kind `talk`) reaches the stream only. A successful `send_chat` or
-`answer_card` call leaves no `tool`/`echo` lines: the `chat` or `answer` message is the record
+The agent's plain text (kind `talk`) reaches the stream only. A successful `send_chat` or card
+tool call (not `list_cards`, which only reads) leaves no `tool`/`echo` lines: the `chat` or
+`answer` message is the record
 (a failed one is logged as an echo, so the failure is remembered). One reply, not two: plain
 text written after a `send_chat` is held; if another step follows it is logged as `talk`
 (working notes), but if the call ends on it, it is a recap of what was just sent and is dropped
@@ -616,14 +657,13 @@ Cost in this README is in "eq", input-token equivalents at API price ratios:
 
 **Engine state** (`~/.local/share/facet/engine-<hash>/`): not memory, safe to delete when the
 engine is stopped, except `queue.json`, `later.json`, `notes.json` (accepted but not yet
-logged) and `cards.json` (open cards would lose where they point and what they have heard).
+logged). (Cards are not here: they live in the vault, see **cards**; a `cards.json.migrated`
+here is the old file, already absorbed.)
 
     events.jsonl   introspection, below
     queue.json     accepted messages not yet in the log; queued again at start
     later.json     the same, for messages waiting for turns of their own
     notes.json     notes imported during a turn, not yet in the log; added at start
-    cards.json     line-comment cards, by id: note, line, and the answers each has had
-                   (`cards.rs`) — a card's only record of what it is about and what came back
     limits.json    the last rate_limit_info Claude Code reported
     model          the /model choice, if any (wins over chat.model)
     system.txt     the master system prompt as last sent; compact.txt the compactor's
@@ -694,15 +734,15 @@ cache claim above from request usage; with `ANTHROPIC_BASE_URL` at a logging pro
 
     facet post <file> [slug]   publish a note (writes `facet: <slug>` into its frontmatter)
                                  a longform is assembled on the way out: see below
-    facet review <note>        write a batch of comments from a spec on stdin:
+    facet review <note>        open a batch of cards from a spec on stdin:
                                  @ verbatim anchor (unique; may wrap across lines)
-                                 ! [severity] message
+                                 ! [comment|info|warn|error] message
                                  ? long explanation, markdown + math
                                  + replacement for the anchored line(s)
-    facet diag                 open comments; apply/dismiss by code
-    facet answer <id> <text> [--apply <replacement>]
-                                a deliberate reply to a line-comment card by id; --apply only
-                                  when there is a concrete replacement to offer
+    facet card new|reply|fix|close|delete|apply|list ...
+                               cards (see **cards**); `facet diag` lists them, `facet apply` /
+                                 `facet dismiss <id>` apply or close one, `facet answer <id>
+                                 <text> [--fix R]` replies
     facet restart [--serve]    queue an engine restart (re-exec of the binary, same pid) for after the
                                   running reply, once no detached spawn is alive; --serve also
                                   restarts serve (systemctl --user / launchctl kickstart)
