@@ -123,7 +123,7 @@ fn main() {
         // a subagent that outlives this turn (§9, detached): returns at once; its report
         // arrives later, as a message of its own
         "spawn" => {
-            let (mut model, mut kind, mut desc) = (String::new(), String::new(), String::new());
+            let (mut model, mut kind, mut desc, mut effort) = (String::new(), String::new(), String::new(), String::new());
             let mut words = Vec::new();
             let mut file = String::new();
             let mut i = 0;
@@ -134,6 +134,8 @@ fn main() {
                     "--model" => { model = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                     "--kind" => { kind = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                     "--desc" => { desc = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                    "--effort" => { effort = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                    "-h" | "--help" => { println!("facet spawn [--model M] [--effort low|medium|high|xhigh|max] [--kind general-purpose|explore] [--desc D] [--task-file PATH | - | TASK...]"); return; }
                     w => { words.push(w.to_string()); i += 1; }
                 }
             }
@@ -147,7 +149,7 @@ fn main() {
                 std::fs::read_to_string(&file).unwrap_or_else(|e| die(&format!("{}: {}", file, e)))
             } else { words.join(" ") };
             match optchat::engine::request(&optchat::engine::dir(),
-                serde_json::json!({"op": "spawn", "model": model, "kind": kind, "desc": desc, "task": task})) {
+                serde_json::json!({"op": "spawn", "model": model, "effort": effort, "kind": kind, "desc": desc, "task": task})) {
                 Ok(v) if v["ok"].as_bool() == Some(true) => println!("{}", v["id"].as_str().unwrap_or("")),
                 Ok(v) => die(v["error"].as_str().unwrap_or("refused")),
                 Err(e) => die(&e),

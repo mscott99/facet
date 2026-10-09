@@ -591,7 +591,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     whatever it was still running in the background, no matter how it was told to behave.
     Measured: three backgrounded Task agents, 831k eq between them (one alone 564k eq, 21
     requests), logged "unfinished" with no report the instant their parent's process exited —
-    the work, and its cost, both lost. `facet spawn [--model] [--kind] [--desc] <task>` is a
+    the work, and its cost, both lost. `facet spawn [--model] [--effort] [--kind] [--desc] <task>` is a
     second way to send one out, not a Task call at all: the CLI op reaches the engine over its
     socket (the same one `facet send` uses) and `src/optchat/agent.rs::spawn` starts its own
     `claude -p`, as a child of the engine process — which already outlives any one turn, since
@@ -783,7 +783,7 @@ cache claim above from request usage; with `ANTHROPIC_BASE_URL` at a logging pro
                                   restarts serve (systemctl --user / launchctl kickstart)
     facet send [--later] <text>  put a message into the conversation (--later: a turn of its own)
     facet push <text>          push to Telegram
-    facet spawn [--model M] [--kind general-purpose|explore] [--desc D] <task>
+    facet spawn [--model M] [--effort E] [--kind general-purpose|explore] [--desc D] <task>
                                 a subagent that outlives this turn (21): returns its id at
                                   once; its report arrives later, as a message of its own
     facet status               where everything stands

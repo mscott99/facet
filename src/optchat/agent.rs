@@ -40,7 +40,7 @@ fn new_id() -> String {
 /// (`chat.agent_model`); `kind` "explore" gets the read-only toolset, anything else (including
 /// empty, taken as "general-purpose") gets Edit/Write too. Returns its id at once: the caller
 /// (the CLI, `facet spawn`) does not wait on it.
-pub fn spawn(e: &Arc<Engine>, model: &str, kind: &str, desc: &str, task: &str) -> Result<String, String> {
+pub fn spawn(e: &Arc<Engine>, model: &str, effort: &str, kind: &str, desc: &str, task: &str) -> Result<String, String> {
     let task = task.trim();
     if task.is_empty() { return Err("empty task".into()) }
     let model = if model.trim().is_empty() { e.conf.agent_model.clone() } else { model.trim().to_string() };
@@ -55,7 +55,7 @@ pub fn spawn(e: &Arc<Engine>, model: &str, kind: &str, desc: &str, task: &str) -
 
     let read = "Bash,Read,Glob,Grep,WebFetch,WebSearch,mcp__optchat__zoom,mcp__optchat__date";
     let tools = if kind == "explore" { read.to_string() } else { format!("{},Edit,Write", read) };
-    let mut args = claude::base_args(&model, "", &sysf.to_string_lossy(), &tools);
+    let mut args = claude::base_args(&model, effort.trim(), &sysf.to_string_lossy(), &tools);
     // the read-only path: zoom and date, never the master's send_chat / answer_card
     let url = super::mcp::agent_url(&e.mcp_url.get().cloned().unwrap_or_default());
     let mcp = json!({"mcpServers": {"optchat": {"type": "http", "url": url}}});

@@ -49,7 +49,7 @@ what it found and where that came from. Send it in the foreground
 (run_in_background false) when you need what it finds to finish what
 you are doing: a backgrounded one is killed the moment your reply ends
 (Claude Code's own doing, not yours), so its report rarely comes back.
-For work that should outlive this turn, use `facet spawn [--model M]
+For work that should outlive this turn, use `facet spawn [--model M] [--effort E]
 [--kind general-purpose|explore] [--desc D]` with Bash instead, giving
 the task on stdin through a quoted heredoc (`facet spawn --model sonnet
 --desc D - <<'EOF'` ... `EOF`; `--task-file PATH` also works), so the
