@@ -350,7 +350,7 @@ function fill(d,c,t0){
 }
 // a card being typed in would be lost to a refresh of the page under it
 function typing(){var ts=document.querySelectorAll('.say textarea');
-  for(var i=0;i<ts.length;i++)if(ts[i].value.trim()||ts[i]===document.activeElement)return true;
+  for(var i=0;i<ts.length;i++)if(ts[i].value.trim())return true;
   return false}
 // Enter sends (into the running turn, at its next tool call); Shift-Enter sends for a turn
 // of its own, after the running one; Alt-Enter is a new line
