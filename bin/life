@@ -270,6 +270,16 @@ def cmd_secret(a):
     return linux().cmd_secret(a)
 
 
+def linux_zot(a):
+    return getattr(linux(), a.fn.__name__)(a)
+
+
+def cmd_zot_search(a): pass
+def cmd_zot_show(a): pass
+def cmd_zot_match(a): pass
+def cmd_zot_sync(a): pass
+
+
 def cmd_cal_delete(a):
     sys.exit("life: cal delete needs the Linux backend (Google service account)")
 
@@ -365,6 +375,20 @@ def main():
     s.add_argument("--check", default=None, help="gmail | imap:ACCOUNT: IMAP login, prints OK/FAIL only")
     s.set_defaults(fn=cmd_secret)
 
+    z = sub.add_parser("zot", help="read-only Zotero (Web API; Linux): search, show, match, sync").add_subparsers(dest="c", required=True)
+    s = z.add_parser("search", help="query words (all must appear) over title/author/abstract/venue/tags/bibkey")
+    s.add_argument("query", nargs="*"); s.add_argument("--author"); s.add_argument("--title"); s.add_argument("--tag")
+    s.add_argument("--year"); s.add_argument("-n", type=int, default=25); s.add_argument("--refresh", action="store_true")
+    s.set_defaults(fn=cmd_zot_search)
+    s = z.add_parser("show", help="one item by Zotero key or bibkey: metadata, abstract, notes, attachments")
+    s.add_argument("id"); s.add_argument("--bibtex", action="store_true", help="only the BibTeX entry (BBT key kept)")
+    s.add_argument("--chars", type=int, default=2000, help="per child note"); s.set_defaults(fn=cmd_zot_show)
+    s = z.add_parser("match", help="bib entries / @citekey notes vs library, both directions")
+    s.add_argument("--bib", help="default <vault>/mybib.bib"); s.add_argument("-n", type=int, default=20, help="unmatched library items to list")
+    s.set_defaults(fn=cmd_zot_match)
+    s = z.add_parser("sync", help="update the local cache (~/.cache/life/zotero.json)")
+    s.add_argument("--force", action="store_true"); s.set_defaults(fn=cmd_zot_sync)
+
     w = sub.add_parser("web").add_subparsers(dest="c", required=True)
     s = w.add_parser("get"); s.add_argument("url"); s.add_argument("--chars", type=int, default=6000)
     s.add_argument("--raw", action="store_true"); s.add_argument("--timeout", type=int, default=25); s.set_defaults(fn=cmd_web_get)
@@ -375,6 +399,8 @@ def main():
     s = w.add_parser("tabs"); s.add_argument("--browser", default="Google Chrome"); s.set_defaults(fn=cmd_web_tabs)
 
     a = p.parse_args()
+    if a.top == "zot":
+        return linux_zot(a)
     if sys.platform != "darwin" and getattr(a, "fn", None) is cmd_cal_delete:
         return linux().cmd_cal_delete(a)
     if sys.platform != "darwin":

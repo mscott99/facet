@@ -3,7 +3,7 @@
 Stdlib only. Config: ~/.config/life/accounts.json (override with $LIFE_CONFIG), chmod 600.
 Loaded by bin/life when not on macOS; the macOS paths live in bin/life itself.
 """
-import email, imaplib, json, os, re, smtplib, ssl, subprocess, sys, urllib.parse, urllib.request
+import email, imaplib, json, os, re, smtplib, ssl, subprocess, sys, urllib.error, urllib.parse, urllib.request
 from datetime import date, datetime, timedelta, timezone
 from email import policy
 from email.message import EmailMessage
@@ -954,3 +954,337 @@ def cmd_cal_delete(a):
         print(("deleted: " if a.yes else "would delete: ") + f"{when}  {e.get('summary') or '(untitled)'}")
     if not a.yes:
         print(f"{len(hits)} match(es); dry run, add --yes to delete")
+
+
+# ---------------------------------------------------------------- zotero (read-only)
+ZOT = "https://api.zotero.org"
+ZOT_NOTE = re.compile(r"<[^>]+>")
+
+
+def zot_cache_path():
+    return os.environ.get("LIFE_ZOTERO_CACHE") or os.path.expanduser("~/.cache/life/zotero.json")
+
+
+def zot_creds():
+    d = os.path.dirname(config_path())
+    return _secret(os.path.join(d, "zotero_api_key")), _secret(os.path.join(d, "zotero_user_id"))
+
+
+def zot_get(path, params=None, key=None):
+    """GET one page from the Zotero API; the key goes in a header only. Returns (json, headers)."""
+    q = ("?" + urllib.parse.urlencode(params)) if params else ""
+    req = urllib.request.Request(ZOT + path + q, headers={"Zotero-API-Key": key, "Zotero-API-Version": "3"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read().decode("utf-8")), r.headers
+    except urllib.error.HTTPError as e:
+        sys.exit(f"life: zotero {path} -> HTTP {e.code}")
+
+
+def zot_sync(force=False):
+    """Bring the local copy of the library (top-level items, with BibTeX) up to date.
+    Uses `since=<last version>`; items deleted remotely are dropped via /deleted."""
+    key, uid = zot_creds()
+    p = zot_cache_path()
+    cache = {"version": 0, "items": {}}
+    if not force and os.path.exists(p):
+        try:
+            cache = json.load(open(p))
+        except ValueError:
+            pass
+    base = f"/users/{uid}"
+    _, h = zot_get(base + "/items/top", {"limit": 1, "format": "versions"}, key)
+    remote = int(h.get("Last-Modified-Version") or 0)
+    if cache["version"] and remote == cache["version"]:
+        return cache
+    start = 0
+    while True:
+        params = {"limit": 100, "start": start, "include": "data,bibtex"}
+        if cache["version"]:
+            params["since"] = cache["version"]
+        rows, h = zot_get(base + "/items/top", params, key)
+        for r in rows:
+            cache["items"][r["key"]] = {"data": r["data"], "bibtex": (r.get("bibtex") or "").strip(),
+                                        "meta": r.get("meta", {})}
+        start += len(rows)
+        if not rows or start >= int(h.get("Total-Results") or 0):
+            break
+    if cache["version"]:
+        gone, _ = zot_get(base + "/deleted", {"since": cache["version"]}, key)
+        for k in gone.get("items", []):
+            cache["items"].pop(k, None)
+    cache["version"] = remote
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cache, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
+    return cache
+
+
+def zot_bibkey(d):
+    """Better BibTeX key of an item: the `citationKey` field, else `Citation Key: x` in extra."""
+    if d.get("citationKey"):
+        return d["citationKey"]
+    m = re.search(r"^\s*Citation Key:\s*(\S+)", d.get("extra", ""), re.M | re.I)
+    return m.group(1) if m else ""
+
+
+def zot_authors(d):
+    out = []
+    for c in d.get("creators", []):
+        if c.get("creatorType") in ("author", "editor", None, ""):
+            out.append(c.get("lastName") or c.get("name") or "")
+    return [x for x in out if x]
+
+
+def zot_year(d):
+    m = re.search(r"(1[5-9]|20)\d\d", d.get("date", ""))
+    return m.group(0) if m else ""
+
+
+def zot_line(k, it):
+    d = it["data"]
+    au = zot_authors(d)
+    first = (au[0] + (" et al." if len(au) > 1 else "")) if au else "-"
+    return f"{zot_bibkey(d) or '-'}  {first}  {zot_year(d) or '-'}  {d.get('title', '')}  [{k}]"
+
+
+def zot_match_item(items, ident):
+    """Item by Zotero key or bibkey (exact, then case-insensitive)."""
+    if ident in items:
+        return ident
+    for k, it in items.items():
+        if zot_bibkey(it["data"]) == ident:
+            return k
+    for k, it in items.items():
+        if zot_bibkey(it["data"]).lower() == ident.lower():
+            return k
+    return None
+
+
+def zot_search_items(items, query="", author=None, title=None, tag=None, year=None):
+    """Free-text search over the cache (title, creators, tags, abstract, venue, bibkey, DOI), AND of the terms."""
+    out = []
+    for k, it in items.items():
+        d = it["data"]
+        if d.get("itemType") in ("attachment", "note"):
+            continue
+        hay = " ".join([d.get("title", ""), " ".join(zot_authors(d)), d.get("abstractNote", ""),
+                        d.get("publicationTitle", ""), zot_bibkey(d), d.get("DOI", ""),
+                        " ".join(t.get("tag", "") for t in d.get("tags", []))]).lower()
+        if query and not all(w in hay for w in query.lower().split()):
+            continue
+        if author and author.lower() not in " ".join(
+                (c.get("lastName", "") + " " + c.get("firstName", "") + " " + c.get("name", "")) for c in d.get("creators", [])).lower():
+            continue
+        if title and title.lower() not in d.get("title", "").lower():
+            continue
+        if tag and tag.lower() not in [t.get("tag", "").lower() for t in d.get("tags", [])]:
+            continue
+        if year and zot_year(d) != str(year):
+            continue
+        out.append((k, it))
+    out.sort(key=lambda kv: (zot_year(kv[1]["data"]), kv[0]), reverse=True)
+    return out
+
+
+def cmd_zot_search(a):
+    cache = zot_sync(force=getattr(a, "refresh", False))
+    rows = zot_search_items(cache["items"], " ".join(a.query or []), a.author, a.title, a.tag, a.year)
+    for k, it in rows[:a.n]:
+        print(zot_line(k, it))
+    if len(rows) > a.n:
+        print(f"... {len(rows) - a.n} more (-n)")
+    if not rows:
+        print("(no matches)")
+
+
+def zot_children(key_id, ident):
+    key, uid = zot_creds()
+    rows, _ = zot_get(f"/users/{uid}/items/{ident}/children", {"limit": 100}, key)
+    return rows
+
+
+def zot_note_text(html):
+    t = re.sub(r"</(p|div|li|h\d)>|<br\s*/?>", "\n", html)
+    t = ZOT_NOTE.sub("", t)
+    return re.sub(r"\n{3,}", "\n\n", t.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")).strip()
+
+
+def cmd_zot_show(a):
+    cache = zot_sync()
+    k = zot_match_item(cache["items"], a.id)
+    if not k:
+        sys.exit(f"life: no Zotero item with key or bibkey {a.id!r}")
+    it = cache["items"][k]
+    d = it["data"]
+    if a.bibtex:
+        print(zot_bibtex(it))
+        return
+    print(f"{d.get('title', '')}")
+    print(f"  key: {k}   bibkey: {zot_bibkey(d) or '-'}   type: {d.get('itemType')}")
+    print(f"  authors: {'; '.join((c.get('lastName', '') + ', ' + c.get('firstName', '')).strip(', ') or c.get('name', '') for c in d.get('creators', [])) or '-'}")
+    for f, lab in (("date", "date"), ("publicationTitle", "venue"), ("DOI", "doi"), ("url", "url"),
+                   ("volume", "volume"), ("issue", "issue"), ("pages", "pages")):
+        if d.get(f):
+            print(f"  {lab}: {d[f]}")
+    if d.get("tags"):
+        print("  tags: " + ", ".join(t.get("tag", "") for t in d["tags"]))
+    if d.get("abstractNote"):
+        print("  abstract: " + d["abstractNote"])
+    if it["meta"].get("numChildren"):
+        for c in zot_children(None, k):
+            cd = c["data"]
+            if cd.get("itemType") == "note":
+                print(f"  note [{cd['key']}]: " + zot_note_text(cd.get("note", ""))[:a.chars].replace("\n", "\n    "))
+            elif cd.get("itemType") == "attachment":
+                print(f"  attachment [{cd['key']}]: {cd.get('title') or cd.get('filename') or ''} ({cd.get('contentType', '?')})"
+                      + (f" {cd['url']}" if cd.get("url") else ""))
+
+
+def zot_bibtex(it):
+    """The API's BibTeX for the item, with the BBT key swapped in when known."""
+    bt = it.get("bibtex", "")
+    key = zot_bibkey(it["data"])
+    if key:
+        bt = re.sub(r"^(@\w+\{)[^,]*,", lambda m: m.group(1) + key + ",", bt, count=1)
+    return bt
+
+
+# --- bibkey <-> library matching
+def norm(s):
+    s = re.sub(r"[{}\\$]", "", s or "").lower()
+    s = re.sub(r"\b(the|a|an|of|on|in|for|and)\b", " ", s)
+    return re.sub(r"[^a-z0-9]+", "", s)
+
+
+def parse_bib(path):
+    """Minimal .bib reader: [{key, title, year, doi}]. Handles nested braces/quotes in simple field values."""
+    text = open(path, encoding="utf-8", errors="replace").read()
+    out = []
+    for m in re.finditer(r"^@(\w+)\s*\{\s*([^,\s]+)\s*,", text, re.M):
+        if m.group(1).lower() in ("comment", "string", "preamble"):
+            continue
+        i, depth = m.end(), 1
+        while i < len(text) and depth:
+            depth += {"{": 1, "}": -1}.get(text[i], 0)
+            i += 1
+        body = text[m.end():i]
+        def field(n):
+            fm = re.search(r"^\s*" + n + r"\s*=\s*", body, re.M | re.I)
+            if not fm:
+                return ""
+            j = fm.end()
+            if body[j] == "{":
+                dp, k2 = 1, j + 1
+                while k2 < len(body) and dp:
+                    dp += {"{": 1, "}": -1}.get(body[k2], 0)
+                    k2 += 1
+                return body[j + 1:k2 - 1]
+            if body[j] == '"':
+                return body[j + 1:body.index('"', j + 1)]
+            return re.match(r"[^,\n]*", body[j:]).group(0).strip()
+        out.append({"key": m.group(2), "title": field("title"), "year": field("year"), "doi": field("doi").lower()})
+    return out
+
+
+def link_keys(vault):
+    """Citekeys that have a literature note: References/**/@key.md."""
+    keys = {}
+    for root, _, files in os.walk(os.path.join(vault, "References")):
+        for f in files:
+            if f.startswith("@") and f.endswith(".md"):
+                keys[f[1:-3]] = os.path.join(root, f)
+    return keys
+
+
+def note_meta(path):
+    """title/year/doi from a LinkFile's frontmatter (best effort)."""
+    try:
+        head = open(path, encoding="utf-8", errors="replace").read(2000)
+    except OSError:
+        return {}
+    fm = re.match(r"---\n(.*?)\n---", head, re.S)
+    out = {}
+    for k in ("title", "year", "DOI", "doi"):
+        m = re.search(r"^" + k + r':\s*"?(.*?)"?\s*$', fm.group(1) if fm else "", re.M)
+        if m:
+            out[k.lower()] = m.group(1)
+    return out
+
+
+def zot_vault(cfg):
+    return os.path.expanduser(cfg.get("zotero", {}).get("vault", "~/Obsidian/myVault"))
+
+
+def zot_index(items):
+    by_key, by_doi, by_ty = {}, {}, {}
+    for k, it in items.items():
+        d = it["data"]
+        if d.get("itemType") in ("attachment", "note"):
+            continue
+        if zot_bibkey(d):
+            by_key.setdefault(zot_bibkey(d), k)
+        if d.get("DOI"):
+            by_doi.setdefault(d["DOI"].lower(), k)
+        by_ty.setdefault((norm(d.get("title")), zot_year(d)), k)
+    return by_key, by_doi, by_ty
+
+
+def zot_match(items, entries):
+    """entries: [{key,title,year,doi}] -> ({entry key: item key}, [unmatched entry keys], how)."""
+    by_key, by_doi, by_ty = zot_index(items)
+    got, miss, how = {}, [], {}
+    for e in entries:
+        k, w = by_key.get(e["key"]), "key"
+        if not k and e.get("doi"):
+            k, w = by_doi.get(e["doi"].lower()), "doi"
+        if not k and e.get("title"):
+            k, w = by_ty.get((norm(e["title"]), e.get("year", ""))), "title+year"
+        if k:
+            got[e["key"]], how[e["key"]] = k, w
+        else:
+            miss.append(e["key"])
+    return got, miss, how
+
+
+def cmd_zot_match(a):
+    cfg = load_config()
+    cache = zot_sync()
+    items = cache["items"]
+    vault = zot_vault(cfg)
+    bib = a.bib or os.path.join(vault, "mybib.bib")
+    entries = parse_bib(bib)
+    lk = link_keys(vault)
+    seen = {e["key"] for e in entries}
+    link_entries = [dict(key=k, **{f: v for f, v in note_meta(p).items() if f in ("title", "year", "doi")})
+                    for k, p in lk.items() if k not in seen]
+    got, miss, how = zot_match(items, entries)
+    lgot, lmiss, lhow = zot_match(items, link_entries)
+    n_lib = sum(1 for it in items.values() if it["data"].get("itemType") not in ("attachment", "note"))
+    print(f"library: {n_lib} items (v{cache['version']}); {bib}: {len(entries)} entries; "
+          f"{len(lk)} @citekey notes under References/")
+    print(f"bib entries matched: {len(got)}/{len(entries)}  (by key {sum(1 for v in how.values() if v == 'key')}, "
+          f"doi {sum(1 for v in how.values() if v == 'doi')}, title+year {sum(1 for v in how.values() if v == 'title+year')})")
+    for k in miss:
+        print(f"  bib, no library item: {k}")
+    for k, v in how.items():
+        if v != "key":
+            print(f"  bib {k} -> {got[k]} (by {v}; library bibkey {zot_bibkey(items[got[k]]['data']) or '-'})")
+    print(f"@citekey notes (not in bib) matched: {len(lgot)}/{len(link_entries)}")
+    for k in lmiss:
+        print(f"  note, no library item: {k}")
+    used = set(got.values()) | set(lgot.values())
+    unused = [(k, it) for k, it in items.items() if k not in used and it["data"].get("itemType") not in ("attachment", "note")]
+    print(f"library items with no bib entry or @citekey note: {len(unused)}")
+    for k, it in unused[:a.n]:
+        print("  " + zot_line(k, it))
+    if len(unused) > a.n:
+        print(f"  ... {len(unused) - a.n} more (-n)")
+
+
+def cmd_zot_sync(a):
+    c = zot_sync(force=a.force)
+    print(f"zotero cache: {len(c['items'])} top-level items, library version {c['version']} ({zot_cache_path()})")

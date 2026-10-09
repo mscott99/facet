@@ -335,5 +335,90 @@ class SecretAndDelete(unittest.TestCase):
             self.assertTrue(dl.call_args[0][1].endswith("/e1"))
 
 
+class ZoteroTest(unittest.TestCase):
+    def item(self, key, title, cite="", doi="", year="2020", last="Smith", extra=""):
+        d = {"key": key, "itemType": "journalArticle", "title": title, "date": year, "DOI": doi, "extra": extra,
+             "creators": [{"creatorType": "author", "firstName": "A", "lastName": last}], "tags": [{"tag": "cs"}]}
+        if cite:
+            d["citationKey"] = cite
+        return {"key": key, "data": d, "meta": {}, "bibtex": "@article{zoteroKey,\n title = {%s}\n}" % title}
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        os.environ["LIFE_ZOTERO_CACHE"] = os.path.join(self.d, "z.json")
+        os.environ["LIFE_CONFIG"] = os.path.join(self.d, "accounts.json")
+        json.dump({"zotero": {"vault": self.d}}, open(os.environ["LIFE_CONFIG"], "w"))
+        open(os.path.join(self.d, "zotero_api_key"), "w").write("SECRETKEY\n")
+        open(os.path.join(self.d, "zotero_user_id"), "w").write("1\n")
+        self.lib = [self.item("K1", "Gaussian recovery", cite="smithGaussianRecovery2020", doi="10.1/x"),
+                    self.item("K2", "A Note on Cones", extra="Citation Key: jonesNoteCones2019\nfoo", year="2019", last="Jones"),
+                    self.item("K3", "Unkeyed paper", year="2018", last="Lee")]
+        self.calls = []
+
+    def fake_get(self, path, params=None, key=None):
+        self.calls.append((path, dict(params or {}), key))
+        self.assertNotIn("SECRETKEY", path + json.dumps(params or {}))
+        h = {"Last-Modified-Version": "5", "Total-Results": str(len(self.lib))}
+        if path.endswith("/deleted"):
+            return {"items": ["K3"]}, h
+        if params.get("format") == "versions":
+            return {}, h
+        s, n = params["start"], params["limit"]
+        return self.lib[s:s + n], h
+
+    def run_cmd(self, fn, **kw):
+        out = io.StringIO()
+        with mock.patch.object(L, "zot_get", self.fake_get), contextlib.redirect_stdout(out):
+            fn(argparse.Namespace(**kw))
+        return out.getvalue()
+
+    def test_search_show_cache(self):
+        out = self.run_cmd(L.cmd_zot_search, query=["gaussian"], author=None, title=None, tag=None, year=None, n=10)
+        self.assertIn("smithGaussianRecovery2020  Smith  2020  Gaussian recovery  [K1]", out)
+        self.assertNotIn("Unkeyed", out)
+        n = len(self.calls)
+        out = self.run_cmd(L.cmd_zot_search, query=[], author="jones", title=None, tag=None, year=None, n=10)
+        self.assertIn("jonesNoteCones2019", out)          # BBT key read from `extra`
+        self.assertEqual(len(self.calls), n + 1)            # only the version probe: cache is used
+        for c in self.calls:
+            self.assertEqual(c[2], "SECRETKEY")             # key travels as a parameter to the header sender only
+        out = self.run_cmd(L.cmd_zot_search, query=[], author=None, title=None, tag="CS", year="2018", n=10)
+        self.assertIn("Unkeyed", out)
+
+    def test_incremental_and_deleted(self):
+        self.run_cmd(L.cmd_zot_sync, force=False)
+        self.lib = [self.item("K4", "New one")]
+        with mock.patch.object(L, "zot_get", self.fake_get) as _:
+            pass
+        def bump(path, params=None, key=None):
+            r, h = self.fake_get(path, params, key); h["Last-Modified-Version"] = "6"; return r, h
+        with mock.patch.object(L, "zot_get", bump):
+            c = L.zot_sync()
+        self.assertIn("K4", c["items"]); self.assertNotIn("K3", c["items"]); self.assertEqual(c["version"], 6)
+        self.assertEqual([x for x in self.calls if "since" in x[1] and "include" in x[1]][0][1]["since"], 5)
+
+    def test_show_bibtex_keeps_bbt_key(self):
+        out = self.run_cmd(L.cmd_zot_show, id="smithgaussianrecovery2020", bibtex=True, chars=100)
+        self.assertTrue(out.startswith("@article{smithGaussianRecovery2020,"))
+        out = self.run_cmd(L.cmd_zot_show, id="K2", bibtex=False, chars=100)
+        self.assertIn("bibkey: jonesNoteCones2019", out)
+
+    def test_match(self):
+        open(os.path.join(self.d, "mybib.bib"), "w").write(
+            "@article{smithGaussianRecovery2020,\n title = {Gaussian recovery},\n year = {2020}\n}\n"
+            "@article{oldKey,\n title = {A note on {C}ones},\n year = {2019}\n}\n"
+            "@article{viaDoi,\n title = {zzz},\n doi = {10.1/X}\n}\n"
+            "@article{ghost,\n title = {Nothing}, year = {1999}\n}\n")
+        os.makedirs(os.path.join(self.d, "References", "LinkFiles"))
+        open(os.path.join(self.d, "References", "LinkFiles", "@leeUnkeyed.md"), "w").write(
+            '---\ntitle: "Unkeyed paper"\nyear: 2018\n---\n')
+        out = self.run_cmd(L.cmd_zot_match, bib=None, n=5)
+        self.assertIn("bib entries matched: 3/4", out)
+        self.assertIn("bib, no library item: ghost", out)
+        self.assertIn("oldKey -> K2 (by title+year", out)
+        self.assertIn("@citekey notes (not in bib) matched: 1/1", out)
+        self.assertNotIn("SECRETKEY", out)
+
+
 if __name__ == "__main__":
     unittest.main()

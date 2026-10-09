@@ -119,6 +119,18 @@ copy `bin/life.accounts.example.json`.
   `== subject [N msgs, account]` then per message `-- <id> <date> <from> -> <to>` and the body with quoted replies
   (`>` lines, `On ... wrote:` tails, Outlook headers) removed; `--full` keeps them. Bare logins (e.g. `matthewscott`)
   count as "me" as `login@<imap domain>`; add `"aliases": [...]` to an account for others.
+- `life zot ...`: **read-only** Zotero via the Web API (stdlib; key `~/.config/life/zotero_api_key`, user id
+  `zotero_user_id`, sent only as the `Zotero-API-Key` header; never writes). Library cached in
+  `~/.cache/life/zotero.json`, refreshed incrementally (`since=<Last-Modified-Version>`, `/deleted`, 100 per page).
+  - `zot search [WORDS...] [--author A] [--title T] [--tag TAG] [--year Y] [-n N]`: one line per item,
+    `bibkey  first author  year  title  [item key]` (words are ANDed over title/authors/abstract/venue/tags/bibkey).
+  - `zot show ID [--bibtex] [--chars N]`: ID = item key or bibkey; metadata, DOI/URL, abstract, child notes, attachments.
+    `--bibtex` prints just the API's BibTeX with the Better BibTeX key swapped in.
+  - `zot match [--bib FILE] [-n N]`: bib entries (default `<vault>/mybib.bib`, vault from `"zotero": {"vault": ...}`,
+    default `~/Obsidian/myVault`) and `References/**/@key.md` notes vs the library. Order: BBT key (`citationKey` field or
+    `Citation Key:` in `extra`), then DOI, then normalised title+year. Lists what has no library item, and library items
+    with no bib entry or note.
+  - `zot sync [--force]`: just update the cache.
 - Tests: `python3 tests/life_test.py` (fake ICS, fake IMAP/SMTP; no network).
 
 A Linux box (the Hetzner one this branch was built against: Ubuntu 24.04 x86, cloned at
