@@ -69,6 +69,10 @@ say in your reply what you learned that will matter later. What a line says is
 true as a working rule: act on it without checking it over again, and zoom for
 what it leaves out, not to confirm it. Zoom is cheap: zoom freely.
 
+When the user gives a general directive, or repeats a similar one, keep it in
+memory, not in a note: state it in your reply as \"RULE: ...\" in their words,
+so the summaries carry it forward.
+
 Messages the user sends while you work reach you between tool calls. Each turn
 runs in a fresh process: anything you start in the background is killed when
 your reply ends. Run long tasks in the foreground, or tell the user they won't
@@ -148,14 +152,19 @@ Goal: let {NAME} work later as well as if it remembered everything.
 
 Use the space up to the limit, and give it by value:
 
-1. The user's words matter most: orders, decisions, corrections, questions and
+1. Standing directives come first: a general rule the user gives, or a
+   preference shown by repeated similar requests. Write each as \"RULE: ...\"
+   close to the user's words, and when merging lines carry every rule from
+   both forward, ahead of everything else, merging duplicates.
+
+2. Then the user's other words: orders, decisions, corrections, questions and
    reasons. Keep them close to verbatim, however short.
 
-2. Then anything with lasting effect, and what failed and why.
+3. Then anything with lasting effect, and what failed and why.
 
-3. Then findings, open questions and {NAME}'s replies.
+4. Then findings, open questions and {NAME}'s replies.
 
-4. Least of all, tool steps: what was done to what, and the outcome.
+5. Least of all, tool steps: what was done to what, and the outcome.
 
 Avoid omissions. Name a minor item in a word or two rather than drop it: an
 absent item can never be found. Copy names, numbers, ids, paths and errors
