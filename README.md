@@ -273,7 +273,8 @@ kind?, fix?}`, `answer_card {id, text, fix?}`, `fix_card {id, fix}`, `close_card
 `list_cards {note?}`; a detached subagent (`facet spawn`) is given `/<secret>/agent`, which
 lists and serves `zoom` and `date` only, and Task subagents' definitions leave the output tools
 out of their tool lists.
-Zoom and date leave no trace in the stream (no step, no result): their content is already memory.
+Zoom and date are logged like any tool, call and result, as in the gist: what was just recalled
+is fresh in the log, where the next turns are likely to need it again.
 
 ### cards
 
