@@ -249,6 +249,45 @@ function live(){
       },function(e){if(gen==LS&&!(e&&e.name=='AbortError'))setTimeout(go,5000)});
   })();
 }
+// A swapped note must not move under the reader: before the swap, remember the block nearest the
+// viewport centre (its text, source line, offset from the viewport top); after it, and again as
+// maths/images/embeds settle, scroll so that block sits where it was. A scroll by the user ends it.
+function anchorTake(){
+  var w=document.getElementById('docwrap');if(!w)return null;
+  var els=w.querySelectorAll('[data-line]'),cy=innerHeight/2,best=null,bd=1e9;
+  for(var i=0;i<els.length;i++){var r=els[i].getBoundingClientRect();
+    if(r.height==0)continue;
+    var d=r.top<=cy&&r.bottom>=cy?0:Math.min(Math.abs(r.top-cy),Math.abs(r.bottom-cy));
+    if(d<bd||(d==bd&&best&&r.height<best.r.height)){bd=d;best={e:els[i],r:r}}}
+  if(!best)return null;
+  return {note:best.e.dataset.note,line:+best.e.dataset.line,tag:best.e.tagName,
+    txt:best.e.textContent.replace(/\s+/g,'').slice(0,60),top:best.r.top}}
+function anchorPut(a){
+  if(!a)return;
+  var w=document.getElementById('docwrap');if(!w)return;
+  var els=w.querySelectorAll('[data-line]'),pick=null,pd=1e9;
+  for(var i=0;i<els.length;i++){var e=els[i];
+    if(e.dataset.note!=a.note||e.tagName!=a.tag)continue;
+    var t=e.textContent.replace(/\s+/g,'').slice(0,60);
+    var d=Math.abs(+e.dataset.line-a.line)+(t==a.txt&&a.txt?0:1e5);
+    if(d<pd){pd=d;pick=e}}
+  // the anchored block itself was edited: fall back to the same line, else leave the scroll
+  if(!pick||pd>=1e5){
+    pick=null;for(var i=0;i<els.length;i++)if(els[i].dataset.note==a.note&&+els[i].dataset.line==a.line){pick=els[i];break}}
+  if(!pick)return;
+  var live=true,ro=null;
+  function fix(){if(!live)return;
+    var dy=pick.getBoundingClientRect().top-a.top;
+    if(Math.abs(dy)>1)scrollBy(0,dy)}
+  function stop(){live=false;if(ro)ro.disconnect();
+    removeEventListener('wheel',stop);removeEventListener('touchstart',stop);removeEventListener('keydown',stop)}
+  fix();
+  addEventListener('wheel',stop,{passive:true});addEventListener('touchstart',stop,{passive:true});
+  addEventListener('keydown',stop);
+  if(window.ResizeObserver){ro=new ResizeObserver(fix);ro.observe(w)}
+  w.querySelectorAll('img,iframe').forEach(function(x){x.addEventListener('load',fix,{once:true})});
+  var n=0;(function tick(){if(!live)return;fix();if(++n<60)requestAnimationFrame(tick);else stop()})();
+}
 function docLive(){
   var gen=++DL;if(DC)DC.abort();
   (function go(){
@@ -261,7 +300,7 @@ function docLive(){
         if(gen!=DL)return;
         // a box being typed in would be lost to the swap: wait it out
         if(h&&typing())return setTimeout(go,3000);
-        if(h){w.outerHTML=h;var nw=document.getElementById('docwrap');diffApply();mathify(nw);htmx.process(nw);CV=0;cardLive()}
+        if(h){var an=anchorTake();w.outerHTML=h;var nw=document.getElementById('docwrap');diffApply();mathify(nw);htmx.process(nw);anchorPut(an);CV=0;cardLive()}
         go();
       },function(e){if(gen==DL&&!(e&&e.name=='AbortError'))setTimeout(go,5000)});
   })();
