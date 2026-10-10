@@ -123,6 +123,18 @@ body{overflow-anchor:none}
    would land on — never on touch, where there is no hover and every tap would light up. */
 @media (hover:hover){p[data-line]:hover,li[data-line]:hover,blockquote[data-line]:hover,
  h1[data-line]:hover,h2[data-line]:hover,h3[data-line]:hover,h4[data-line]:hover{background:#ffffff08}}
+/* Source line numbers in the left margin, for talking about a paper by line. Desktop only:
+   a fine pointer and room beside the column. Drawn by ::before, so never selected or copied;
+   a block from an embedded note carries that note's own numbers, italic and dimmer. */
+@media (hover:hover) and (pointer:fine) and (min-width:56rem){
+ p[data-line],li[data-line],h1[data-line],h2[data-line],h3[data-line],h4[data-line],h5[data-line],h6[data-line],pre[data-line]{position:relative}
+ p[data-line]::before,li[data-line]::before,h1[data-line]::before,h2[data-line]::before,h3[data-line]::before,
+ h4[data-line]::before,h5[data-line]::before,h6[data-line]::before,pre[data-line]::before{
+  content:attr(data-line);position:absolute;left:-3.6rem;width:2.8rem;text-align:right;
+  font:10.5px/1.9 var(--mono);color:#5a5b60;opacity:.7;user-select:none;-webkit-user-select:none;pointer-events:none;font-weight:400;font-style:normal}
+ li>p[data-line]::before,blockquote>p[data-line]:not(:first-child)::before{content:none}
+ [data-emb][data-line]::before{font-style:italic;opacity:.45}
+}
 @media (max-width:30rem){body{font-size:16px}main{padding:.6rem .9rem 8rem}
  header{gap:.3rem .85rem;padding:.6rem .9rem}footer{padding:.6rem .9rem env(safe-area-inset-bottom)}}
 </style></head><body>
@@ -815,7 +827,7 @@ fn note_html(cfg: &Cfg, d: &doc::Doc) -> String {
     let lines: Vec<&str> = d.text.split('\n').collect();
     let skip = doc::front_len(&d.text);     // frontmatter is metadata, not prose
     let (text, srcs) = doc::assemble(cfg, &home_of(d), &lines[skip.min(lines.len())..], skip);
-    md::render_at(&text, &note_base(cfg), &srcs)
+    md::render_in(&text, &note_base(cfg), &srcs, &home_of(d))
 }
 
 /// One `#`-section of a note: what `[[Note#Section]]` asks for, as `?h=`. Its lines carry the
@@ -824,7 +836,7 @@ fn section_html(cfg: &Cfg, d: &doc::Doc, h: &str) -> String {
     let Some((s, start)) = doc::section_at(&d.text, h) else { return note_html(cfg, d) };
     let lines: Vec<&str> = s.split('\n').collect();
     let (text, srcs) = doc::assemble(cfg, &home_of(d), &lines, start - 1);
-    format!("<h2>{}</h2>{}", md::esc(h), md::render_at(&text, &note_base(cfg), &srcs))
+    format!("<h2>{}</h2>{}", md::esc(h), md::render_in(&text, &note_base(cfg), &srcs, &home_of(d)))
 }
 
 /// Any note of the vault, read-only, on the same page as a published one. Wikilinks in docs,

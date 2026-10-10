@@ -37,9 +37,16 @@ pub fn render(src: &str, note_base: &str) -> String {
 /// entry per line of `src`, see `doc::assemble`) — so a click anywhere in the page can name the
 /// line, and the note, it fell on, through however many embeds it took to get there.
 pub fn render_at(src: &str, note_base: &str, srcs: &[crate::doc::Src]) -> String {
+    render_in(src, note_base, srcs, "")
+}
+
+/// `render_at` for a page whose own note is `home`: blocks that came from another note (an
+/// embed) also get `data-emb`, so the line-number margin can show them in a distinct style.
+/// An empty `home` marks nothing.
+pub fn render_in(src: &str, note_base: &str, srcs: &[crate::doc::Src], home: &str) -> String {
     let mut o = opts();
     o.render.sourcepos = true;        // comrak stamps every block tag with its own source line
-    let html = mark_lines(&markdown_to_html(src, &o), srcs);
+    let html = mark_lines(&markdown_to_html(src, &o), srcs, home);
     let html = dim_glyphs(&wrap_embeds(&html));
     if note_base.is_empty() { return html }
     rewrite_links(&html, note_base)
@@ -118,7 +125,7 @@ fn dim_glyphs(html: &str) -> String {
 /// `data-line`/`data-note` a click handler reads — a line of the *assembled* text, mapped
 /// through `srcs` back to where it actually came from. A line past the end of `srcs` (should
 /// not happen; left defensive) just loses its tag rather than panic.
-fn mark_lines(html: &str, srcs: &[crate::doc::Src]) -> String {
+fn mark_lines(html: &str, srcs: &[crate::doc::Src], home: &str) -> String {
     const TAG: &str = " data-sourcepos=\"";
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
@@ -129,6 +136,7 @@ fn mark_lines(html: &str, srcs: &[crate::doc::Src]) -> String {
         let line: usize = tail[..q].split(':').next().and_then(|n| n.parse().ok()).unwrap_or(0);
         if let Some((note, n)) = line.checked_sub(1).and_then(|i| srcs.get(i)) {
             out.push_str(&format!(" data-line=\"{}\" data-note=\"{}\"", n, esc(note)));
+            if !home.is_empty() && note != home { out.push_str(" data-emb") }
         }
         rest = &tail[q + 1..];
     }
@@ -250,6 +258,14 @@ pub fn urldec(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_blocks_are_marked_for_the_margin() {
+        let srcs = vec![("Home".to_string(), 5), ("".to_string(), 0), ("Elsewhere".to_string(), 2)];
+        let html = render_in("first\n\nsecond", "", &srcs, "Home");
+        assert!(html.contains("data-line=\"5\" data-note=\"Home\">"), "{}", html);
+        assert!(html.contains("data-note=\"Elsewhere\" data-emb"), "{}", html);
+    }
 
     #[test]
     fn render_at_tags_each_block_with_its_source() {
