@@ -305,7 +305,7 @@ function card(b,o){
   // the button must not take the focus from the box (on a phone that would close the keyboard)
   go.addEventListener('pointerdown',function(e){e.preventDefault()});
   go.addEventListener('click',function(){submit(d)});
-  t.addEventListener('input',function(){fit(t)});
+  t.addEventListener('input',function(){t._sent=0;fit(t)});
   t.addEventListener('keydown',function(e){
     if(e.key=='Escape'){e.preventDefault();if(fresh(d))drop(d);else{t.value='';t.blur()}return}
     if(e.key!='Enter'||e.shiftKey||e.altKey||e.isComposing)return;
@@ -336,7 +336,7 @@ function submit(d){
   var t=d.querySelector('textarea'),said=t.value.trim(),cmp=d.querySelector('.cmp');
   if(!said){if(fresh(d))drop(d);return}
   var k=document.createElement('div');k.className='t pend';k.textContent=said;
-  grow(d,function(){d.querySelector('.th').appendChild(k);t.value='';fit(t)});
+  grow(d,function(){d.querySelector('.th').appendChild(k);t.value='';t._sent=1;fit(t)});
   cmp.classList.remove('bad');cmp.title='';
   post('/x/card','do=say&id='+d.dataset.id+'&note='+encodeURIComponent(d.dataset.note)+'&line='+d.dataset.line+
     '&quote='+encodeURIComponent(d._quote)+'&word='+encodeURIComponent(d._word||'')+'&col='+(d._col==null?-1:d._col)+'&text='+encodeURIComponent(said))
@@ -369,6 +369,7 @@ function cardLive(){
     fetch(TOK+'/f/cards?'+sc+'&wait=1&v='+CV,{signal:CC.signal})
       .then(function(r){return r.status==204?null:r.ok?r.json():Promise.reject(r.status)}).then(function(j){
         if(gen!=CG)return;
+        if(j&&typing())return setTimeout(go,1500);
         if(j){CV=j.v;CL=j.cards;place(j.cards,t0)}
         go();
       },function(e){if(gen==CG&&!(e&&e.name=='AbortError'))setTimeout(go,5000)});
@@ -435,10 +436,19 @@ function fill(d,c,t0){
     if(c.fix){fx.querySelector('pre').textContent=c.fix.text;
       fx.querySelector('.ap').addEventListener('click',function(){applyFix(d)})}}
 }
-// a card being typed in would be lost to a refresh of the page under it
+// a card being typed or dictated in would be lost to a refresh of the page under it, or to
+// cards moving around it. Dictation may leave the box empty until it is done, so a focused card
+// box holds updates too, except right after a send, until the next word goes in: then the
+// answer it waits for may come in.
 function typing(){var ts=document.querySelectorAll('.say textarea');
   for(var i=0;i<ts.length;i++)if(ts[i].value.trim())return true;
-  return false}
+  var a=document.activeElement;
+  return !!(a&&a.tagName=='TEXTAREA'&&a.closest('.say')&&!a._sent)}
+// what was held while typing comes in as soon as the box lets go
+document.addEventListener('focusout',function(e){
+  if(!e.target.closest||!e.target.closest('.say'))return;
+  setTimeout(function(){if(typing()||document.hidden)return;
+    if(document.getElementById('docwrap'))docLive();cardLive()},0)});
 // Enter sends (into the running turn, at its next tool call); Shift-Enter sends for a turn
 // of its own, after the running one; Alt-Enter is a new line
 document.addEventListener('keydown',function(e){
