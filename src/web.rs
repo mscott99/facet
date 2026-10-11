@@ -114,6 +114,9 @@ del.dm{color:var(--dim);text-decoration:line-through;text-decoration-thickness:1
 .say .cmp .go{flex:none;padding:.5rem .1rem;font:14px var(--mono);color:var(--acc)}
 .say .cmp .no{flex:none;padding:.5rem .1rem;font:14px var(--mono);background:none;border:0;cursor:pointer;color:var(--dim)}
 .say .cmp .no:hover{color:var(--err)}
+.say .cmp .kb{flex:none;align-self:center;font:11px var(--mono);color:var(--dim);border:1px solid var(--line);border-radius:3px;padding:0 .3rem;opacity:.7}
+.say .cmp .kb:empty{display:none}
+@media (pointer:coarse){.say .cmp .kb{display:none}}
 .say .cmp.bad textarea{outline:1px solid #c88}
 .say .t.pend{opacity:.4}
 .ctx{margin:2.2rem 0 .3rem}.ctx pre{margin:.3rem 0 0;white-space:pre-wrap}
@@ -236,6 +239,7 @@ function seenMark(){
   localStorage.chatseen=hi}
 function readNext(){
   if(!document.getElementById('tail')){scrollTo(0,1e7);return}
+  if(localStorage.chatseen==null){scrollTo(0,1e7);stick=true;return}
   var seen=+localStorage.chatseen||0,n=null;
   var ms=document.querySelectorAll('#log .msg.talk[data-i]');
   for(var j=0;j<ms.length;j++)if(+ms[j].dataset.i>seen){n=ms[j];break}
@@ -371,7 +375,7 @@ function card(b,o){
   var d=document.createElement('div');d.className='say '+(o.kind||'comment');
   d.dataset.id=o.id;d.dataset.note=o.note;d.dataset.line=o.line;
   d.innerHTML='<div class=hd><div class=q></div><button class=x type=button title=done aria-label=done>&times;</button></div>'+
-    '<div class=th></div><div class=fx hidden></div><div class=cmp><textarea rows=1></textarea><button class=go type=button>send</button><button class=no type=button>done</button></div>';
+    '<div class=th></div><div class=fx hidden></div><div class=cmp><span class=kb aria-hidden=true></span><textarea rows=1></textarea><button class=go type=button>send</button><button class=no type=button>done</button></div>';
   d._n=0;d._known=0;head(d,o);
   var t=d.querySelector('textarea'),go=d.querySelector('.go');
   var no=d.querySelector('.no');no.addEventListener('pointerdown',function(e){e.preventDefault()});
@@ -485,7 +489,24 @@ function place(cs,t0){
     if(d.querySelector('textarea').value.trim())return;
     var x=document.querySelector('.ctx[data-for="'+d.dataset.id+'"]');if(x)x.remove();d.remove()});
   var none=document.getElementById('none');if(none)none.hidden=!!document.querySelector('.say');
+  kbLabel();
 }
+// A letter beside each card's box: typing it, outside any box, focuses that box. Letters in page
+// order, skipping those the page already uses (d u j k g G scroll; Alt+C/N are tabs, with Alt).
+var KBL='abcefhilmnopqrstvwxyz';
+function kbLabel(){
+  var n=0;document.querySelectorAll('.say').forEach(function(d){
+    var k=d.querySelector('.cmp .kb');if(!k)return;
+    var l=n<KBL.length?KBL[n++]:'';d._kb=l;k.textContent=l;k.title=l?'press '+l+' to reply':''})}
+document.addEventListener('keydown',function(e){
+  if(e.defaultPrevented||e.ctrlKey||e.metaKey||e.altKey||e.shiftKey||e.isComposing||e.key.length!=1)return;
+  var t=e.target;
+  if(t&&(t.tagName=='TEXTAREA'||t.tagName=='INPUT'||t.tagName=='SELECT'||t.isContentEditable))return;
+  var l=e.key.toLowerCase(),c=null;
+  document.querySelectorAll('.say').forEach(function(d){if(!c&&d._kb&&d._kb==l)c=d});
+  if(!c)return;
+  e.preventDefault();var ta=c.querySelector('textarea');ta.focus();
+  var r=ta.getBoundingClientRect();if(r.top<0||r.bottom>innerHeight)ta.scrollIntoView({block:'center',behavior:'instant'})});
 // Bring one card up to the server's: its colour, its quote, the messages it does not show yet
 // (each in its place by index; a grey one of the user's firms up instead of showing twice),
 // and its fix.
