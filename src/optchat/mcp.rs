@@ -5,24 +5,24 @@
 // The master also gets the output tools (README, "Stream and venues"): send_chat, its only way
 // to speak in the chat venue, and the card tools (new_card, answer_card, fix_card, close_card;
 // list_cards only reads), its way to speak on a line of a note.
-// A detached subagent (`facet spawn`) is pointed at a second path of the same server, which
-// lists and serves zoom and date only: a subagent reports, it never speaks to the user. Task
-// subagents share the master's connection; their definitions (prompts::agents) leave the two
-// output tools out of their tool list.
+// A subagent (`facet spawn`) is pointed at a second path of the same server, which lists the
+// very same tools, byte for byte and in the same order, since the tool list is part of the
+// prefix it shares with the master (README §19); it refuses the ones that write (`WRITES`): a
+// subagent reports, it never speaks to the user or touches a card.
 use super::engine::Engine;
 use super::{flat, prompts};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::sync::Arc;
 
-pub fn tools(full: bool) -> Value {
+pub fn tools() -> Value {
     let mut t = json!([
         {"name": "zoom", "description": prompts::ZOOM_DOC,
          "inputSchema": {"type": "object", "properties": {"id": {"type": ["integer", "string"]}, "n": {"type": "integer"}}, "required": ["id"]}},
         {"name": "date", "description": prompts::DATE_DOC,
          "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}}
     ]);
-    if full {
+    {
         let a = t.as_array_mut().unwrap();
         a.push(json!({"name": "send_chat", "description": prompts::SEND_DOC,
             "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}));
@@ -50,6 +50,9 @@ pub fn tools(full: bool) -> Value {
 pub const SENT: &str = "sent";
 pub const ANSWERED: &str = "answered";
 
+/// The tools a subagent is refused: everything that speaks or changes a card.
+pub const WRITES: [&str; 5] = ["send_chat", "new_card", "answer_card", "fix_card", "close_card"];
+
 /// The card tools that speak (and so log themselves); `list_cards` only reads.
 pub fn card_action(tool: &str) -> Option<&'static str> {
     match tool {
@@ -58,7 +61,7 @@ pub fn card_action(tool: &str) -> Option<&'static str> {
     }
 }
 
-/// The path a detached subagent is given: the same server, read-only tools.
+/// The path a subagent is given: the same server and tool list, the writing tools refused.
 pub fn agent_url(master: &str) -> String {
     match master.strip_suffix("/mcp") { Some(b) => format!("{}/agent", b), None => master.to_string() }
 }
@@ -139,7 +142,8 @@ fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
             "serverInfo": {"name": "optchat", "version": "1"}
         }),
         "ping" => json!({}),
-        "tools/list" => json!({"tools": tools(full)}),
+        // one list for both paths: a subagent's tool list must be the master's (§19)
+        "tools/list" => json!({"tools": tools()}),
         "tools/call" => {
             let a = &v["params"]["arguments"];
             let num = |k: &str| a[k].as_i64().or_else(|| a[k].as_str().and_then(|s| s.trim().parse().ok()));
@@ -153,6 +157,8 @@ fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
                 }
             }
             let (text, err) = match v["params"]["name"].as_str().unwrap_or("") {
+                t if !full && WRITES.contains(&t) => (format!(
+                    "{} is refused: a subagent does not speak to the user or change cards. Put what you would say in your report.", t), true),
                 "zoom" => (match (num("id"), num("n")) {
                     (Some(i), Some(n)) => zoom(&e.mem.lock().unwrap().store, i, n),
                     // zoom("Name"): an agent's whole run (§6 of the gist)
@@ -161,11 +167,11 @@ fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
                 }, false),
                 "date" => (match num("id") { Some(i) => date(&e.mem.lock().unwrap().store, i), None => "date needs id.".into() }, false),
                 // the mem lock is not held here: logging takes it
-                "send_chat" if full => match super::engine::chat(e, &st("text")) {
+                "send_chat" => match super::engine::chat(e, &st("text")) {
                     Ok(()) => (SENT.into(), false),
                     Err(x) => (format!("send_chat failed: {}", x), true),
                 },
-                t if full && card_action(t).is_some() => {
+                t if card_action(t).is_some() => {
                     let mut q = a.clone();
                     if !q.is_object() { q = json!({}); }
                     q["do"] = card_action(t).unwrap().into();
@@ -192,13 +198,12 @@ fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
 mod tests {
     use super::*;
     #[test]
-    fn a_detached_agent_gets_the_reading_tools_only() {
+    fn a_subagent_sees_the_master_tool_list_and_is_refused_writes() {
         assert_eq!(agent_url("http://127.0.0.1:5/abc/mcp"), "http://127.0.0.1:5/abc/agent");
         let names = |t: Value| t.as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
-        assert_eq!(names(tools(false)), ["zoom", "date"]);
-        assert_eq!(names(tools(true)), ["zoom", "date", "send_chat", "new_card", "answer_card", "fix_card", "close_card", "list_cards"]);
-        let a = crate::optchat::prompts::agents("X", "sonnet", "<chat></chat>");
-        assert!(!a.contains("send_chat") && !a.contains("answer_card") && !a.contains("new_card"));
+        assert_eq!(names(tools()), ["zoom", "date", "send_chat", "new_card", "answer_card", "fix_card", "close_card", "list_cards"]);
+        for w in WRITES { assert!(names(tools()).contains(&w.to_string())); }
+        assert!(!WRITES.contains(&"list_cards") && !WRITES.contains(&"zoom") && !WRITES.contains(&"date"));
     }
 
     #[test]

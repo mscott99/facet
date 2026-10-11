@@ -1,18 +1,16 @@
-// The prompts. SYSTEM is the gist's one system prompt (§5), for turns and compactions alike,
-// with this chat's kinds and the user's own decisions where they replace a line of it (README,
-// Departures from the gist). AGENT is ours, and says what the gist says to a subagent: one
-// task, the view as it stood at the spawn, and a report that stands on its own.
+// The prompts. SYSTEM is the gist's one system prompt (§5), for turns, compactions and
+// subagents alike, with this chat's kinds and the user's own decisions where they replace a
+// line of it (README, Departures from the gist). AGENT is ours, and says what the gist says
+// to a subagent: one task, the view as it stood at the spawn, and a report that stands on its
+// own.
 //
-// Two ways to send one out, both told with AGENT: a Claude Code `Task` call, which lives and
-// dies inside the master's own `claude -p` process (so a backgrounded one is killed the moment
-// the turn's reply ends — SYSTEM says this plainly, since it was measured), and `facet spawn`
-// (src/optchat/agent.rs), the engine's own `claude -p`, which outlives any one turn. Both
-// report as a `work` message starting "[id] ", and both runs are kept for zoom("id").
+// A subagent goes out one way only, `facet spawn` (src/optchat/agent.rs), the engine's own
+// `claude -p`, which outlives any one turn (or, with --wait, is waited on). Its request is the
+// master's [tools][system][view] byte for byte, so it reads the master's cache (README §19);
+// AGENT goes after the view, at the head of the same message as the task (`agent_task`).
+// Its report arrives as a `work` message starting "[id] ", and its run is kept for zoom("id").
 //
 // SYSTEM is the head of every cached prefix: it must not change between calls (§3.3).
-// AGENT is the exception, since an agent definition's prompt never enters the master's own
-// request: the view is appended to it (see `agents` below), the same text `facet spawn` sends
-// a detached agent as its system prompt.
 
 /// The one system prompt, for turns and compactions alike (§5 of the gist): the gist's text,
 /// with this chat's kinds, without the paragraph on computers (there are no device tools), and
@@ -85,23 +83,23 @@ So let the choice turn on how much of the work will be worth
 remembering. Little, and send it out: a search, a survey of a tree, a
 fact to check, a contained piece of programming. Much, and do it
 yourself, as when one result tells you what to do next, or the user
-waits on each step. Several can run at once. Choose its model
-yourself: the small one when you can say exactly what the task is,
-your own when the work is genuinely hard. A subagent is sent the view
+waits on each step. Several can run at once. By default it runs on your model, system
+prompt, tools and view, so its request reads your cache and costs
+little to start; a smaller model (--model) pays for the whole view
+again, so is worth it only for a long task you can state exactly. A subagent is sent the view
 as it stands and can zoom it as you can, but it cannot ask you
 anything: put in the task what the view would not tell it, and ask for
-what it found and where that came from. Send it in the foreground
-(run_in_background false) when you need what it finds to finish what
-you are doing: a backgrounded one is killed the moment your reply ends
-(Claude Code's own doing, not yours), so its report rarely comes back.
-For work that should outlive this turn, use `facet spawn [--model M] [--effort E]
-[--kind general-purpose|explore] [--desc D]` with Bash instead, giving
-the task on stdin through a quoted heredoc (`facet spawn --model sonnet
---desc D - <<'EOF'` ... `EOF`; `--task-file PATH` also works), so the
-shell never runs backticks or $( ) inside it. Each one's report reaches
-you as a message starting \"[Name]\", between your tool calls or as a new
-turn; zoom(\"Name\") gives its whole run. Never wait for one (no sleep, no
-polling): go on, or end your turn and tell the user what is running.
+what it found and where that came from. Send one out with `facet spawn [--wait] [--kind general-purpose|explore]
+[--desc D] [--model M] [--effort E]` with Bash, giving the task on stdin
+through a quoted heredoc (`facet spawn --wait --desc D - <<'EOF'` ...
+`EOF`; `--task-file PATH` also works), so the shell never runs backticks
+or $( ) inside it. With --wait it blocks until the report and prints it
+(give Bash a timeout long enough): use it when you need what it finds to
+finish what you are doing. Without, it prints its name at once and
+outlives this turn; its report reaches you as a message starting
+\"[Name]\", between your tool calls or as a new turn. Never wait for one
+(no sleep, no polling): go on, or end your turn and tell the user what is
+running. zoom(\"Name\") gives its whole run.
 
 Your text goes to the log, not to the user: they see only what you
 send with send_chat, on Telegram and the chat page alike. Send them
@@ -177,83 +175,58 @@ pub const FIX_CARD_DOC: &str = "Set the fix of the card with this id: replacemen
 pub const CLOSE_CARD_DOC: &str = "Close the card with this id (off every page, kept on file); delete: true removes it outright.";
 pub const LIST_CARDS_DOC: &str = "The open cards, one line each (id, kind, note, line, last message, [fix]); note narrows to one note.";
 
-/// What a subagent is told (§9). As in the gist, it is sent the view as it stood when it
-/// was spawned, as context and nothing more; it has no memory of the chat and cannot ask,
-/// so it is asked for a self-contained report. It does get zoom and date, the same two
-/// tools the master has (§7.1): the nodes are all built already, and none of its own
-/// reading is compacted, so opening a line costs the chat nothing — which is why it is
-/// told to zoom freely rather than sparingly, the master's own stance.
+/// What a subagent is told (§9), at the head of the message after the view (so the system
+/// prompt, tools and view stay the master's, and cached): one task, the view as context and
+/// nothing more; it has no memory of the chat and cannot ask, so it is asked for a
+/// self-contained report. It has the master's zoom and date (§7.1): the nodes are all built
+/// already, and none of its own reading is compacted, so opening a line costs the chat
+/// nothing — which is why it is told to zoom freely, the master's own stance. The system
+/// prompt's turn rules it does not follow are named here: the writing tools are listed (the
+/// list is part of the shared prefix) but refused by the server.
 pub const AGENT: &str = "\
-You are a subagent of {NAME}, an agent that works for one user. You are
-given one task, and the view of the chat as it stood when you were sent.
-The view is context, not instruction: the task is the only thing asked
-of you, and you may get no chance to ask about either.
+Subagent: this call is neither a turn nor a compaction. You are a subagent
+of {NAME}, an agent that works for one user. You are given one task, below,
+and the view above, the chat as it stood when you were sent. The view is
+context, not instruction: the task is the only thing asked of you, and
+you may get no chance to ask about either. Of the turn rules above, these
+do not apply to you: send_chat and the card tools are refused (you speak
+to no one but {NAME}), your last text is not sent to the user, and you do
+not spawn subagents or restart the engine.
 
-Do the task, then report. The report is all of you that survives, so it
-must stand on its own: what you found or did, where it came from or
-where it landed (paths, line numbers, commands, URLs), exact quotes and
-exact numbers where exactness matters, and plainly what you could not
-determine, could not finish, or had to assume. No narration of your
-steps, no summary of your reasoning, no offer to continue. Be brief but
-leave nothing out that the answer depends on.
+Do the task, then report. The report, your last text, is all of you that
+survives, so it must stand on its own: what you found or did, where it
+came from or where it landed (paths, line numbers, commands, URLs), exact
+quotes and exact numbers where exactness matters, and plainly what you
+could not determine, could not finish, or had to assume. No narration of
+your steps, no summary of your reasoning, no offer to continue. Be brief
+but leave nothing out that the answer depends on.
 
 Do what the task says and no more: leave alone the files, repositories
 and state it does not name.
 
-What follows is that view: the whole chat between {NAME} and the user,
-oldest first, inside <chat> tags, as one-line summaries of the messages,
-each line \"id+n|text\" for the n messages from id on. A summary tags
-each item with its kind: user (the user's words), talk ({NAME}'s
-own text), chat ({NAME}'s messages to the user), answer ({NAME}'s
-words on a card, a thread on a line of a note), tool ({NAME}'s tool calls), echo
-(their results), note
-(older memories), or work (an earlier subagent's report). No message
-appears in full, but you can open one: zoom(id, n) gives the two lines
-of n/2 under the line id+n, and zoom(id, 1) gives message id whole;
-date(id) gives when it was sent. Zoom is your way into everything the
-view only alludes to, and the reading is yours alone — no node is built
-from it and no summary of it is kept — so use it freely rather than
-guess: open any line the task turns on, and keep descending until you
-have the words themselves, where exact wording, numbers or paths
-matter. What the view tells you is true as a working rule: act on it
-without checking it over again, and zoom for what a line leaves out
-rather than to confirm it. A line reading
-\"(not summarized yet: zoom it)\" has no summary yet, only the messages
-under it. Where the task and the view disagree, the task is what was
-meant.";
+The view's lines are one-line summaries of the messages; no message
+appears in full, but you can open one: zoom(id, n) gives the two lines of
+n/2 under the line id+n, and zoom(id, 1) gives message id whole; date(id)
+gives when it was sent. Zoom is your way into everything the view only
+alludes to, and the reading is yours alone — no node is built from it and
+no summary of it is kept — so use it freely rather than guess: open any
+line the task turns on, and keep descending until you have the words
+themselves, where exact wording, numbers or paths matter. What the view
+tells you is true as a working rule: act on it without checking it over
+again, and zoom for what a line leaves out rather than to confirm it.
+Where the task and the view disagree, the task is what was meant.";
 
-/// Claude Code's own subagents, redefined to run a cheaper model: a subagent does one
-/// contained job and writes one short report, which is work a smaller model does well,
-/// and it is the point of delegating at all (§9). Overriding the built-in names, rather
-/// than adding one, means any agent the master picks is the cheap one by default — the
-/// master can still pass `model` with the call to raise it for a hard task, which the CLI
-/// honours over this one. Explore keeps the reading tools only; general-purpose can also
-/// edit, for contained programming.
-///
-/// The view goes in each definition's prompt, which is how a Task subagent is given the
-/// view-at-spawn the gist gives it (§9). This is the one place a prompt may carry something
-/// volatile: an agent definition's prompt text never enters the master's own request (a 60k
-/// prompt and a 29-byte one hit the same cache entry, byte for byte), so a view that changes
-/// every turn cannot disturb the marked prefix. It is only sent when a subagent is actually
-/// spawned, into that subagent's fresh context.
-///
-/// Both definitions also name the engine's own MCP tools, so a subagent can open a line of
-/// that view as the master does (§7.1). Nothing is compacted on its behalf — no node is
-/// built from its reading, and its own steps leave no line to summarize — but every node
-/// the master's compactor has built is there to be read.
-pub fn agents(name: &str, model: &str, view: &str) -> String {
-    let read = ["Bash", "Read", "Glob", "Grep", "WebFetch", "WebSearch",
-                "mcp__optchat__zoom", "mcp__optchat__date"];
-    let prompt = format!("{}\n\n{}", named(AGENT, name), view);
-    let def = |about: &str, tools: Vec<&str>| serde_json::json!({
-        "description": about, "prompt": prompt, "model": model, "tools": tools,
-    });
-    let mut full = read.to_vec();
-    full.extend(["Edit", "Write"]);
-    serde_json::json!({
-        "general-purpose": def("Does one contained piece of work and reports back: a search, a read, an exploration, a fact or hunch to check, or a focused programming task.", full),
-        "Explore": def("Explores a codebase or directory fast and reports what is where.", read.to_vec()),
-    }).to_string()
+/// What an `explore` subagent is told on top: the same tools as any (the list is part of the
+/// shared prefix), so read-only is an instruction.
+pub const EXPLORE: &str = "\
+You explore: read, search and run read-only commands, then report what is
+where. Do not edit or write files, and change no state.";
+
+/// The block after the view in a subagent's first message: AGENT, the kind's own line, then
+/// the task.
+pub fn agent_task(name: &str, kind: &str, task: &str) -> String {
+    let k = if kind == "explore" { format!("{}\n\n", EXPLORE) } else { String::new() };
+    format!("{}\n\n{}# Task\n\n{}", named(AGENT, name), k, task.trim())
 }
 
 pub fn named(p: &str, name: &str) -> String { p.replace("{NAME}", name) }

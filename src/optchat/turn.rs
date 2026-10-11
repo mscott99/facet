@@ -45,6 +45,9 @@ pub struct State {
     /// sent for a turn of their own: each starts one fresh call, in order, once the running
     /// turn and anything queued for it are done; never delivered mid-run
     pub later: VecDeque<String>,
+    /// the view the live call was sent, byte for byte: a `facet spawn` agent started during
+    /// the call is sent this one, so its request reads the call's cached prefix (§19)
+    pub view: Option<String>,
 }
 
 fn user_line(text: &str) -> String {
@@ -261,7 +264,9 @@ fn run(e: &Arc<Engine>) {
         { let t = e.turn.lock().unwrap(); save(e, &t); }
         let tc = Instant::now();
         let mut tr = Trace { first, ..Default::default() };
+        e.turn.lock().unwrap().view = Some(view.clone());
         call(e, &view, &texts.join("\n\n"), &mut tr);
+        e.turn.lock().unwrap().view = None;
         let mut rec = json!({
             "first": first, "last": e.mem.lock().unwrap().store.t().saturating_sub(1), "messages_in": texts.len(),
             "settle_ms": settle_ms, "ms": tc.elapsed().as_millis(), "steps": tr.steps, "primed": tr.primed,
@@ -325,29 +330,50 @@ fn settle(e: &Arc<Engine>) -> bool {
     }
 }
 
+/// The built-in tools of every call that shares the master's prefix: the configured list,
+/// never `Task`. A subagent goes out through `facet spawn` only (README §19): a Task call's
+/// request has its own system prompt and tools, so it can never read the master's cache.
+pub fn tools(e: &Engine) -> String {
+    e.conf.tools.split(',').map(str::trim).filter(|t| !t.is_empty() && *t != "Task" && *t != "Agent")
+        .collect::<Vec<_>>().join(",")
+}
+
 /// The arguments of a master call. Priming and the real call must use exactly these.
-fn args(e: &Engine, view: &str) -> Vec<String> {
+fn args(e: &Engine) -> Vec<String> {
+    let url = e.mcp_url.get().cloned().unwrap_or_default();
+    shared_args(e, &e.model(), &e.conf.effort, &url)
+}
+
+/// The flags of every call whose request is [tools][system][view][message] (§3.3): a master
+/// call, and a `facet spawn` agent, which differs only in the MCP path (same tool list, the
+/// writing tools refused by the server) and, if asked for, its model or effort.
+pub fn shared_args(e: &Engine, model: &str, effort: &str, mcp_url: &str) -> Vec<String> {
     let sd = state_dir(&e.dir);
     let sys = prompts::system(&e.conf.name);
     super::events::system(&e.dir, "system", &sys);
     let f = sd.join("system.txt");
     if std::fs::read_to_string(&f).ok().as_deref() != Some(sys.as_str()) { let _ = std::fs::write(&f, &sys); }
-    let mut a = claude::base_args(&e.model(), &e.conf.effort, &f.to_string_lossy(), &e.conf.tools);
-    let mcp = json!({"mcpServers": {"optchat": {"type": "http", "url": e.mcp_url.get().cloned().unwrap_or_default()}}});
+    let mut a = claude::base_args(model, effort, &f.to_string_lossy(), &tools(e));
+    let mcp = json!({"mcpServers": {"optchat": {"type": "http", "url": mcp_url}}});
     a.extend(["--mcp-config".into(), mcp.to_string(), "--permission-mode".into(), e.conf.permission.clone(), "--replay-user-messages".into(),
         "--add-dir".into(), "/tmp".into()]);
-    // Subagents run on the cheap model and are sent the view as it stands (§9): they read a
-    // lot and write one short report. The view in there costs this call nothing: an agent
-    // definition's prompt never enters the master's own request, so it cannot move the marks.
-    if e.conf.tools.contains("Task") && !e.conf.agent_model.is_empty() {
-        // By file, not inline: the view alone can pass Linux's 128 KiB cap on one argv string.
-        let f = sd.join("agents.json");
-        let defs = prompts::agents(&e.conf.name, &e.conf.agent_model, view);
-        if std::fs::read_to_string(&f).ok().as_deref() != Some(defs.as_str()) { let _ = std::fs::write(&f, &defs); }
-        a.extend(["--agents".into(), f.to_string_lossy().into_owned()]);
-    }
     if e.conf.safe_mode { a.push("--safe-mode".into()); }
     a
+}
+
+/// The first user message of such a call: the view, cut into the blocks the cache marks sit
+/// on (§8), then one more block with the rest. A master call and a spawned agent send the
+/// same blocks for the same view, so the agent's request reads the master's cached prefix.
+pub fn content(view: &str, rest: &str) -> Value {
+    let mut c: Vec<Value> = view::pieces(view).iter().map(|t| json!({"type": "text", "text": t})).collect();
+    c.push(json!({"type": "text", "text": rest}));
+    Value::Array(c)
+}
+
+/// The environment of such a call: the cache TTL (it sets the marks' ttl, part of what the
+/// cache matches on) and the chat directory (so `facet ...` run inside reaches this engine).
+pub fn env(e: &Engine) -> Vec<(&'static str, String)> {
+    vec![("CLAUDE_CODE_PROMPT_CACHE_TTL", e.conf.ttl.clone()), ("OPTCHAT_DIR", e.dir.to_string_lossy().to_string())]
 }
 
 /// §8 with `claude -p`: Claude Code's own cache marks leave no room for marks in the view,
@@ -393,22 +419,20 @@ fn prime(e: &Arc<Engine>, args: &[String], pieces: &[&str], marks: &[bool], tr: 
 /// One fresh model call for one batch of user messages.
 fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
     tr.outcome = "error";
-    let a = args(e, view_text);
+    let a = args(e);
     let pieces = view::pieces(view_text);
     // with no whole block there is nothing worth priming: the call's own end mark covers it
     if e.conf.prime && pieces.len() > 1 { prime(e, &a, &pieces, &view::marked(view_text), tr); }
     if cancelled(e) { tr.outcome = "cancelled"; return }
     phase(e, "calling");
-    let ttl = e.conf.ttl.clone();
     // OPTCHAT_DIR: so `facet import` run by the agent reaches this engine, not the default one
-    let dir = e.dir.to_string_lossy().to_string();
-    let mut p = match Proc::spawn(&a, &[("CLAUDE_CODE_PROMPT_CACHE_TTL", ttl.as_str()), ("OPTCHAT_DIR", dir.as_str())], &e.conf.cwd) {
+    let env = env(e);
+    let envr: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut p = match Proc::spawn(&a, &envr, &e.conf.cwd) {
         Ok(p) => p,
         Err(x) => { e.notice(&format!("cannot start claude: {}", x)); return }
     };
-    let mut content: Vec<Value> = pieces.iter().map(|t| json!({"type": "text", "text": t})).collect();
-    content.push(json!({"type": "text", "text": text}));
-    if let Err(x) = p.send(Value::Array(content)) { e.notice(&format!("cannot write to claude: {}", x)); return }
+    if let Err(x) = p.send(content(view_text, text)) { e.notice(&format!("cannot write to claude: {}", x)); return }
     {
         let mut t = e.turn.lock().unwrap();
         t.stdin = p.take_stdin();

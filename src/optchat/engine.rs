@@ -45,7 +45,6 @@ pub struct Conf {
     pub permission: String,
     pub compact_model: String,
     pub compact_effort: String,
-    pub agent_model: String,
     pub ttl: String,
     pub cwd: PathBuf,
     pub prime: bool,
@@ -71,11 +70,10 @@ impl Conf {
             name: s("name", "OptChat"),
             model: s("model", "opus"),
             effort: s("effort", "high"),
-            tools: s("tools", "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task"),
+            tools: s("tools", "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch"),
             permission: s("permission", "bypassPermissions"),
             compact_model: s("compact_model", "haiku"),
             compact_effort: s("compact_effort", "xhigh"),
-            agent_model: s("agent_model", "sonnet"),
             ttl: s("cache_ttl", "5m"),
             cwd: cfg::tilde(&s("cwd", "~")),
             prime: c.get_bool("chat.prime", true),
@@ -215,6 +213,27 @@ pub struct Engine {
     pub restart: Mutex<Option<bool>>,
     /// detached subagents alive (agent.rs): a restart waits for them, their readers are threads of this process
     pub spawns: std::sync::atomic::AtomicUsize,
+}
+
+/// An engine over a chat directory, with no socket, compactor or MCP server: for tests.
+#[cfg(test)]
+pub fn bare(dir: &Path, mcp_url: &str) -> Arc<Engine> {
+    let conf = Conf::load(dir);
+    let store = Store::open(dir);
+    let view = View::fold(&store, conf.view);
+    let cview = View::fold(&store, conf.view);
+    let e = Arc::new(Engine {
+        dir: dir.to_path_buf(), model: Mutex::new(conf.model.clone()), conf,
+        mem: Mutex::new(Mem::new(dir.to_path_buf(), store, view, cview)),
+        changed: Condvar::new(), gate: Default::default(),
+        turn: Mutex::new(turn::State::default()), compact_sys: state_dir(dir).join("system.txt"), mcp_url: OnceLock::new(),
+        watchers: Mutex::new(Vec::new()), spend: Mutex::new(VecDeque::new()), tally: Default::default(),
+        limits: Mutex::new(Value::Null), util_mark: Mutex::new(None),
+        restart: Mutex::new(None), spawns: Default::default(),
+    });
+    let _ = e.mcp_url.set(mcp_url.to_string());
+    let _ = std::fs::create_dir_all(state_dir(dir));
+    e
 }
 
 pub fn dir() -> PathBuf {
@@ -466,11 +485,24 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
             // a detached subagent (§9): its own `claude -p`, owned by this engine, not by the
             // turn that asked for it, so it outlives the turn's reply; its report arrives
             // later as a message of its own
-            "spawn" => match super::agent::spawn(e, v["model"].as_str().unwrap_or(""), v["effort"].as_str().unwrap_or(""), v["kind"].as_str().unwrap_or(""),
-                v["desc"].as_str().unwrap_or(""), v["task"].as_str().unwrap_or("")) {
-                Ok(id) => json!({"ok": true, "id": id}),
-                Err(x) => json!({"ok": false, "error": x}),
-            },
+            // With "wait", this connection is held until the report and gets it in the reply
+            // (`facet spawn --wait`); the report is then logged as work and starts no turn.
+            "spawn" => {
+                let wait = v["wait"].as_bool().unwrap_or(false);
+                let (tx, rx) = std::sync::mpsc::channel();
+                match super::agent::spawn(e, v["model"].as_str().unwrap_or(""), v["effort"].as_str().unwrap_or(""), v["kind"].as_str().unwrap_or(""),
+                    v["desc"].as_str().unwrap_or(""), v["task"].as_str().unwrap_or(""), wait.then_some(tx)) {
+                    Ok(id) if wait => {
+                        let Ok((report, ack)) = rx.recv() else { return };
+                        let ok = writeln!(w, "{}", json!({"ok": true, "id": id, "report": report})).and_then(|_| w.flush()).is_ok();
+                        let _ = ack.send(ok);
+                        if !ok { return }
+                        continue;
+                    }
+                    Ok(id) => json!({"ok": true, "id": id}),
+                    Err(x) => json!({"ok": false, "error": x}),
+                }
+            }
             // §10 importing: a note (kind `note`) with its own date, appended between turns
             // (during a turn it is queued until the turn is done); the same text twice is added once
             "note" => turn::note(e, v["text"].as_str().unwrap_or("").to_string(),

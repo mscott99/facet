@@ -270,9 +270,10 @@ The MCP server listens on a random loopback port with a random secret path, for 
 own `claude` calls and the subagents they spawn only. The master's path (`/<secret>/mcp`) serves
 `zoom`, `date`, `send_chat {text}` and the card tools — `new_card {note, anchor | line, text,
 kind?, fix?}`, `answer_card {id, text, fix?}`, `fix_card {id, fix}`, `close_card {id, delete?}`,
-`list_cards {note?}`; a detached subagent (`facet spawn`) is given `/<secret>/agent`, which
-lists and serves `zoom` and `date` only, and Task subagents' definitions leave the output tools
-out of their tool lists.
+`list_cards {note?}`; a subagent (`facet spawn`) is given `/<secret>/agent`, which lists the
+very same tools, byte for byte (the list is part of the prefix it shares with the master, 19),
+and refuses the ones that write (`send_chat`, `new_card`, `answer_card`, `fix_card`,
+`close_card`) with an error telling it to put what it would say in its report.
 Zoom and date are logged like any tool, call and result, as in the gist: what was just recalled
 is fresh in the log, where the next turns are likely to need it again.
 
@@ -377,7 +378,7 @@ Ctrl-J is a new line; Ctrl-C or Ctrl-D leaves (the engine and a running turn car
 `/resume`, `/stats`, `/status`, `/quit`. A mistyped `/command` is refused, never sent.
 
 Settings live under `chat` in facet.json (all optional): `model` (opus), `effort` (high),
-`compact_model` (haiku), `compact_effort` (xhigh), `agent_model` (sonnet), `tools`, `permission`
+`compact_model` (haiku), `compact_effort` (xhigh), `tools` (`Task` is always dropped), `permission`
 (bypassPermissions), `cwd` (~), `cache_ttl` (5m), `prime` (true), `budget_hour_eq` (0 = none), `claude`
 (path to the binary). `/model` overrides `model`, and is kept across restarts.
 
@@ -442,9 +443,9 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     midnight, the whole view is a cache miss. A Claude Code update changes its blocks and
     costs one miss.
 11. *Tools* are Claude Code's own (Bash, Read, Edit, Write, Glob, Grep, WebFetch,
-    WebSearch, Task) plus zoom and date served over MCP from the engine (§9 suggests MCP
-    over HTTP), with the gist's descriptions verbatim. A subagent gets zoom and date too,
-    named in its definition (see 19).
+    WebSearch; never Task, see 19) plus zoom and date served over MCP from the engine (§9
+    suggests MCP over HTTP), with the gist's descriptions verbatim. A subagent gets the same
+    list (see 19).
 
 **Choices the gist leaves open, and safety additions**
 
@@ -461,10 +462,10 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     programming); much, do it here. Cost alone must not decide it, since the saving and the
     loss are the same fact. The choice is left to the agent's judgement rather than made a
     rule of. Added:
-    each turn is a fresh process, so anything started in the background dies with it — a
-    backgrounded Task subagent included, the moment the reply ends, so the paragraph tells it
-    to spawn in the foreground when it needs what the subagent finds. For work that should
-    outlive the turn, it names `facet spawn` (see 21) instead of backgrounding a Task call.
+    each turn is a fresh process, so anything started in the background dies with it. The
+    paragraph names `facet spawn` as the one way to send a subagent out (19): `--wait` when
+    the master needs what it finds within the turn, plain when the work should outlive it
+    (21). It runs on the master's model by default, since that is what shares the cache.
 13. *Free nodes are built at once*, without waiting for the start rule (§4: fewer than 8
     unbuilt lines before a message): they need no model call, so no call ever sees them
     unbuilt; the result is the same.
@@ -488,17 +489,49 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 18. *Model switching (§10)* costs one cold cache write of the view for the first turn on the
     new model (prompt caches are per model).
 
-19. *Subagents are Claude Code's Task tool, not the gist's spawn and tell (§9).* The engine
-    does not start them and cannot talk to one while it runs. Every event carrying a
-    `parent_tool_use_id` stays out of the chat's log, as the gist has it ("its own steps stay
-    in its own log"): it goes to the subagent's own log, `<state dir>/agents/<agentId>.jsonl`,
-    where `zoom("<agentId>")` opens the whole run (§6). What the chat remembers is the report
-    it hands back, logged as the gist's one `work` message, `[<agentId>] report`, whether it
-    comes back inside the turn or after it (below). The agentId is Claude Code's own (the
-    `task_id` of its `task_started`), the same id its tool result shows the master; the
-    `agentId: ... (use SendMessage ...)` line and `<usage>` block Claude Code appends to that
-    result are cut from the logged report (the name leads it; the usage is in the `agent`
-    event).
+19. *Subagents go out through `facet spawn` only, and share the master's cache prefix (§9).*
+    The gist: "A subagent is a fresh call whose first message is the view, then its task"
+    (gist L450), and among its mistakes, "A compaction without context, or with its own system
+    prompt (it loses the turns' cache)" (L466). The same holds for a subagent: its request is
+    [tools][system][view][task], and if the first three are the master's, byte for byte, it
+    reads the view out of the cache the master's turn wrote instead of writing it again. So a
+    spawned agent's call (`src/optchat/agent.rs::spawn`) is built by the master's own code
+    (`turn::shared_args`, `turn::content`, `turn::env`):
+    - the master's system prompt file (`prompts::system`, the one SYSTEM), not a prompt of its
+      own;
+    - the master's built-in tools (`chat.tools`, `Task` always dropped) and the same MCP tool
+      list: its MCP path (`/<secret>/agent`) lists exactly the master's tools and refuses the
+      writing ones server-side, so read-only is enforced without changing the list;
+    - the master's model (`/model`) and effort, by default; `--model`/`--effort` still
+      override, at the price of the prefix (a cache is per model, and the effort sets the
+      thinking parameters);
+    - the same flags (`--replay-user-messages`, `--add-dir /tmp`, permission mode, safe mode)
+      and the same `CLAUDE_CODE_PROMPT_CACHE_TTL`, since the TTL is set on the cache marks;
+    - the same view, cut into the same blocks (`view::pieces`) the master's call sends, so the
+      API's lookback finds the master's marks. While a turn is calling, that is the view the
+      call itself was sent (kept in `turn::State::view`), not a fresh render, which may differ
+      in its last lines; between turns, the view as a turn would render it. A test checks the
+      agent's blocks and arguments equal the master's (agent.rs, and the e2e test against the
+      fake CLI).
+    What used to be its system prompt, AGENT, is now the head of the block after the view,
+    in the same first message as the task: it opens "Subagent:", says which of the system
+    prompt's turn rules do not apply (no send_chat or cards, its last text is the report, no
+    spawning or restarts), and keeps the old text (one task, a report that stands alone, zoom
+    freely, the view as a working rule). `--kind explore` adds a line telling it to change
+    nothing: kinds are instructions now, not tool lists, since a different list is a
+    different prefix. The gist's SYSTEM text is not changed by any of this; only facet's own
+    subagent paragraph in it (12) names `facet spawn` in place of Task.
+
+    Claude Code's Task tool is gone from the master (default tools, and the `--agents`
+    definitions file): a Task subagent's request has Claude Code's own agent system prompt and
+    tool list, so it can never share the master's prefix, and it lives and dies inside the
+    master's process (21). `facet spawn --wait` covers what a foreground Task call did: the CLI
+    blocks on the engine's socket until the report, prints it, and the report is logged as the
+    gist's `work` message `[id] report` without starting a turn (if the caller has gone by then,
+    its shell timed out say, it is delivered as a turn of its own, as without `--wait`).
+    Its run is kept in `<state dir>/agents/<id>.jsonl` for `zoom("<id>")` (§6), and its events
+    never enter the chat's log.
+
     Exploration that would have been twenty tool/echo pairs in the log costs one line.
     The system prompt therefore keeps the gist's free hand and states the one quantity the choice turns
     on (see 12): how much of the work will be worth remembering. Little, and it is sent out
@@ -507,69 +540,19 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     saving and the loss are the same fact, so cost alone must not decide it. The price of a logged message, measured over this chat (1206 messages,
     $270 at per-model rates): 11.9 cents of compaction, 22.4 cents all in. An average run of
     four tool calls is eight messages, so delegating it saves about a dollar of compaction and
-    pays the subagent's own reads once, out of a fresh context instead of the turn's growing
-    one. The report is a message too: a transcript handed back buys nothing.
+    pays the subagent's own reads once. The report is a message too: a transcript handed back
+    buys nothing. With the shared prefix, the view itself is a cache read for the subagent (a
+    tenth of the write price), which is why the default model is the master's and not a
+    cheaper one: a smaller model has no entry for the view and writes all of it again.
 
-    A backgrounded subagent reports on its own, and that report starts a turn. Claude Code
-    (2.1.268) backgrounds a spawn unless the call passes `run_in_background: false`, and then
-    its tool result is not a report at all but a receipt: an internal agent id with a warning
-    never to quote it, so it is not logged. The report comes later, in the `task_notification`
-    for the task, whose `summary` is the subagent's own last words, word for word (measured:
-    202 bytes, byte-identical to its last `assistant` text). It arrives after the reply that
-    sent it, so it cannot be that turn's: it goes in as the gist has it, one message of kind
-    `user` whose text starts `[id] `, queued the way a message sent for a turn of its own is
-    (so it is durable too, see 15) and answered by a fresh call whose view already has it.
-    Backgrounding buys the turn nothing, which is why the system prompt steers away from it: Claude Code
-    withholds the call's `result` until every background task has ended (measured: the reply
-    at 9 s, the notification at 49 s, `result` and exit at 51 s), so the call waits for the
-    subagent whether the master does or not. All it adds is the follow-up turn Claude Code
-    opens to deliver the notification, which is killed (see 5). Nothing of the subagent's own
-    account is lost: its record and its requests are closed from the notification instead of
-    from a tool result.
-
-    A subagent runs on the cheap model by default (`agent_model`, sonnet): doing one stated
-    job and writing one short report is work a smaller model does well, and paying the big
-    model's rate for it would undo the saving. `--agents` redefines Claude Code's own
-    `general-purpose` and `Explore` rather than adding a name, so whichever one the master
-    picks is the cheap one, with the AGENT prompt (no follow-up, do only what the
-    task names, report that stands alone). `Explore` gets the reading tools; `general-purpose`
-    also gets `Edit` and `Write`, since a contained programming task is worth delegating too.
-    The default is not a ceiling: the master may pass `model` with the call, and the CLI
-    honours that over the definition, so a hard task can go out on opus. Both halves verified
-    against the CLI: without the parameter the turn stays on opus while the subagent's
-    requests come back as sonnet; with `model: opus` the subagent's own requests come back as
-    opus.
-
-    A spawn carries the view, as the gist's does: the view as it stands at the call is
-    appended to each agent definition's prompt, which is the only channel a Task subagent
-    has for context, since the master writes its task but not its system prompt. It can also
-    open a line of that view: both definitions name `mcp__optchat__zoom` and
-    `mcp__optchat__date`, so a subagent reads the chat by the same two tools the master has
-    (§7.1). Nothing is compacted for it — no node is built from its reading, and its dropped
-    steps leave no line to summarize — but every node the compactor has already built is
-    there, so the depth of the chat is open to it while only the summary is pushed on it.
-    Because that reading is free, the `AGENT` prompt tells the subagent so and tells it to
-    zoom freely rather than guess from a summary line — the same stance the system prompt takes.
-    Both prompts also say the view is true as a working rule: act on it without checking it
-    over again, and zoom for what a line leaves out rather than to confirm what it says.
-    The cheap call is the one that recovers a dropped detail; re-reading what the summary
-    already got right buys nothing, and a wrong line is overwritten as the chat goes on.
-    Measured against the CLI: a subagent given those names in its definition called
-    `mcp__optchat__zoom` with `{id: 0, n: 1}` and got `0+0|user: Can you put on my alarm?`
-    back from the live engine, with no permission prompt. The MCP tool names need not be in
-    the top-level `--tools` at all — a connected `--mcp-config` server is exposed to the
-    session, and the definition's `tools` array is what grants it. What the subagent still
-    cannot do is ask: it cannot be told more once sent, which is what AGENT says to it and
-    what the system prompt tells the master to expect. The master's own prefix is untouched by
-    this: an agent definition's prompt never enters the master's request at all — the same
-    call with a 60k-character agent prompt and with a 29-byte one hit one cache entry, byte
-    for byte, 10468 tokens written then read — so a view that changes every turn cannot move
-    the marks. Verified the other way too: a planted line in the view of a generated
-    definition came back verbatim from a real subagent that was only asked to read it.
-    The price is the subagent's, paid once in a fresh context: a full 128k view is about 32k
-    tokens, 12 cents at sonnet's cache-write rate, and later spawns in the same turn read it
-    back at a tenth of that. Against 11.9 cents per logged message of compaction, a delegated
-    run pays for its view as soon as it keeps two messages of steps out of the chat.
+    Before this (Task subagents, kept here as history): they ran on sonnet by default
+    (`agent_model`), with AGENT plus the view as each `--agents` definition's prompt. An agent
+    definition's prompt never entered the master's request (measured: a 60k and a 29-byte one hit
+    one cache entry), so the master's cache was safe, but every subagent wrote its view to the
+    cache afresh, on another model. A backgrounded Task call's report came in a
+    `task_notification` and Claude Code withheld the call's `result` until it ended. The turn
+    loop still parses Task events (`parent_tool_use_id`, notifications) should a configured
+    tool list bring Task back, but `turn::tools` drops it.
 
     The subagent pays for itself in log bytes, and that is exactly why its own spending has to
     be counted: dropping its events would otherwise drop its tokens too. A subagent's requests
@@ -589,17 +572,15 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     whatever it was still running in the background, no matter how it was told to behave.
     Measured: three backgrounded Task agents, 831k eq between them (one alone 564k eq, 21
     requests), logged "unfinished" with no report the instant their parent's process exited —
-    the work, and its cost, both lost. `facet spawn [--model] [--effort] [--kind] [--desc] <task>` is a
-    second way to send one out, not a Task call at all: the CLI op reaches the engine over its
+    the work, and its cost, both lost. `facet spawn [--wait] [--model] [--effort] [--kind] [--desc] <task>` is
+    the way to send one out (19), not a Task call at all: the CLI op reaches the engine over its
     socket (the same one `facet send` uses) and `src/optchat/agent.rs::spawn` starts its own
     `claude -p`, as a child of the engine process — which already outlives any one turn, since
     a turn is only a thread inside it — and in its own process group besides
     (`Proc::spawn_detached`, a `setsid`-equivalent), so nothing a turn does, including ending,
-    can reach it. It is given the same AGENT prompt a Task subagent gets, as its
-    `--system-prompt-file`, with the view at the moment of the call and the task as its first
-    message (mirroring the master's own call shape), the cheap model by default
-    (`agent_model`), and the same read tools plus `mcp__optchat__zoom`/`date` (`--kind explore`
-    withholds `Edit`/`Write`). A thread the engine owns — not the turn, which may have long
+    can reach it. Its request shares the master's prefix (19): the master's system prompt,
+    tools, model and effort, the view in the master's blocks, then AGENT and the task in one
+    block. A thread the engine owns — not the turn, which may have long
     since ended — reads its stream-json, metering each request the way a turn meters its own
     and writing every event to `<state dir>/agents/<id>.jsonl` (so its usage can be reconstructed
     even if the thread died first). When it ends, it is logged as one `agent` event exactly like
@@ -615,8 +596,8 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     rows in usage.jsonl. Open: if the engine itself is killed while a spawn is still running,
     the detached process (being in its own process group) keeps running, but nothing is left to
     read its pipe or deliver its report — a restart does not reconnect to it. The master is told
-    about both paths (12), and which to use for what: a Task call when the result is needed
-    inside the turn, `facet spawn` for anything that should still be working after the reply.
+    which to use for what (12): `--wait` when the result is needed inside the turn, plain
+    `facet spawn` for anything that should still be working after the reply.
 
     Memory hygiene (all constant per call, so the prompt cache is untouched): the task of a spawn
     is logged verbatim as a `tool` message "spawn <id> (<model>, <kind>, <desc>): <task>" (a
@@ -668,7 +649,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
       one compaction cache write of at most CVIEW/2 bytes. A batch that unbuilt parents left
       open is not saved either: it starts again when the view next passes 128 KB. An earlier
       `{"view": ..., "compact": ...}` file is read once and rewritten as pairs, view unchanged.
-    - *`work` messages read `[Name] report`*, Task subagents' too, and *their runs are kept*
+    - *`work` messages read `[Name] report`*, and *their runs are kept*
       for `zoom("Name")` (see 19); the zoom tool's description is the gist's verbatim.
     - *Images* (§5: `zoom(id, 1)` gives a message "whole, with its images"): an image a tool
       returns (Read on a picture, say) is kept beside the log, `chat/images/<id>.json`, and
@@ -681,15 +662,16 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
       them back; Haiku, right after, read 0 and wrote 35,694. With Haiku compactions (the gist's
       own model) nothing of the turns' entry can be read, and the tools would only hand a
       summarizer live Bash under `bypassPermissions`. Revisit if `compact_model` = `model`.
-    - *Subagent paragraph, Task subagents in the foreground, `facet spawn`* (12, 19, 21): the
-      user's decision; `claude -p` kills a backgrounded Task subagent with the turn.
+    - *Subagent paragraph, `facet spawn` only, `--wait`* (12, 19, 21): the user's decision;
+      `claude -p` kills a backgrounded Task subagent with the turn, and a Task request cannot
+      share the master's cache prefix.
     - *"Act on the view without checking it over again"*, added to the gist's "zoom until you
       have it whole": the user's decision.
     - *No user instructions after the prompt* (§5): the user removed the file; the e-mail rule
       is the one line kept, in the prompt.
     - *The prompt's paragraphs on send_chat, cards and `facet restart`*: the user's features.
-    - *AGENT, a subagent's own system prompt*: the gist does not give one; a Task subagent's
-      definition prompt is its only channel for the view (19).
+    - *AGENT, a subagent's instructions*: the gist does not give them; they go after the view,
+      in the task's message, so the system prompt stays the master's (19).
     - *A copied `id+n|` head and a copied `| ← LIMIT` are cut from a compaction's reply*:
       measured, Haiku copied the cut marker back (Haiku vs Sonnet comparison, 39 jobs).
     - *Free nodes are built at once* (13), *safety pauses* (14), *durable queued messages*
@@ -783,8 +765,8 @@ here is the old file, already absorbed.)
     limits.json    the last rate_limit_info Claude Code reported
     model          the /model choice, if any (wins over chat.model)
     system.txt     the system prompt as last sent, turns and compactions alike
-    agents/        each subagent's own run, <name>.jsonl (spawn_... for `facet spawn`, Claude
-                   Code's agentId for a Task subagent), read by zoom("Name")
+    agents/        each subagent's own run, <name>.jsonl (spawn_... for `facet spawn`; older
+                   ones by Claude Code's agentId, from Task subagents), read by zoom("Name")
     prompts/       every distinct system prompt ever sent, named <name>-<hash>.txt
     memory.html    the last /tree page written by `facet chat`
     engine.log     stdout/stderr of an engine started by `facet chat` (under launchd, the
@@ -867,9 +849,10 @@ cache claim above from request usage; with `ANTHROPIC_BASE_URL` at a logging pro
                                   restarts serve (systemctl --user / launchctl kickstart)
     facet send [--later] <text>  put a message into the conversation (--later: a turn of its own)
     facet push <text>          push to Telegram
-    facet spawn [--model M] [--effort E] [--kind general-purpose|explore] [--desc D] <task>
-                                a subagent that outlives this turn (21): returns its id at
-                                  once; its report arrives later, as a message of its own
+    facet spawn [--wait] [--model M] [--effort E] [--kind general-purpose|explore] [--desc D] <task>
+                                a subagent on the master's prefix (19): returns its id at
+                                  once, its report arrives later as a message of its own (21);
+                                  --wait blocks and prints the report (logged as work)
     facet status               where everything stands
 
 A longform keeps its prose in one note and every statement and proof in a note of its own,

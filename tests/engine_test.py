@@ -293,20 +293,11 @@ try:
     check(t["agents"] == 1 and t["agent_reqs"] == 2 and t["agent_eq"] > 0 and t["agent_bytes"] == len(work[0]["text"]) - len("[task_fake_1] "),
           "the turn record totals what its subagents cost")
     av = [v.get("argv", []) for v in fake()]
-    # --agents is a path: the view is too big for one argv string on Linux (128 KiB)
-    paths = [a[a.index("--agents") + 1] for a in av if "--agents" in a]
-    check(paths and all(len(x) < 1000 and os.path.isfile(x) for x in paths) and all(len(x) < 100000 for a in av for x in a),
-          "every call names an agents file, and no argument carries the view")
-    defs = [json.load(open(paths[-1]))] if paths else []
-    check(defs and all(set(d) == {"general-purpose", "Explore"} for d in defs)
-          and all("<chat>" in a["prompt"] and a["model"] for d in defs for a in d.values()),
-          "every call defines the subagents, and each definition carries the view")
-    p = defs[-1]["general-purpose"]["prompt"] if defs else ""
-    check(p.rstrip().endswith("</chat>") and re.search(r"\n\d+\+\d+\|", p),
-          "the view in a definition is the whole current one, lines and all")
-    check(defs and all({"mcp__optchat__zoom", "mcp__optchat__date"} <= set(a["tools"])
-                       for d in defs for a in d.values()),
-          "a subagent may open a line of the view, as the master may")
+    # subagents go through `facet spawn` only (README §19): no call defines Task agents or has Task
+    turnav = [a for a, v in zip(av, fake()) if v["kind"] in ("turn", "prime")]
+    check(turnav and not any("--agents" in a for a in turnav) and all(len(x) < 100000 for a in av for x in a),
+          "no call defines Task subagents, and no argument carries the view")
+    check(all("Task" not in a[a.index("--tools") + 1].split(",") for a in turnav), "the master has no Task tool")
 
     # its run is kept out of the chat, for zoom("Name") (§6 of the gist)
     z = req({"op": "zoom", "id": "task_fake_1"})["text"]
@@ -317,6 +308,19 @@ try:
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}).encode()
         return json.loads(urllib.request.urlopen(urllib.request.Request(mcp_url, body, {"Content-Type": "application/json"})).read())["result"]["content"]
     check("SUBAGENT PROSE" in mcp("zoom", {"id": "task_fake_1"})[0]["text"], "the master's zoom tool opens it too")
+    # a subagent's MCP path lists the master's tools exactly, and refuses the ones that write
+    agent_url = mcp_url[:-len("/mcp")] + "/agent"
+    def rpc(url, method, params):
+        import urllib.request
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+        return json.loads(urllib.request.urlopen(urllib.request.Request(url, body, {"Content-Type": "application/json"})).read())["result"]
+    check(rpc(agent_url, "tools/list", {}) == rpc(mcp_url, "tools/list", {}), "a subagent is listed the master's tools, byte for byte")
+    nlog = len(log())
+    r = rpc(agent_url, "tools/call", {"name": "send_chat", "arguments": {"text": "from a subagent"}})
+    check(r["isError"] is True and "refused" in r["content"][0]["text"] and not any(m["text"] == "from a subagent" for m in log()[nlog:]),
+          "a subagent's send_chat is refused: %r" % r)
+    r = rpc(agent_url, "tools/call", {"name": "zoom", "arguments": {"id": 0, "n": 1}})
+    check(r["isError"] is False and r["content"][0]["text"].startswith("0+0|"), "a subagent's zoom works")
 
     # images: a tool result's image is kept, and zoom(id, 1) gives it back (§5 of the gist)
     n0 = len(log())
@@ -398,6 +402,38 @@ try:
           "the detached agent's own cost is recorded, kind agent, status done: %r" % (asp[0] if asp else None))
     u1 = sum(1 for x in (json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))) if x["kind"] == "agent")
     check(u1 > u0, "its own requests are priced as kind agent too (%d -> %d)" % (u0, u1))
+    # its request is the master's up to the view: argv but the MCP path (and the --model asked
+    # for here), the same view blocks, then one block with the instructions and the task
+    calls = fake()
+    sv = [v for v in calls if v["kind"] == "spawn"][-1]
+    tv = [v for v in calls if v["kind"] == "turn"][-1]
+    norm = lambda a: [("MCP" if x.startswith("{\"mcpServers\"") else x) for x in a]
+    sa, ta = norm(sv["argv"]), norm(tv["argv"])
+    mi = ta.index("--model")
+    check(sa[:mi + 1] + sa[mi + 2:] == ta[:mi + 1] + ta[mi + 2:] and sa[mi + 1] == "sonnet",
+          "a spawn's arguments are the master's but for the MCP path and the model asked for: %r" % (([x for x in sa if x not in ta], [x for x in ta if x not in sa]),))
+    check(json.loads(sv["argv"][sv["argv"].index("--mcp-config") + 1])["mcpServers"]["optchat"]["url"].endswith("/agent"),
+          "a spawn's MCP path is the subagent one")
+    check(sv["env"]["CLAUDE_CODE_PROMPT_CACHE_TTL"] == tv["env"]["CLAUDE_CODE_PROMPT_CACHE_TTL"], "a spawn has the master's cache TTL")
+    sc = sv["content"]
+    check(len(sc) >= 2 and "".join(b["text"] for b in sc[:-1]).startswith("<chat>\n") and "".join(b["text"] for b in sc[:-1]).endswith("</chat>")
+          and sc[-1]["text"].startswith("Subagent:") and sc[-1]["text"].endswith("look into the thing and report back"),
+          "a spawn is sent the view's blocks, then the instructions and the task in one block")
+
+    # --wait: blocks until the report, prints it, logs it as work and starts no turn
+    n0 = len(log())
+    sp = subprocess.run([BIN, "spawn", "--wait", "--kind", "explore", "--desc", "waited", "-"], input="wait for me",
+                        env=env, capture_output=True, text=True, timeout=30)
+    check(sp.returncode == 0 and sp.stdout.strip().endswith("SPAWN REPORT: looked into it, done"), "spawn --wait prints the report: %r" % ((sp.stdout, sp.stderr),))
+    time.sleep(1.0)
+    L = log()[n0:]
+    w = [m for m in L if m["kind"] == "work"]
+    check(len(w) == 1 and "SPAWN REPORT" in w[0]["text"] and not any(m["kind"] in ("talk", "chat") for m in L),
+          "a waited spawn's report is logged as work and starts no turn: %r" % [(m["kind"], m["text"][:60]) for m in L])
+    sv = [v for v in fake() if v["kind"] == "spawn"][-1]
+    sa = norm(sv["argv"])
+    check(sa == ta, "with no --model, a spawn runs on the master's model and effort: every argument the master's but the MCP path")
+    check("Do not edit" in sv["content"][-1]["text"], "an explore spawn is told to change nothing (same tools)")
 
     # J: cards (cards.rs). The agent opens and answers them through the engine (op `card`, the
     # same call as its MCP card tools); what it does on one is logged as kind `answer`, never a
