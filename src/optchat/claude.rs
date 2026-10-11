@@ -254,6 +254,23 @@ pub fn outcome(ev: &Value) -> Option<Outcome> {
 /// Errors that mean "stop calling for a while": the subscription's usage limit, rate limits,
 /// overload. Retrying these every 10 s only fills the log (the previous engine made 5,077
 /// such calls in one afternoon); the compactor parks until `pause` says.
+/// When a limit message says the limit resets: Claude Code writes "You've hit your session
+/// limit · resets 7am (UTC)" (or "7:30pm"); only a time of day in UTC is read (the server's
+/// zone), as its next occurrence after `now`. Anything else (a date, another zone): None.
+pub fn reset_at(text: &str, now: chrono::DateTime<chrono::Utc>) -> Option<std::time::SystemTime> {
+    let t = text.to_lowercase();
+    let rest = &t[t.find("resets ")? + 7..];
+    let (clock, zone) = rest.split_once(" (")?;
+    if !zone.starts_with("utc)") { return None }
+    let (hm, pm) = if let Some(x) = clock.strip_suffix("am") { (x, false) } else { (clock.strip_suffix("pm")?, true) };
+    let (h, m) = match hm.split_once(':') { Some((h, m)) => (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?), None => (hm.parse::<u32>().ok()?, 0) };
+    if !(1..=12).contains(&h) || m > 59 { return None }
+    let h24 = (h % 12) + if pm { 12 } else { 0 };
+    let mut at = now.date_naive().and_hms_opt(h24, m, 0)?.and_utc();
+    if at <= now { at += chrono::Duration::days(1); }
+    Some(at.into())
+}
+
 pub fn limit_hit(text: &str) -> bool {
     let t = text.to_lowercase();
     // Claude Code says "You've hit your session limit · resets 7am (UTC)" (also "weekly
@@ -261,4 +278,21 @@ pub fn limit_hit(text: &str) -> bool {
     ["usage limit", "rate limit", "rate_limit", "hit your limit", "session limit", "weekly limit", "limit reached",
      "overloaded", "429", "529"]
         .iter().any(|k| t.contains(k))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+    #[test]
+    fn reset_times_are_read_from_the_limit_message() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 10, 11, 5, 30, 0).unwrap();
+        let at = |s: &str| super::reset_at(s, now).map(|t| chrono::DateTime::<chrono::Utc>::from(t).format("%d %H:%M").to_string());
+        assert_eq!(at("You've hit your session limit · resets 7am (UTC)").as_deref(), Some("11 07:00"));
+        assert_eq!(at("You've hit your session limit · resets 7:30pm (UTC)").as_deref(), Some("11 19:30"));
+        assert_eq!(at("You've hit your session limit · resets 2am (UTC)").as_deref(), Some("12 02:00"));
+        assert_eq!(at("You've hit your session limit · resets 12am (UTC)").as_deref(), Some("12 00:00"));
+        assert_eq!(at("You've hit your session limit · resets 7am (America/Vancouver)"), None);
+        assert_eq!(at("You've hit your session limit"), None);
+        assert!(super::limit_hit("You've hit your session limit · resets 7am (UTC)"));
+    }
 }

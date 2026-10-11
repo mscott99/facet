@@ -140,7 +140,10 @@ fn run(e: &Arc<Engine>, j: Job) {
             };
             if f.limit {
                 let base = LIMIT_BACKOFF_MS.load(std::sync::atomic::Ordering::Relaxed);
-                e.park(SystemTime::now() + Duration::from_millis(base << (lf - 1).min(5)), &f.text);
+                let back = SystemTime::now() + Duration::from_millis(base << (lf - 1).min(5));
+                // the reset the message names, if it names one (and a little after it)
+                let until = claude::reset_at(&f.text, chrono::Utc::now()).map(|r| r + Duration::from_secs(10)).map_or(back, |r| r.max(back));
+                e.park(until, &f.text);
             } else if n == 1 {
                 e.notice(&format!("node {} failed (tried again at the next message, or /resume): {}", name, f.text));
             }

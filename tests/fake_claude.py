@@ -18,6 +18,7 @@
 #   "CHAT x"   -> calls the engine's MCP send_chat with "x" (as the real CLI would, over HTTP to
 #                 the --mcp-config URL), then a reply "said it"
 #   "ZOOM"     -> calls MCP zoom (id 0), then a reply "zoomed"
+#   "LIMITHIT" -> the call fails with Claude Code's usage-limit message
 #   "IMAGE"    -> one Read call whose result carries an image block, then a reply "seen"
 #   "CARD id"  -> calls MCP answer_card for card id with "card answer", then a reply "noted"
 #   "NEWCARD at x" -> calls MCP new_card on "Other Note" (anchor x, warn, with a fix "LINE FIVE"),
@@ -195,6 +196,8 @@ def run_turn(msg):
             {"type": "text", "text": "a picture"},
             {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoFAKE"}}]}]}})
         time.sleep(0.2); step([{"type": "text", "text": "seen"}]); result("seen"); return
+    if "LIMITHIT" in t:  # the usage limit cuts the reply off, as Claude Code says it
+        step([{"type": "text", "text": ""}]); result("You've hit your session limit", err=True); return
     if "ZOOM" in t:
         output_tool("zoom", {"id": 0, "n": 1})
         time.sleep(0.2); step([{"type": "text", "text": "zoomed"}]); result("zoomed"); return

@@ -17,6 +17,7 @@ json.dump({"store": D, "port": PORT, "token": "tk", "vault": VAULT}, open(os.pat
 open(os.path.join(VAULT, "Some Note.md"), "w").write("first\nsecond\nthird line\n")
 open(os.path.join(VAULT, "Other Note.md"), "w").write("Other\n\nline three\n\nline five\n\nline seven\n")
 env["HOME"] = HOME
+env["FACET_LIMIT_BACKOFF_MS"] = "6000"  # a usage-limit pause of 6 s, not a minute
 CARDS = os.path.join(VAULT, ".claude", "cards.json")
 fails = []
 REPORT = "BG REPORT: the thing is in three files"  # what the fake's backgrounded subagent says
@@ -267,7 +268,7 @@ try:
     new = log()[n0:]
     notes = [x for x in new if x["kind"] == "note"]
     check(len(notes) == 1 and notes[0]["text"] == "during a turn" and new[-1]["kind"] == "note",
-          "a queued import is logged once, after the turn's messages")
+          "a queued import is logged once, after the turn's messages: %r" % [(x["kind"], x["text"][:40]) for x in new])
 
     # G: a subagent: its steps stay out of the chat, its cost does not stay out of the log
     n0 = len(log())
@@ -491,8 +492,9 @@ try:
     wait(lambda: any(m["text"] == "zoomed" for m in log()[n0:]), 30, "reply after zoom")
     wait(idle, 30, "idle after zoom")
     L = [(m["kind"], m["text"]) for m in log()[n0:]]
-    check(not any(k in ("tool", "echo") for k, _ in L) and not any("zoom" in x.lower() for k, x in L if k not in ("user", "talk", "chat")),
-          "a zoom leaves no tool or echo line in the log, only the reply: %r" % L)
+    # since 2521655 zoom and date are logged like any tool, as the gist does (user, 10 Oct)
+    check([k for k, _ in L] == ["user", "tool", "echo", "chat"] and "mcp__optchat__zoom" in L[1][1] and L[2][1].startswith("0+0|"),
+          "a zoom is logged like any tool: its call and its result, then the reply: %r" % [(k, x[:60]) for k, x in L])
 
     c2 = req({"op": "card", "do": "new", "note": "Other Note", "line": 7, "text": "a comment"})["id"]
     n0 = len(log())
@@ -599,6 +601,53 @@ try:
             wait(idle, 30, "idle after the DOM test")
         else:
             print("skip DOM test (no node, or FACET_JSDOM unset)")
+
+        # M: the usage limit cuts a turn off: the engine parks, the pause is on the chat page
+        # (and in its live poll) and the home page, and pushed to Telegram once (a local Bot
+        # API stand-in, named by `telegram.api`); it ends by itself, pushed once more
+        import http.server
+        tg = []
+        class TG(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                tg.append((self.path, json.loads(body or b"{}")))
+                out = json.dumps({"ok": True, "result": {"message_id": len(tg)}}).encode()
+                self.send_response(200); self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
+            def log_message(self, *a): pass
+        tgs = http.server.ThreadingHTTPServer(("127.0.0.1", 0), TG)
+        threading.Thread(target=tgs.serve_forever, daemon=True).start()
+        cfgp = os.path.join(HOME, ".config/facet/facet.json")
+        c0 = json.load(open(cfgp))
+        json.dump(dict(c0, telegram={"bot_token": "BOT", "chat_id": 42, "api": "http://127.0.0.1:%d" % tgs.server_port}), open(cfgp, "w"))
+        sd = req({"op": "status"})["state_dir"]
+        n0 = len(log())
+        req({"op": "send", "text": "LIMITHIT please"})
+        wait(lambda: req({"op": "status"}).get("pause_line"), 30, "pause after the limit")
+        st = req({"op": "status"})
+        check("paused until" in st["pause_line"] and "UTC" in st["pause_line"] and "usage limit" in st["pause_line"],
+              "status gives the pause line: %r" % st["pause_line"])
+        check(os.path.exists(os.path.join(sd, "pause.json")), "the pause is kept in pause.json")
+        page = get("/chat")
+        check(re.search(r'<p id=paused [^>]*>engine paused until \d\d:\d\d UTC', page) is not None and "<p id=paused class=at style=\"color:var(--err)\" hidden" not in page,
+              "the chat page shows the pause: %r" % re.findall(r"<p id=paused[^<]*", page))
+        frag = get("/f/log?since=%d" % (len(log()) + 5))
+        check('data-paused="engine paused until' in frag, "the live poll carries the pause line: %r" % frag[-300:])
+        check("paused until" in get("/"), "the home page shows the pause")
+        wait(lambda: any("paused until" in m.get("text", "") for _, m in tg), 10, "telegram push on park")
+        parks = [m for p, m in tg if "paused until" in m.get("text", "")]
+        check(len(parks) == 1 and tg[0][0] == "/botBOT/sendMessage" and parks[0]["chat_id"] == 42 and "send that message again" in parks[0]["text"],
+              "one Telegram push on park, saying the reply was cut off: %r" % tg)
+        wait(lambda: not req({"op": "status"}).get("pause_line"), 30, "the pause ends by itself")
+        wait(lambda: any("resumed" in m.get("text", "") for _, m in tg), 10, "telegram push on resume")
+        check(sum("resumed" in m.get("text", "") for _, m in tg) == 1 and len(tg) == 2, "one Telegram push on resume, none more: %r" % tg)
+        check(not os.path.exists(os.path.join(sd, "pause.json")), "pause.json is gone once resumed")
+        page = get("/chat")
+        check("<p id=paused class=at style=\"color:var(--err)\" hidden>" in page, "the chat page hides the pause line once resumed")
+        check('data-paused=""' in get("/f/log?since=%d" % (len(log()) + 5)), "and so does the live poll")
+        json.dump(c0, open(cfgp, "w"))
+        tgs.shutdown()
+        wait(idle, 30, "idle after the limit")
     finally:
         srv.kill()
 

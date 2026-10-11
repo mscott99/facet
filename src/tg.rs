@@ -55,7 +55,9 @@ const POLL: i64 = 20;
 
 fn api(cfg: &Cfg, method: &str, body: Value) -> Result<Value, String> {
     let tok = cfg.opt("telegram.bot_token").ok_or("no telegram.bot_token")?;
-    let url = format!("https://api.telegram.org/bot{}/{}", tok, method);
+    // `telegram.api`: another Bot API server (a local one, in tests)
+    let base = cfg.opt("telegram.api").unwrap_or_else(|| "https://api.telegram.org".into());
+    let url = format!("{}/bot{}/{}", base.trim_end_matches('/'), tok, method);
     let mut r = ureq::post(&url).config().timeout_global(Some(WAIT)).build()
         .send_json(&body).map_err(|e| e.to_string())?;
     let text = r.body_mut().read_to_string().map_err(|e| e.to_string())?;

@@ -390,7 +390,9 @@ impl Engine {
         self.notice(text);
         if cfg!(test) { return }
         let text = format!("facet: {}", text);
-        std::thread::spawn(move || { let _ = crate::tg::push(&Cfg::load(), &text); });
+        std::thread::spawn(move || {
+            if let Err(x) = crate::tg::push(&Cfg::load(), &text) { eprintln!("[{}] telegram push failed: {}", crate::log_stamp(), x); }
+        });
     }
 
     /// The compactor's own clock (one thread, started with the engine): a pause ends when the
@@ -489,6 +491,10 @@ pub fn serve() -> ! {
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).unwrap_or_else(|e| { eprintln!("cannot bind {}: {}", path.display(), e); std::process::exit(1) });
     // children of an earlier image of this pid (a re-exec restart): waited as they exit
+    // a test's short usage-limit backoff (the engine end-to-end test parks and resumes)
+    if let Some(ms) = std::env::var("FACET_LIMIT_BACKOFF_MS").ok().and_then(|s| s.parse::<u64>().ok()) {
+        compact::LIMIT_BACKOFF_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
     let inherited = super::claude::reap_inherited();
     if inherited > 0 { eprintln!("[{}] {} child process(es) from before the restart: reaped as they exit", crate::log_stamp(), inherited); }
 
@@ -507,7 +513,7 @@ pub fn serve() -> ! {
     let (view, cview, vnote) = super::view::load(&dir, &store, conf.view);
     if let Some(n) = &vnote { eprintln!("[{}] load: {}", crate::log_stamp(), n); }
     eprintln!("[{}] {} messages, view of {} lines / {} bytes, compactions' view {} lines / {} bytes, in {} ms",
-        store.t(), crate::log_stamp(), view.parts.len(), view.size(&store), cview.parts.len(), cview.size(&store), t0.elapsed().as_millis());
+        crate::log_stamp(), store.t(), view.parts.len(), view.size(&store), cview.parts.len(), cview.size(&store), t0.elapsed().as_millis());
     // saved at once: a first start, or a file in an earlier version's format, is written as
     // the gist's list of pairs
     let _ = super::view::save(&dir, &view);
@@ -767,6 +773,16 @@ pub fn request(dir: &Path, v: Value) -> Result<Value, String> {
     serde_json::from_str(&line).map_err(|e| format!("bad reply: {}", e))
 }
 
+/// `request`, giving up after `within` (a page must not hang on a busy engine).
+pub fn request_within(dir: &Path, v: Value, within: Duration) -> Result<Value, String> {
+    let mut s = UnixStream::connect(sock(dir)).map_err(|_| format!("no engine running on {}", dir.display()))?;
+    s.set_read_timeout(Some(within)).map_err(|e| e.to_string())?;
+    writeln!(s, "{}", v).map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    BufReader::new(s).read_line(&mut line).map_err(|e| e.to_string())?;
+    serde_json::from_str(&line).map_err(|e| format!("bad reply: {}", e))
+}
+
 pub fn running(dir: &Path) -> bool { UnixStream::connect(sock(dir)).is_ok() }
 
 /// Start an engine in the background (detached from the terminal) and wait for its socket.
@@ -838,7 +854,7 @@ mod tests {
         let calls = d.join("calls");
         let fake = d.join("fake.sh");
         std::fs::write(&fake, format!("#!/bin/sh\necho call >> '{}'\n\
-            if [ $(wc -l < '{}') -eq 1 ]; then echo '{{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"You have hit your session limit · resets 7am (UTC)\"}}'\n\
+            if [ $(wc -l < '{}') -eq 1 ]; then echo '{{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"You have hit your session limit\"}}'\n\
             else echo '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"user: a summary\"}}'; fi\n",
             calls.display(), calls.display())).unwrap();
         use std::os::unix::fs::PermissionsExt;

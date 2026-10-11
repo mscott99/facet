@@ -236,7 +236,8 @@ function live(){
         var w=document.createElement('div');w.innerHTML=h;
         var nt=w.querySelector('#tail');
         if(nt){nt.remove();tail.dataset.high=nt.dataset.high;tail.dataset.up=nt.dataset.up;
-          var dn=document.getElementById('down');if(dn)dn.hidden=nt.dataset.up!='0'}
+          var dn=document.getElementById('down');if(dn)dn.hidden=nt.dataset.up!='0';
+          var pp=document.getElementById('paused');if(pp){var pt=nt.dataset.paused||'';pp.hidden=!pt;if(pt)pp.textContent=pt}}
         var n=w.firstChild,any=false;
         while(n){var nx=n.nextSibling;
           if(n.nodeType==1&&n.dataset&&n.dataset.t){var ps=document.querySelectorAll('.pend'),q=null;
@@ -823,6 +824,14 @@ fn msg_html(cfg: &Cfg, m: &log::Msg) -> String {
 /// Only the chat venue is shown (`Msg::in_chat`): the user's chat messages and the agent's
 /// `send_chat`s. The rest of the stream (plain talk, steps, card traffic) is the memory's, and
 /// the tree view (/tree) is where to read it.
+/// The engine's pause, as `status` says it ("paused until 07:00 UTC (why), 2 message(s)
+/// queued"), or "" if it is not paused (or does not answer at once).
+fn pause_line() -> String {
+    crate::optchat::engine::request_within(&crate::optchat::engine::dir(), serde_json::json!({"op": "status"}), Duration::from_secs(2))
+        .ok().and_then(|v| v["pause_line"].as_str().map(String::from)).unwrap_or_default()
+}
+fn paused_text(line: &str) -> String { format!("engine {}: replies wait until then", line) }
+
 fn log_fragment(cfg: &Cfg, since: i64, wait: bool) -> String {
     let t0 = Instant::now();
     let mut cur = since;
@@ -835,8 +844,9 @@ fn log_fragment(cfg: &Cfg, since: i64, wait: bool) -> String {
         std::thread::sleep(Duration::from_millis(250));
     };
     let mut out: String = msgs.iter().filter(|m| m.in_chat()).map(|m| msg_html(cfg, m)).collect();
-    out.push_str(&format!("<div id=tail data-high=\"{}\" data-up={} hidden></div>",
-        high, if tell::healthy(cfg) { 1 } else { 0 }));
+    let pl = pause_line();
+    out.push_str(&format!("<div id=tail data-high=\"{}\" data-up={} data-paused=\"{}\" hidden></div>",
+        high, if tell::healthy(cfg) { 1 } else { 0 }, if pl.is_empty() { String::new() } else { md::esc(&paused_text(&pl)) }));
     out
 }
 
@@ -864,11 +874,11 @@ fn chat_page(cfg: &Cfg) -> String {
     let all: Vec<log::Msg> = log::since_by(cfg, -1, |m| m.in_chat());
     let k = all.len().saturating_sub(PAGE);
     let since = all.get(k).map(|m| m.i - 1).unwrap_or(-1);
-    // a parked compactor holds every turn: say so, with when it ends by itself
-    let paused = crate::optchat::engine::request(&crate::optchat::engine::dir(), serde_json::json!({"op": "status"}))
-        .ok().and_then(|v| v["pause_line"].as_str().map(String::from))
-        .map(|l| format!("<p id=paused class=at style=\"color:var(--err)\">engine {}: replies wait until then</p>", md::esc(&l)))
-        .unwrap_or_default();
+    // a parked compactor holds every turn: say so, with when it ends by itself (kept current
+    // by the live poll: the tail carries the line, `live()` shows or hides it)
+    let pl = pause_line();
+    let paused = format!("<p id=paused class=at style=\"color:var(--err)\"{}>{}</p>",
+        if pl.is_empty() { " hidden" } else { "" }, md::esc(&paused_text(&pl)));
     page(cfg, "Facet", "chat", &format!("{}<p id=down class=at style=\"color:var(--err)\"{}>the engine is not running: \
         nothing will answer until it is restarted</p><div id=log>{}{}</div>", paused,
         if tell::healthy(cfg) { " hidden" } else { "" },

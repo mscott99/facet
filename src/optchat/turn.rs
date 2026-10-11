@@ -660,7 +660,19 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
                 }
             }
             "result" => {
-                if let Some(o) = claude::outcome(&ev) { if o.error { e.notice(&format!("call ended with an error: {}", o.text)); } }
+                if let Some(o) = claude::outcome(&ev) {
+                    if o.error { e.notice(&format!("call ended with an error: {}", o.text)); }
+                    // the usage limit cut this reply off ("You've hit your session limit ·
+                    // resets 7am (UTC)", as an error or as the reply's own text): park, so the
+                    // pause is shown and pushed to Telegram, not left as a line nobody reads
+                    let t = o.text.trim_start().to_lowercase();
+                    if (o.error && claude::limit_hit(&o.text)) || t.starts_with("you've hit your") || t.starts_with("you have hit your") {
+                        let base = super::compact::LIMIT_BACKOFF_MS.load(std::sync::atomic::Ordering::Relaxed);
+                        let back = std::time::SystemTime::now() + Duration::from_millis(base);
+                        let until = claude::reset_at(&o.text, chrono::Utc::now()).map(|r| r + Duration::from_secs(10)).map_or(back, |r| r.max(back));
+                        e.park(until, &format!("a reply was cut off by the usage limit ({}); send that message again after the pause", o.text.trim()));
+                    }
+                }
                 let unconsumed = !e.turn.lock().unwrap().sent.is_empty();
                 if unconsumed { p.kill(); killed = true; }
                 tr.outcome = if claude::outcome(&ev).is_some_and(|o| o.error) { "error" } else { "done" };
