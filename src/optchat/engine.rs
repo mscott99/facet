@@ -111,6 +111,14 @@ pub struct Mem {
     /// Wall clock, not `Instant`: on macOS `Instant` stops while the machine sleeps, so a
     /// pause until the limit resets would outlast the reset by however long the lid was shut.
     pause: Option<(SystemTime, String)>,
+    /// A pause has been announced (notice + Telegram) and its end not yet: `watch` announces
+    /// the end once, and resumes the compactor itself.
+    pub parked: bool,
+    /// Usage-limit failures in a row: the pause after each doubles (`compact::run`).
+    pub limit_fails: u32,
+    /// When held (failed) nodes may be tried again without a new message, if a turn waits on
+    /// them (`watch`); backs off with each failure.
+    pub retry_at: Option<SystemTime>,
 }
 
 impl Mem {
@@ -123,7 +131,8 @@ impl Mem {
             for i in 0..(t >> l) { if !store.built(l, i) && store.ready(l, i) { fresh.push((l, i)); } }
             l += 1;
         }
-        Mem { store, view, cview, busy: HashSet::new(), failed: HashMap::new(), held: HashSet::new(), dir, todo: Vec::new(), fresh, pause: None }
+        Mem { store, view, cview, busy: HashSet::new(), failed: HashMap::new(), held: HashSet::new(), dir, todo: Vec::new(), fresh, pause: None,
+            parked: false, limit_fails: 0, retry_at: None }
     }
 
     /// Node (l, i) is built: off its queue, and its parent is ready once the sibling is built too.
@@ -168,7 +177,7 @@ impl Mem {
 
     /// The view to `view.json` (§3.2 of the gist).
     pub fn save(&self) {
-        if let Err(e) = super::view::save(&self.dir, &self.view) { eprintln!("cannot save view.json: {}", e); }
+        if let Err(e) = super::view::save(&self.dir, &self.view) { eprintln!("[{}] cannot save view.json: {}", crate::log_stamp(), e); }
     }
 
     /// Fit the chat's view (a batch past its budget); when it merges, the compactions' view is
@@ -186,7 +195,14 @@ impl Mem {
         if let Some((u, _)) = &self.pause { if *u <= SystemTime::now() { self.pause = None; } }
         self.pause.as_ref().map(|p| p.0)
     }
-    pub fn pause(&mut self, until: SystemTime, why: &str) { self.pause = Some((until, why.into())); }
+    /// Pause until `until`, or keep a pause that already ends later: a short backoff after a
+    /// failed call must not cut short a pause until the limit's announced reset.
+    pub fn pause(&mut self, until: SystemTime, why: &str) {
+        if let Some((u, _)) = &self.pause { if *u >= until { return } }
+        self.pause = Some((until, why.into()));
+    }
+    /// Lift the pause now (`/resume`).
+    pub fn lift(&mut self) { self.pause = None; }
     pub fn pause_reason(&mut self) -> Option<String> { self.paused()?; self.pause.as_ref().map(|p| p.1.clone()) }
 }
 
@@ -236,6 +252,13 @@ pub fn bare(dir: &Path, mcp_url: &str) -> Arc<Engine> {
     e
 }
 
+/// A wall-clock time as "07:00 UTC" (with the date if not today).
+pub fn hhmm(t: SystemTime) -> String {
+    let at: chrono::DateTime<chrono::Utc> = t.into();
+    if at.date_naive() == chrono::Utc::now().date_naive() { at.format("%H:%M UTC").to_string() }
+    else { at.format("%b %-d %H:%M UTC").to_string() }
+}
+
 pub fn dir() -> PathBuf {
     std::env::var("OPTCHAT_DIR").ok().filter(|s| !s.is_empty()).map(PathBuf::from)
         .unwrap_or_else(|| Cfg::load().store())
@@ -250,7 +273,7 @@ pub fn state_dir(dir: &Path) -> PathBuf {
 
 impl Engine {
     pub fn notice(&self, text: &str) {
-        eprintln!("[{}] {}", chrono::Local::now().format("%H:%M:%S"), text);
+        eprintln!("[{}] {}", crate::log_stamp(), text);
         super::events::log(&self.dir, "notice", json!({"text": text}));
         self.emit(json!({"ev": "notice", "text": text}));
     }
@@ -312,11 +335,10 @@ impl Engine {
         let hour: f64 = s.iter().map(|f| f.1).sum();
         drop(s);
         if self.conf.budget_hour > 0.0 && hour > self.conf.budget_hour {
-            let mut m = self.mem.lock().unwrap();
-            if m.paused().is_none() {
-                m.pause(SystemTime::now() + Duration::from_secs(600), "hourly budget spent");
-                drop(m);
-                self.notice(&format!("compactor paused 10 min: {:.0} eq spent in the last hour (budget {:.0}); /resume to go on", hour, self.conf.budget_hour));
+            let paused = self.mem.lock().unwrap().paused().is_some();
+            if !paused {
+                self.park(SystemTime::now() + Duration::from_secs(600),
+                    &format!("hourly budget spent ({:.0} eq in the last hour, budget {:.0})", hour, self.conf.budget_hour));
             }
         }
     }
@@ -335,10 +357,77 @@ impl Engine {
         super::events::log(&self.dir, "limits", json!({"info": info}));
         self.emit(json!({"ev": "limits", "line": super::usage::limits_line(&info)}));
         if info["status"] == "rejected" {
-            let secs = info["resetsAt"].as_i64().map(|t| t - chrono::Utc::now().timestamp()).unwrap_or(300).clamp(60, 6 * 3600);
-            self.mem.lock().unwrap().pause(SystemTime::now() + Duration::from_secs(secs as u64), "usage limit reached");
-            self.notice(&format!("usage limit reached; compactor waits: {}", super::usage::limits_line(&info)));
+            // until the window resets (and a few seconds more); `watch` resumes by itself then
+            let secs = info["resetsAt"].as_i64().map(|t| t - chrono::Utc::now().timestamp() + 10).unwrap_or(300).clamp(60, 6 * 3600);
+            self.park(SystemTime::now() + Duration::from_secs(secs as u64), "usage limit reached");
         }
+    }
+
+    /// Park the compactor until `until` (or later, if already parked longer). The pause is kept
+    /// in `pause.json`, so a restart keeps it, and announced once (notice and a Telegram push)
+    /// when it begins; `watch` ends it by itself when the time comes, and announces that once.
+    pub fn park(&self, until: SystemTime, why: &str) {
+        let (first, until) = {
+            let mut m = self.mem.lock().unwrap();
+            m.pause(until, why);
+            let first = !m.parked;
+            m.parked = true;
+            (first, m.paused().unwrap_or(until))
+        };
+        let secs = until.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let _ = std::fs::write(state_dir(&self.dir).join("pause.json"), json!({"until": secs, "why": why}).to_string());
+        self.changed.notify_all();
+        let line = format!("compactor paused until {}: {}", hhmm(until), why);
+        if first { self.alert(&format!("{}; {} message(s) queued; it resumes by itself", line, self.queued())) }
+        else { self.notice(&line) }
+    }
+
+    /// Messages waiting for a turn.
+    pub fn queued(&self) -> usize { let t = self.turn.lock().unwrap(); t.queue.len() + t.held.len() + t.later.len() }
+
+    /// A notice that also goes to Telegram (only when parking and resuming: never per call).
+    pub fn alert(&self, text: &str) {
+        self.notice(text);
+        if cfg!(test) { return }
+        let text = format!("facet: {}", text);
+        std::thread::spawn(move || { let _ = crate::tg::push(&Cfg::load(), &text); });
+    }
+
+    /// The compactor's own clock (one thread, started with the engine): a pause ends when the
+    /// wall clock passes its end, with no message, /resume or restart needed. Then held nodes
+    /// are released and the pump runs. Also, while a turn waits for summaries, failed nodes are
+    /// retried after their backoff (`retry_at`) and the pump is run, so no turn waits forever
+    /// on work nobody starts. `tick` bounds every wait (a laptop's sleep, a missed notify).
+    pub fn watch(self: &Arc<Self>, tick: Duration) {
+        let e = self.clone();
+        std::thread::spawn(move || loop {
+            let mut m = e.mem.lock().unwrap();
+            let wait = match m.paused() {
+                Some(u) => u.duration_since(SystemTime::now()).unwrap_or_default().min(tick).max(Duration::from_millis(5)),
+                None => tick,
+            };
+            m = e.changed.wait_timeout(m, wait).unwrap().0;
+            let now = SystemTime::now();
+            if m.parked && m.paused().is_none() {
+                m.parked = false;
+                m.held.clear();
+                drop(m);
+                let _ = std::fs::remove_file(state_dir(&e.dir).join("pause.json"));
+                e.alert(&format!("compactor resumed; {} message(s) queued", e.queued()));
+                e.changed.notify_all();
+                compact::pump(&e);
+                continue;
+            }
+            if m.paused().is_some() { continue }
+            let retry = !m.held.is_empty() && m.retry_at.is_none_or(|r| r <= now);
+            let idle = m.busy.is_empty();
+            drop(m);
+            let settling = { let t = e.turn.lock().unwrap(); t.running && t.phase == "settling" };
+            if settling && (retry || idle) {
+                if retry { e.mem.lock().unwrap().held.clear(); }
+                compact::pump(&e);
+            }
+        });
     }
     /// The model the next turn uses.
     pub fn model(&self) -> String { self.model.lock().unwrap().clone() }
@@ -358,12 +447,16 @@ impl Engine {
             "messages": m.store.t(), "view_parts": m.view.parts.len(), "view_bytes": m.view.size(&m.store),
             "unsummarized": unbuilt, "compacting": m.busy.len(), "failing": m.failed.len(), "held": m.held.len(),
             "compact_view_bytes": m.cview.size(&m.store),
-            "paused": m.pause_reason(), "busy": t.running, "queued": t.queue.len() + t.held.len() + t.later.len(), "later": t.later.len(),
+            "paused": m.pause_reason(),
+            "paused_until": m.paused().and_then(|u| u.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
+            "busy": t.running, "queued": t.queue.len() + t.held.len() + t.later.len(), "later": t.later.len(),
             "phase": t.phase, "hour_eq": self.hour_eq().round(),
             "model": self.model(), "compact_model": self.conf.compact_model,
             "mcp": self.mcp_url.get().is_some(),
             "limits": super::usage::limits_line(&self.limits()),
             "dir": self.dir.display().to_string(), "state_dir": state_dir(&self.dir).display().to_string(),
+            "pause_line": m.paused().map(|u| format!("paused until {} ({}), {} message(s) queued", hhmm(u),
+                m.pause_reason().unwrap_or_default(), t.queue.len() + t.held.len() + t.later.len())),
         })
     }
 }
@@ -390,11 +483,14 @@ pub fn serve() -> ! {
     std::fs::create_dir_all(&dir).expect("chat dir");
     let path = sock(&dir);
     if UnixStream::connect(&path).is_ok() {
-        eprintln!("another engine is running on {}", dir.display());
+        eprintln!("[{}] another engine is running on {}", crate::log_stamp(), dir.display());
         std::process::exit(1);
     }
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).unwrap_or_else(|e| { eprintln!("cannot bind {}: {}", path.display(), e); std::process::exit(1) });
+    // children of an earlier image of this pid (a re-exec restart): waited as they exit
+    let inherited = super::claude::reap_inherited();
+    if inherited > 0 { eprintln!("[{}] {} child process(es) from before the restart: reaped as they exit", crate::log_stamp(), inherited); }
 
     let conf = Conf::load(&dir);
     // a git repository from the start: Claude Code tells the model whether its cwd is one,
@@ -404,14 +500,14 @@ pub fn serve() -> ! {
         let _ = std::fs::write(dir.join(".gitignore"), "lock\n");
     }
     let store = Store::open(&dir);
-    for n in &store.notes { eprintln!("load: {}", n); }
+    for n in &store.notes { eprintln!("[{}] load: {}", crate::log_stamp(), n); }
     let t0 = Instant::now();
     // §3.2: the view is loaded from view.json, never rebuilt from the log (only folded once,
     // for a chat that has none yet)
     let (view, cview, vnote) = super::view::load(&dir, &store, conf.view);
-    if let Some(n) = &vnote { eprintln!("load: {}", n); }
-    eprintln!("{} messages, view of {} lines / {} bytes, compactions' view {} lines / {} bytes, in {} ms",
-        store.t(), view.parts.len(), view.size(&store), cview.parts.len(), cview.size(&store), t0.elapsed().as_millis());
+    if let Some(n) = &vnote { eprintln!("[{}] load: {}", crate::log_stamp(), n); }
+    eprintln!("[{}] {} messages, view of {} lines / {} bytes, compactions' view {} lines / {} bytes, in {} ms",
+        store.t(), crate::log_stamp(), view.parts.len(), view.size(&store), cview.parts.len(), cview.size(&store), t0.elapsed().as_millis());
     // saved at once: a first start, or a file in an earlier version's format, is written as
     // the gist's list of pairs
     let _ = super::view::save(&dir, &view);
@@ -458,6 +554,14 @@ pub fn serve() -> ! {
     super::events::system(&dir, "system", &prompts::system(&e.conf.name));
     let url = mcp::start(e.clone());
     let _ = e.mcp_url.set(url);
+    // a pause from before the restart (a usage limit) still holds until it ends
+    if let Some(p) = std::fs::read_to_string(sd.join("pause.json")).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()) {
+        let until = SystemTime::UNIX_EPOCH + Duration::from_secs(p["until"].as_u64().unwrap_or(0));
+        let mut m = e.mem.lock().unwrap();
+        m.pause(until, p["why"].as_str().unwrap_or("paused"));
+        m.parked = true; // `watch` ends it (at once, if it is over) and says so
+    }
+    e.watch(Duration::from_secs(30));
     compact::pump(&e);
     turn::restore(&e);
 
@@ -530,7 +634,8 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
             }
             "resume" => {
                 let mut m = e.mem.lock().unwrap();
-                m.pause = None;
+                m.lift();
+                m.parked = false;
                 m.failed.clear();
                 m.held.clear();
                 drop(m);
@@ -645,6 +750,8 @@ pub fn restart_if_idle(e: &Arc<Engine>) {
     let mut exe = std::env::current_exe().unwrap_or_else(|_| "facet".into());
     // a rebuilt binary replaces the file: /proc/self/exe then reads "<path> (deleted)"
     if let Some(p) = exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) { exe = p.into(); }
+    // children still running would outlive this image as zombies nobody waits for
+    super::claude::end_all();
     let err = std::process::Command::new(&exe).args(std::env::args().skip(1)).exec();
     // exec failed: the old engine goes on; say so
     *e.restart.lock().unwrap() = None;
@@ -717,6 +824,62 @@ mod tests {
         m2.settle_fresh().unwrap();
         assert_eq!(m2.todo[0].iter().copied().collect::<Vec<_>>(), vec![4]);
         assert_eq!(m2.todo[1].iter().copied().collect::<Vec<_>>(), vec![1]);
+    }
+
+    /// A compaction hits the usage limit: the compactor parks, and once the reset time has
+    /// passed it resumes by itself, with no message, /resume or restart, and builds the node.
+    #[test]
+    fn a_limit_pause_ends_by_itself() {
+        use std::time::{Duration, Instant};
+        let d = std::env::temp_dir().join(format!("facet-limit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // a stand-in model: refuses its first call with Claude Code's limit message, then answers
+        let calls = d.join("calls");
+        let fake = d.join("fake.sh");
+        std::fs::write(&fake, format!("#!/bin/sh\necho call >> '{}'\n\
+            if [ $(wc -l < '{}') -eq 1 ]; then echo '{{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"You have hit your session limit · resets 7am (UTC)\"}}'\n\
+            else echo '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"user: a summary\"}}'; fi\n",
+            calls.display(), calls.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FACET_CLAUDE", &fake); }
+        super::compact::LIMIT_BACKOFF_MS.store(400, std::sync::atomic::Ordering::Relaxed);
+
+        let e = super::bare(&d, "");
+        // the clock's tick is long: the wake-up must come from the pause's end, not polling
+        e.watch(Duration::from_secs(60));
+        let i = e.log_at("user", &"x".repeat(600), &crate::optchat::store::now_iso()).unwrap();
+        let until = |what: &str, secs: u64, f: &dyn Fn() -> bool| {
+            let t = Instant::now();
+            while !f() { assert!(t.elapsed() < Duration::from_secs(secs), "timed out: {}", what); std::thread::sleep(Duration::from_millis(20)); }
+        };
+        until("parked", 10, &|| e.mem.lock().unwrap().parked);
+        let parked_at = Instant::now();
+        assert!(e.status()["pause_line"].as_str().unwrap().starts_with("paused until "));
+        assert!(super::state_dir(&d).join("pause.json").exists(), "the pause is kept on file");
+        assert!(!e.mem.lock().unwrap().store.built(0, i));
+        // nothing more is done from outside: no message, no /resume
+        until("built after the reset", 10, &|| e.mem.lock().unwrap().store.built(0, i));
+        assert!(parked_at.elapsed() >= Duration::from_millis(250), "not before the reset");
+        let m = e.mem.lock().unwrap();
+        assert!(!m.parked && m.limit_fails == 0);
+        drop(m);
+        assert!(e.status()["pause_line"].is_null());
+        assert!(!super::state_dir(&d).join("pause.json").exists());
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 2);
+
+        // the stall that was seen: a turn's call reports the limit (observe parks the compactor),
+        // no compaction has failed, and messages logged meanwhile wait in the queue; past the
+        // reset they are built with nothing else happening
+        e.park(std::time::SystemTime::now() + Duration::from_millis(400), "usage limit reached");
+        let j = e.log_at("user", &"y".repeat(600), &crate::optchat::store::now_iso()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!e.mem.lock().unwrap().store.built(0, j), "nothing is built while parked");
+        until("built after the second reset", 10, &|| e.mem.lock().unwrap().store.built(0, j));
+        assert!(!e.mem.lock().unwrap().parked);
+        let _ = std::fs::remove_dir_all(super::state_dir(&d));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

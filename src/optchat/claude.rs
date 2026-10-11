@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -76,6 +77,7 @@ impl Proc {
 
     fn start(mut cmd: Command) -> std::io::Result<Proc> {
         let mut child = cmd.spawn()?;
+        live().lock().unwrap().insert(child.id());
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         let (tx, rx) = channel();
@@ -111,13 +113,14 @@ impl Proc {
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        live().lock().unwrap().remove(&self.child.id());
     }
     /// After stdin is closed the process exits by itself; give it a moment, then make sure.
     pub fn finish(&mut self) {
         self.stdin = None;
         let t = Instant::now();
         while t.elapsed() < Duration::from_secs(5) {
-            if let Ok(Some(_)) = self.child.try_wait() { return }
+            if let Ok(Some(_)) = self.child.try_wait() { live().lock().unwrap().remove(&self.child.id()); return }
             std::thread::sleep(Duration::from_millis(50));
         }
         self.kill();
@@ -130,7 +133,76 @@ impl Proc {
 impl Drop for Proc {
     fn drop(&mut self) {
         if let Ok(None) = self.child.try_wait() { let _ = self.child.kill(); let _ = self.child.wait(); }
+        live().lock().unwrap().remove(&self.child.id());
     }
+}
+
+// ---- reaping ------------------------------------------------------------------------------
+//
+// Every `Proc` waits for its child on every path (kill, finish, drop). What escaped that was
+// the restart: `restart_if_idle` re-execs the engine in place, and a child still running then
+// (a compaction past the 30 s grace, a priming call) stays this pid's child while the new image
+// holds no handle to it. Its pipes close with the exec, it exits, and nothing ever waits for it:
+// a `[claude] <defunct>` per restart (47 were found). So: before the exec, the children still
+// registered are ended and waited (`end_all`); after it, the children found at startup are
+// waited by a backstop thread (`reap_inherited`). No blanket `waitpid(-1)`: it would steal the
+// exit status of a `Command::output()` running at the same moment.
+
+unsafe extern "C" {
+    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+const WNOHANG: i32 = 1; // Linux and macOS alike
+const SIGTERM: i32 = 15;
+const SIGKILL: i32 = 9;
+
+/// The pids of the children some `Proc` still owns.
+fn live() -> &'static Mutex<HashSet<u32>> {
+    static L: std::sync::OnceLock<Mutex<HashSet<u32>>> = std::sync::OnceLock::new();
+    L.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// True once `pid` is gone (reaped now, or not our child any more).
+fn reap(pid: u32) -> bool {
+    let mut st = 0i32;
+    let r = unsafe { waitpid(pid as i32, &mut st, WNOHANG) };
+    r != 0
+}
+
+/// Before an exec: end every child a `Proc` owns and wait for it (up to 3 s, then SIGKILL).
+pub fn end_all() {
+    let pids: Vec<u32> = live().lock().unwrap().drain().collect();
+    for &p in &pids { unsafe { kill(p as i32, SIGTERM); } }
+    let t = Instant::now();
+    let mut left = pids;
+    while !left.is_empty() && t.elapsed() < Duration::from_secs(3) {
+        left.retain(|&p| !reap(p));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    for &p in &left { unsafe { kill(p as i32, SIGKILL); } let mut st = 0; unsafe { waitpid(p as i32, &mut st, 0); } }
+}
+
+/// The children this process has right now (`pgrep -P`, on Linux and macOS alike).
+pub fn children() -> Vec<u32> {
+    let me = std::process::id().to_string();
+    std::process::Command::new("pgrep").args(["-P", &me]).output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().filter_map(|x| x.parse().ok()).collect())
+        .unwrap_or_default()
+}
+
+/// At startup, before any call: the children found are an earlier image's (an exec keeps the
+/// pid and its children). Wait for each, in the background, as it exits. Returns how many.
+pub fn reap_inherited() -> usize {
+    let mut pids = children();
+    let n = pids.len();
+    if n == 0 { return 0 }
+    std::thread::spawn(move || {
+        while !pids.is_empty() {
+            pids.retain(|&p| !reap(p));
+            std::thread::sleep(Duration::from_secs(10));
+        }
+    });
+    n
 }
 
 /// Usage of one API request, put together from its stream events: `message_start` carries
@@ -184,6 +256,9 @@ pub fn outcome(ev: &Value) -> Option<Outcome> {
 /// such calls in one afternoon); the compactor parks until `pause` says.
 pub fn limit_hit(text: &str) -> bool {
     let t = text.to_lowercase();
-    ["usage limit", "rate limit", "rate_limit", "hit your limit", "limit reached", "overloaded", "429", "529"]
+    // Claude Code says "You've hit your session limit · resets 7am (UTC)" (also "weekly
+    // limit"): "hit your limit" alone missed it, so such a failure was taken for an ordinary one
+    ["usage limit", "rate limit", "rate_limit", "hit your limit", "session limit", "weekly limit", "limit reached",
+     "overloaded", "429", "529"]
         .iter().any(|k| t.contains(k))
 }

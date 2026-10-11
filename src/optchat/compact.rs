@@ -17,6 +17,10 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+/// The first pause after a usage-limit failure, doubled with each one in a row (a static so
+/// a test can make it short).
+pub static LIMIT_BACKOFF_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(60_000);
+
 pub struct Job { pub l: usize, pub i: usize, pub chat: String, pub step: String }
 
 /// Start whatever can start (§4 of the gist, "The order"): a message's node once fewer than
@@ -115,30 +119,28 @@ fn run(e: &Arc<Engine>, j: Job) {
             mm.refit(e.conf.view);
             mm.busy.remove(&(j.l, j.i));
             mm.failed.remove(&(j.l, j.i));
+            mm.limit_fails = 0;
             e.changed.notify_all();
         }
         Err(f) => {
             // §4 of the gist: a failed call is tried again at the next message (Engine::log_at,
-            // turn::input), not on a timer; a usage limit also pauses the compactor until it resets
-            let n = {
+            // turn::input); and, while a turn waits on it, after a backoff (Engine::watch). A
+            // usage limit parks the compactor: until the reset the limit announced (observe), or
+            // for a backoff that doubles with each limit failure in a row (1 min .. 32 min);
+            // Engine::watch resumes it when the time has passed, with nothing else needed.
+            let (n, lf) = {
                 let mut m = e.mem.lock().unwrap();
                 m.busy.remove(&(j.l, j.i));
                 m.held.insert((j.l, j.i));
-                let c = m.failed.entry((j.l, j.i)).or_insert(0); *c += 1; *c
+                let c = m.failed.entry((j.l, j.i)).or_insert(0); *c += 1;
+                let n = *c;
+                if f.limit { m.limit_fails += 1; }
+                m.retry_at = Some(SystemTime::now() + Duration::from_secs((30u64 << (n - 1).min(5)).min(900)));
+                (n, m.limit_fails)
             };
             if f.limit {
-                e.mem.lock().unwrap().pause(SystemTime::now() + Duration::from_secs(300), &f.text);
-                e.notice(&format!("compactor paused for 5 min: {}", f.text));
-                // the limit's reset is the next chance, message or not: wait out the pause (in
-                // short steps against the wall clock, so /resume and a sleeping laptop are seen)
-                let e = e.clone();
-                std::thread::spawn(move || {
-                    let mut m = e.mem.lock().unwrap();
-                    while m.paused().is_some() { m = e.changed.wait_timeout(m, Duration::from_secs(10)).unwrap().0; }
-                    m.held.remove(&(j.l, j.i));
-                    drop(m);
-                    pump(&e);
-                });
+                let base = LIMIT_BACKOFF_MS.load(std::sync::atomic::Ordering::Relaxed);
+                e.park(SystemTime::now() + Duration::from_millis(base << (lf - 1).min(5)), &f.text);
             } else if n == 1 {
                 e.notice(&format!("node {} failed (tried again at the next message, or /resume): {}", name, f.text));
             }

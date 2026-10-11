@@ -864,8 +864,13 @@ fn chat_page(cfg: &Cfg) -> String {
     let all: Vec<log::Msg> = log::since_by(cfg, -1, |m| m.in_chat());
     let k = all.len().saturating_sub(PAGE);
     let since = all.get(k).map(|m| m.i - 1).unwrap_or(-1);
-    page(cfg, "Facet", "chat", &format!("<p id=down class=at style=\"color:var(--err)\"{}>the engine is not running: \
-        nothing will answer until it is restarted</p><div id=log>{}{}</div>",
+    // a parked compactor holds every turn: say so, with when it ends by itself
+    let paused = crate::optchat::engine::request(&crate::optchat::engine::dir(), serde_json::json!({"op": "status"}))
+        .ok().and_then(|v| v["pause_line"].as_str().map(String::from))
+        .map(|l| format!("<p id=paused class=at style=\"color:var(--err)\">engine {}: replies wait until then</p>", md::esc(&l)))
+        .unwrap_or_default();
+    page(cfg, "Facet", "chat", &format!("{}<p id=down class=at style=\"color:var(--err)\"{}>the engine is not running: \
+        nothing will answer until it is restarted</p><div id=log>{}{}</div>", paused,
         if tell::healthy(cfg) { " hidden" } else { "" },
         older_sentinel(cfg, &all[k..], k > 0), log_fragment(cfg, since, false)), true)
 }
@@ -987,7 +992,7 @@ fn home(cfg: &Cfg) -> String {
     let st = crate::optchat::engine::request(&crate::optchat::engine::dir(), serde_json::json!({"op": "status"}));
     let (engine, usage) = match &st {
         Ok(v) => (format!("{} · {} messages{}", if v["busy"] == true { "working" } else { "idle" }, v["messages"],
-                          v["paused"].as_str().map(|p| format!(" · compactor paused: {}", p)).unwrap_or_default()),
+                          v["pause_line"].as_str().map(|p| format!(" · {}", p)).unwrap_or_default()),
                   v["limits"].as_str().unwrap_or("").to_string()),
         Err(e) => (format!("engine DOWN: {}", e), String::new()),
     };

@@ -39,6 +39,8 @@ pub fn when(epoch: u64) -> String {
     if !gnu.is_empty() { gnu } else { sh(&["/bin/date", "-r", &epoch.to_string(), "+%d %b %H:%M"]) }
 }
 pub fn today() -> String { sh(&["/bin/date", "+%Y-%m-%d"]) }
+/// The one timestamp of the logs (engine.err, serve's err): UTC, ISO 8601, to the second.
+pub fn log_stamp() -> String { chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string() }
 pub fn stamp() -> String { sh(&["/bin/date", "+%Y%m%d-%H%M%S"]) }
 
 fn main() {

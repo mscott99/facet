@@ -313,6 +313,9 @@ fn run(e: &Arc<Engine>) {
 /// §6: wait until every line of the view is a summary. False if cancelled.
 fn settle(e: &Arc<Engine>) -> bool {
     phase(e, "settling");
+    // whatever is ready is started now: a pause that has ended since the last message would
+    // otherwise leave its nodes waiting for one (Engine::watch would also start them)
+    super::compact::pump(e);
     let mut m = e.mem.lock().unwrap();
     let mut said = false;
     loop {
@@ -320,7 +323,7 @@ fn settle(e: &Arc<Engine>) -> bool {
         if cancelled(e) { return false }
         if !said {
             let k = m.view.parts.iter().filter(|p| !m.store.built(p.l, p.i)).count();
-            let why = m.pause_reason().map(|r| format!(" (compactor paused: {}; /resume)", r)).unwrap_or_default();
+            let why = m.paused().map(|u| format!(" (compactor paused until {}: {})", super::engine::hhmm(u), m.pause_reason().unwrap_or_default())).unwrap_or_default();
             drop(m);
             e.notice(&format!("waiting for {} summar{}{}", k, if k == 1 { "y" } else { "ies" }, why));
             m = e.mem.lock().unwrap();

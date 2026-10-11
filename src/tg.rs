@@ -301,11 +301,11 @@ fn inbound(cfg: Cfg) {
         let r = api(&cfg, "getUpdates", json!({"offset": offset, "timeout": POLL}));
         let v = match r {
             Ok(v) => {
-                if down { eprintln!("[{}] telegram: receiving again", crate::stamp()); down = false }
+                if down { eprintln!("[{}] telegram: receiving again", crate::log_stamp()); down = false }
                 v
             }
             Err(e) => {
-                if !down { eprintln!("[{}] telegram: not receiving: {}", crate::stamp(), e); down = true }
+                if !down { eprintln!("[{}] telegram: not receiving: {}", crate::log_stamp(), e); down = true }
                 std::thread::sleep(Duration::from_secs(5));
                 continue
             }
