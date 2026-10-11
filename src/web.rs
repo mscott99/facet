@@ -560,9 +560,18 @@ document.addEventListener('keydown',function(e){
 })();
 // Alt+C goes to the chat, Alt+N to the note tab (the notes list until a note is read), from anywhere, a box included. The key is read
 // from `code`, not `key`, since on a Mac Alt turns the letter into another character.
+// Option+N is a dead key on a Mac (a tilde): its keydown can arrive with isComposing set, and the tilde then lands in the box unless
+// the keydown is cancelled and the composition that follows is eaten for a moment.
+var altEat=0;
+['beforeinput','compositionstart','compositionupdate','compositionend','input'].forEach(function(n){
+  document.addEventListener(n,function(e){
+    if(Date.now()-altEat>600)return;
+    if(n=='input'){var t=e.target,v=t&&t.value;if(typeof v=='string'&&/[~\u02dc\u0303]$/.test(v)){t.value=v.slice(0,-1)}return}
+    e.preventDefault();e.stopPropagation()},true)});
 document.addEventListener('keydown',function(e){
-  if(!e.altKey||e.ctrlKey||e.metaKey||e.isComposing)return;
+  if(!e.altKey||e.ctrlKey||e.metaKey)return;
   var to=e.code=='KeyC'?'chat':e.code=='KeyN'?'notes':'';if(!to)return;
+  altEat=Date.now();e.preventDefault();e.stopPropagation();
   var l=document.getElementById('lastnote');
   var a=to=='notes'&&l&&!l.hidden?l:[].find.call(document.querySelectorAll('header a'),function(a){return a.textContent==to});
   if(top!==window){e.preventDefault();parent.postMessage({facet:1,t:'tab',to:to},location.origin);return}
@@ -749,9 +758,17 @@ addEventListener('message',function(e){var m=e.data;if(e.origin!=location.origin
     var p=panes[k];p.url=m.path;p.title=m.title;p.at=m.at;syncNote();
     if(k==cur){history.replaceState(history.state,'',m.path);document.title=m.title||'Facet';atEl.innerHTML=m.at}}});
 addEventListener('popstate',function(e){show((e.state&&e.state.tab)||tabOf(location.pathname),null,'pop')});
+// Option+N is a dead key on a Mac (a tilde): its keydown can arrive with isComposing set, and the tilde then lands in the box unless
+// the keydown is cancelled and the composition that follows is eaten for a moment.
+var altEat=0;
+['beforeinput','compositionstart','compositionupdate','compositionend','input'].forEach(function(n){
+  document.addEventListener(n,function(e){
+    if(Date.now()-altEat>600)return;
+    if(n=='input'){var t=e.target,v=t&&t.value;if(typeof v=='string'&&/[~\u02dc\u0303]$/.test(v)){t.value=v.slice(0,-1)}return}
+    e.preventDefault();e.stopPropagation()},true)});
 document.addEventListener('keydown',function(e){
-  if(!e.altKey||e.ctrlKey||e.metaKey||e.isComposing)return;
-  var to=e.code=='KeyC'?'chat':e.code=='KeyN'?'notes':'';if(to){e.preventDefault();key(to)}},true);
+  if(!e.altKey||e.ctrlKey||e.metaKey)return;
+  var to=e.code=='KeyC'?'chat':e.code=='KeyN'?'notes':'';if(to){altEat=Date.now();e.preventDefault();e.stopPropagation();key(to)}},true);
 show(tabOf(location.pathname),location.pathname+location.search+location.hash,'init');
 </script></body></html>"#;
 
