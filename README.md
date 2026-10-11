@@ -394,8 +394,8 @@ Returning to the chat (load, Alt+C, the tab shown again) scrolls to the first ag
 than the last one fully on screen (`localStorage.chatseen`, set by `seenMark`), else the bottom; live
 updates within a visit never move a reader who scrolled up. Before this a hidden pane (display:none)
 came back at the scroll it was left at, wherever the chat had grown since. On note pages every open
-card's box carries a small grey letter (a b c e f h ...; not d u j k g, which scroll); typing it
-outside a box focuses that box. Hidden on touch screens. Not covered by tests (no JS runner here).
+card's box shows a grey placeholder letter (a b c e f h ...; not d u j k g, which scroll); typing it
+outside a box focuses that box; the letter vanishes on focus (CSS ::placeholder transparent). None on touch screens. Not covered by tests (no JS runner here).
 
 ## Departures from the gist
 

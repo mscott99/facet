@@ -114,9 +114,7 @@ del.dm{color:var(--dim);text-decoration:line-through;text-decoration-thickness:1
 .say .cmp .go{flex:none;padding:.5rem .1rem;font:14px var(--mono);color:var(--acc)}
 .say .cmp .no{flex:none;padding:.5rem .1rem;font:14px var(--mono);background:none;border:0;cursor:pointer;color:var(--dim)}
 .say .cmp .no:hover{color:var(--err)}
-.say .cmp .kb{flex:none;align-self:center;font:11px var(--mono);color:var(--dim);border:1px solid var(--line);border-radius:3px;padding:0 .3rem;opacity:.7}
-.say .cmp .kb:empty{display:none}
-@media (pointer:coarse){.say .cmp .kb{display:none}}
+.say .cmp textarea:focus::placeholder{color:transparent}
 .say .cmp.bad textarea{outline:1px solid #c88}
 .say .t.pend{opacity:.4}
 .ctx{margin:2.2rem 0 .3rem}.ctx pre{margin:.3rem 0 0;white-space:pre-wrap}
@@ -375,7 +373,7 @@ function card(b,o){
   var d=document.createElement('div');d.className='say '+(o.kind||'comment');
   d.dataset.id=o.id;d.dataset.note=o.note;d.dataset.line=o.line;
   d.innerHTML='<div class=hd><div class=q></div><button class=x type=button title=done aria-label=done>&times;</button></div>'+
-    '<div class=th></div><div class=fx hidden></div><div class=cmp><span class=kb aria-hidden=true></span><textarea rows=1></textarea><button class=go type=button>send</button><button class=no type=button>done</button></div>';
+    '<div class=th></div><div class=fx hidden></div><div class=cmp><textarea rows=1></textarea><button class=go type=button>send</button><button class=no type=button>done</button></div>';
   d._n=0;d._known=0;head(d,o);
   var t=d.querySelector('textarea'),go=d.querySelector('.go');
   var no=d.querySelector('.no');no.addEventListener('pointerdown',function(e){e.preventDefault()});
@@ -491,13 +489,13 @@ function place(cs,t0){
   var none=document.getElementById('none');if(none)none.hidden=!!document.querySelector('.say');
   kbLabel();
 }
-// A letter beside each card's box: typing it, outside any box, focuses that box. Letters in page
+// A letter shown as grey placeholder in each card's box (gone the moment it is focused): typing it, outside any box, focuses that box. Letters in page
 // order, skipping those the page already uses (d u j k g G scroll; Alt+C/N are tabs, with Alt).
-var KBL='abcefhilmnopqrstvwxyz';
+var KBL='abcefhilmnopqrstvwxyz',coarse=matchMedia('(pointer:coarse)').matches;
 function kbLabel(){
   var n=0;document.querySelectorAll('.say').forEach(function(d){
-    var k=d.querySelector('.cmp .kb');if(!k)return;
-    var l=n<KBL.length?KBL[n++]:'';d._kb=l;k.textContent=l;k.title=l?'press '+l+' to reply':''})}
+    var k=d.querySelector('.cmp textarea');if(!k)return;
+    var l=n<KBL.length?KBL[n++]:'';d._kb=l;if(coarse||!l)k.removeAttribute('placeholder');else k.placeholder=l})}
 document.addEventListener('keydown',function(e){
   if(e.defaultPrevented||e.ctrlKey||e.metaKey||e.altKey||e.shiftKey||e.isComposing||e.key.length!=1)return;
   var t=e.target;
