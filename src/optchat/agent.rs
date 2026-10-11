@@ -125,6 +125,7 @@ fn run(e: Arc<Engine>, mut p: Proc, rec: Rec, wait: Option<Waiter>) {
             }
             "result" => {
                 let ok = claude::outcome(&ev).is_some_and(|o| !o.error);
+                if ok && claude::outcome(&ev).is_some_and(|o| { let t = o.text.trim_start().to_lowercase(); !t.starts_with("you've hit your") && !t.starts_with("you have hit your") }) { e.proof_of_life(); }
                 status = if ok { "done".into() } else { "failed".into() };
                 if let Some(o) = claude::outcome(&ev) { if !o.text.trim().is_empty() { report = o.text; } }
                 break;

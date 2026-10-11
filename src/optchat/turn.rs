@@ -662,6 +662,7 @@ fn call(e: &Arc<Engine>, view_text: &str, text: &str, tr: &mut Trace) {
             "result" => {
                 if let Some(o) = claude::outcome(&ev) {
                     if o.error { e.notice(&format!("call ended with an error: {}", o.text)); }
+                    else if !{ let t = o.text.trim_start().to_lowercase(); t.starts_with("you've hit your") || t.starts_with("you have hit your") } { e.proof_of_life(); }
                     // the usage limit cut this reply off ("You've hit your session limit ·
                     // resets 7am (UTC)", as an error or as the reply's own text): park, so the
                     // pause is shown and pushed to Telegram, not left as a line nobody reads

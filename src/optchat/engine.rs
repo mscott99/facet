@@ -14,7 +14,7 @@
 //   -> {"op":"restart","serve":bool}  queue a restart of this engine (and of serve, if asked) for
 //                                     when the running turn has ended and no detached spawn is
 //                                     alive; returns at once ("restart queued")
-//   -> {"op":"resume"}                lift a compactor pause
+//   -> {"op":"resume"}                lift a compactor pause (`facet resume`)
 //   -> {"op":"view"} / {"op":"status"} / {"op":"zoom","id":..,"n":..}
 //   -> {"op":"model","name":..}       the master model for the next turns
 //   -> {"op":"watch"}                 then a stream of events, one per line:
@@ -387,6 +387,43 @@ impl Engine {
     /// Messages waiting for a turn.
     pub fn queued(&self) -> usize { let t = self.turn.lock().unwrap(); t.queue.len() + t.held.len() + t.later.len() }
 
+    /// Lift the pause and resume the compactor now: for `facet resume` and for proof the limit is
+    /// gone (a call that succeeded). Announces once (notice + Telegram) only if it was parked.
+    pub fn resume(self: &Arc<Self>, why: &str) {
+        let was = {
+            let mut m = self.mem.lock().unwrap();
+            let was = m.parked || m.paused().is_some();
+            m.lift();
+            m.parked = false;
+            m.limit_fails = 0;
+            m.failed.clear();
+            m.held.clear();
+            was
+        };
+        let _ = std::fs::remove_file(state_dir(&self.dir).join("pause.json"));
+        self.changed.notify_all();
+        if was { self.alert(&format!("compactor resumed ({}); {} message(s) queued", why, self.queued())); }
+        compact::pump(self);
+    }
+    /// A call that was not refused by the usage limit finished: the limit is gone, so a pause
+    /// still on (a stale deadline, a plan upgrade) is lifted at once.
+    pub fn proof_of_life(self: &Arc<Self>) {
+        let on = { let mut m = self.mem.lock().unwrap(); m.parked || m.paused().is_some() };
+        if on { self.resume("a call succeeded, so the limit is gone"); }
+    }
+
+    /// A pause kept in `pause.json` from before a restart: dropped silently if it is over;
+    /// else it holds, and counts as already announced (`parked`), so no second Telegram push.
+    pub fn load_pause(&self) {
+        let f = state_dir(&self.dir).join("pause.json");
+        let Some(p) = std::fs::read_to_string(&f).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()) else { return };
+        let until = SystemTime::UNIX_EPOCH + Duration::from_secs(p["until"].as_u64().unwrap_or(0));
+        if until <= SystemTime::now() { let _ = std::fs::remove_file(&f); return }
+        let mut m = self.mem.lock().unwrap();
+        m.pause(until, p["why"].as_str().unwrap_or("paused"));
+        m.parked = true;
+    }
+
     /// A notice that also goes to Telegram (only when parking and resuming: never per call).
     pub fn alert(&self, text: &str) {
         self.notice(text);
@@ -562,13 +599,7 @@ pub fn serve() -> ! {
     super::events::system(&dir, "system", &prompts::system(&e.conf.name));
     let url = mcp::start(e.clone());
     let _ = e.mcp_url.set(url);
-    // a pause from before the restart (a usage limit) still holds until it ends
-    if let Some(p) = std::fs::read_to_string(sd.join("pause.json")).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()) {
-        let until = SystemTime::UNIX_EPOCH + Duration::from_secs(p["until"].as_u64().unwrap_or(0));
-        let mut m = e.mem.lock().unwrap();
-        m.pause(until, p["why"].as_str().unwrap_or("paused"));
-        m.parked = true; // `watch` ends it (at once, if it is over) and says so
-    }
+    e.load_pause();
     e.watch(Duration::from_secs(30));
     compact::pump(&e);
     turn::restore(&e);
@@ -641,15 +672,7 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
                 json!({"ok": true, "queued": true})
             }
             "resume" => {
-                let mut m = e.mem.lock().unwrap();
-                m.lift();
-                m.parked = false;
-                m.failed.clear();
-                m.held.clear();
-                drop(m);
-                e.changed.notify_all(); // a failed job waiting out the pause
-                e.notice("compactor resumed");
-                compact::pump(e);
+                e.resume("manual");
                 json!({"ok": true})
             }
             "view" => { let m = e.mem.lock().unwrap(); json!({"view": m.view.render(&m.store)}) }
@@ -896,6 +919,41 @@ mod tests {
         assert!(!e.mem.lock().unwrap().store.built(0, j), "nothing is built while parked");
         until("built after the second reset", 10, &|| e.mem.lock().unwrap().store.built(0, j));
         assert!(!e.mem.lock().unwrap().parked);
+        let _ = std::fs::remove_dir_all(super::state_dir(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Fake limits: a stale pause is dropped on load, a future one holds without a second
+    /// announcement; a successful call and `resume` each lift a pause.
+    #[test]
+    fn pause_stale_success_and_resume() {
+        use std::time::{Duration, SystemTime};
+        let d = std::env::temp_dir().join(format!("facet-pause-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let e = super::bare(&d, "");
+        let pj = super::state_dir(&d).join("pause.json");
+        let secs = |t: SystemTime| t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        let write = |t: SystemTime| std::fs::write(&pj, serde_json::json!({"until": secs(t), "why": "x"}).to_string()).unwrap();
+        // stale: dropped, not parked
+        write(SystemTime::now() - Duration::from_secs(3600));
+        e.load_pause();
+        assert!(!pj.exists());
+        { let mut m = e.mem.lock().unwrap(); assert!(!m.parked && m.paused().is_none()); }
+        // future: held, counted as announced
+        write(SystemTime::now() + Duration::from_secs(3600));
+        e.load_pause();
+        { let mut m = e.mem.lock().unwrap(); assert!(m.parked && m.paused().is_some()); }
+        // a successful call clears it
+        e.proof_of_life();
+        { let mut m = e.mem.lock().unwrap(); assert!(!m.parked && m.paused().is_none()); }
+        assert!(!pj.exists());
+        // resume clears it
+        e.park(SystemTime::now() + Duration::from_secs(3600), "usage limit reached");
+        assert!(pj.exists());
+        e.resume("manual");
+        { let mut m = e.mem.lock().unwrap(); assert!(!m.parked && m.paused().is_none()); }
+        assert!(!pj.exists());
         let _ = std::fs::remove_dir_all(super::state_dir(&d));
         let _ = std::fs::remove_dir_all(&d);
     }

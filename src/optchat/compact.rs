@@ -120,7 +120,9 @@ fn run(e: &Arc<Engine>, j: Job) {
             mm.busy.remove(&(j.l, j.i));
             mm.failed.remove(&(j.l, j.i));
             mm.limit_fails = 0;
+            drop(m);
             e.changed.notify_all();
+            e.proof_of_life();
         }
         Err(f) => {
             // §4 of the gist: a failed call is tried again at the next message (Engine::log_at,

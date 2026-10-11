@@ -179,6 +179,13 @@ fn main() {
             Err(e) => die(&e),
         },
 
+        // lift a usage-limit pause now (no restart); the engine says so on Telegram
+        "resume" => match optchat::engine::request(&optchat::engine::dir(), serde_json::json!({"op": "resume"})) {
+            Ok(v) if v["ok"].as_bool() == Some(true) => println!("resumed"),
+            Ok(v) => die(v["error"].as_str().unwrap_or("refused")),
+            Err(e) => die(&e),
+        },
+
         "diag" => card_cmd(&cfg, &["list".to_string()]),
         // one call, N cards: anchors are verbatim text, the binary finds the lines
         "review" => {
@@ -225,6 +232,7 @@ facet browse [out.html]     the whole memory tree as one page (also served at /t
 facet import <file>...      add files to the memory, one note each (queued until a running turn is done)
 facet stats                 token usage per day and kind
 facet cancel                stop the running turn
+facet resume                lift a usage-limit pause now (no restart); one Telegram message
 facet serve                 the web route, plus Telegram if configured
 facet init                  write ~/.config/facet/facet.json from what is already here
 facet post <file> [slug]    publish a note (writes `facet: slug` into its frontmatter)

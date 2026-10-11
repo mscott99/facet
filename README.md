@@ -486,7 +486,11 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     node is held until the next message arrives (logged, or accepted for a turn, so a turn
     waiting on it is not stuck until the message after) or `/resume`. Added for safety: a
     usage-limit error pauses the compactor until the reset time Claude Code reports (else 5
-    minutes) and then tries the node again by itself; an optional hourly budget
+    minutes) and then tries the node again by itself. The pause is kept in `pause.json`: on a restart a
+    deadline already past is dropped silently, a future one holds (and is not announced again).
+    Any call that finishes without the limit (turn, compaction, subagent) lifts a pause at
+    once, so a stale deadline (e.g. after a plan upgrade) ends with the next success;
+    `facet resume` lifts it by hand. Parking and resuming each send one Telegram message. An optional hourly budget
     (`budget_hour_eq`) pauses it too; a compactor call with no result after 180 s counts as a
     failure. (The old 10 s retry and the park after 5 failures are gone with the rule they
     patched.)
