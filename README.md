@@ -464,8 +464,11 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     cheaper than writing a task. It states the measured cost (19): on the master's model and
     effort a spawn shares the cache prefix and a call costs about what a master request does,
     a little less; its steps cost no compaction; its only overhead is the task and the report.
-    It states the tradeoff of `--model`/`--effort`: a cache miss on the whole view, worth it
-    only for a long task that can be stated exactly. It keeps the caveats: only the report
+    Later (2026-10-11, user: "full opus approach is too expensive ... sonnet mostly for
+    subagents, I am now on pro plan, Opus reviews changes"): spawns run on Sonnet by default
+    (`agent_model`), Opus (`--model opus`) only when warranted (drafting mathematical writing,
+    hard reasoning); fixing edits are Sonnet; the master reviews changes after the report;
+    Sonnet's cache warms with regular use. It keeps the caveats: only the report
     survives, so the task asks for findings, sources, changes and what is unverified; the
     spawn sees the view as of turn start and cannot ask; several run at once; never sleep or
     poll; `--wait` only when the reply needs the result. This replaces the earlier framing
@@ -475,7 +478,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     asks the report for. Added: each turn is a fresh process, so anything started in the
     background dies with it; the paragraph names `facet spawn` as the one way to send a
     subagent out (19), plain when the work should outlive the turn (21). It runs on the
-    master's model by default, since that is what shares the cache.
+    Sonnet by default (`agent_model`), the master's effort.
 13. *Free nodes are built at once*, without waiting for the start rule (§4: fewer than 8
     unbuilt lines before a message): they need no model call, so no call ever sees them
     unbuilt; the result is the same.
@@ -512,9 +515,8 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     - the master's built-in tools (`chat.tools`, `Task` always dropped) and the same MCP tool
       list: its MCP path (`/<secret>/agent`) lists exactly the master's tools and refuses the
       writing ones server-side, so read-only is enforced without changing the list;
-    - the master's model (`/model`) and effort, by default; `--model`/`--effort` still
-      override, at the price of the prefix (a cache is per model, and the effort sets the
-      thinking parameters);
+    - `agent_model` (default sonnet) and the master's effort, by default; `--model`/`--effort`
+      override (a cache is per model, and the effort sets the thinking parameters);
     - the same flags (`--replay-user-messages`, `--add-dir /tmp`, permission mode, safe mode)
       and the same `CLAUDE_CODE_PROMPT_CACHE_TTL`, since the TTL is set on the cache marks;
     - the same view, cut into the same blocks (`view::pieces`) the master's call sends, so the

@@ -140,7 +140,7 @@ fn main() {
                     "--desc" => { desc = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                     "--effort" => { effort = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                     "--wait" => { wait = true; i += 1; }
-                    "-h" | "--help" => { println!("facet spawn [--wait] [--model M] [--effort low|medium|high|xhigh|max] [--kind general-purpose|explore] [--desc D] [--task-file PATH | - | TASK...]\n  runs on the master's model, effort, prompt, tools and view (sharing its cache); --model/--effort override, at the price of the cache\n  --wait: block until the report and print it (logged as work, starts no turn)"); return; }
+                    "-h" | "--help" => { println!("facet spawn [--wait] [--model M] [--effort low|medium|high|xhigh|max] [--kind general-purpose|explore] [--desc D] [--task-file PATH | - | TASK...]\n  runs on Sonnet (conf agent_model) at the master's effort, with the master's prompt, tools and view; --model opus/--effort override\n  --wait: block until the report and print it (logged as work, starts no turn)"); return; }
                     w => { words.push(w.to_string()); i += 1; }
                 }
             }

@@ -43,14 +43,14 @@ pub type Waiter = std::sync::mpsc::Sender<(String, std::sync::mpsc::Sender<bool>
 /// the master's system prompt, built-in tools, MCP tool list, model and effort, and the view
 /// the live call was sent (or, between turns, the view as it stands), in the same blocks; the
 /// subagent's instructions and its task follow the view in the same first message. `model` or
-/// `effort` given override the master's, at the price of that prefix (the cache is per model,
+/// `effort` given override the defaults (model: `agent_model`, Sonnet; effort: the master's) (the cache is per model,
 /// and a different effort changes the thinking settings). `kind` "explore" is told to change
 /// nothing; the tools are the same either way, since a different tool list is a different
 /// prefix. Returns its id at once; with a `wait`er, the report goes there too.
 pub fn spawn(e: &Arc<Engine>, model: &str, effort: &str, kind: &str, desc: &str, task: &str, wait: Option<Waiter>) -> Result<String, String> {
     let task = task.trim();
     if task.is_empty() { return Err("empty task".into()) }
-    let model = if model.trim().is_empty() { e.model() } else { model.trim().to_string() };
+    let model = if model.trim().is_empty() { e.conf.agent_model.clone() } else { model.trim().to_string() };
     let effort = if effort.trim().is_empty() { e.conf.effort.clone() } else { effort.trim().to_string() };
     let kind = if kind.trim().is_empty() { "general-purpose".to_string() } else { kind.trim().to_string() };
     let id = new_id();
