@@ -603,6 +603,15 @@ pub fn serve() -> ! {
     e.watch(Duration::from_secs(30));
     compact::pump(&e);
     turn::restore(&e);
+    // the inbox is the one way in: messages left while this engine was down are taken now, the
+    // rest as they arrive (a directory listing twice a second costs nothing)
+    {
+        let e = e.clone();
+        std::thread::spawn(move || loop {
+            turn::drain_inbox(&e);
+            std::thread::sleep(Duration::from_millis(400));
+        });
+    }
 
     for conn in listener.incoming() {
         let Ok(conn) = conn else { continue };

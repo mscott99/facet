@@ -54,6 +54,9 @@ hr{border:0;border-top:1px solid var(--line);margin:2.2rem 0}
 .pend{opacity:.4}
 .pend.bad{opacity:.7;border-left-color:#c88}
 .pend.bad::after{content:' ✕';color:#c88}
+.ob{opacity:.45}.ob .st{display:block;margin-top:-.7em}
+.ob.working{opacity:.85;border-left-color:var(--acc)}.ob.working .st{color:var(--acc);animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
 .user{border-left:2px solid #8fa8c84d;padding-left:1.1rem}
 details.step{margin:.5rem 0;font:12.5px/1.6 var(--mono);color:var(--dim)}
 details.step summary{cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -230,12 +233,16 @@ function live(){
     var tail=document.getElementById('tail');
     if(gen!=LS||!tail)return;
     LC=new AbortController();
-    fetch(TOK+'/f/log?wait=1&since='+tail.dataset.high,{signal:LC.signal})
+    fetch(TOK+'/f/log?wait=1&since='+tail.dataset.high+'&obh='+(tail.dataset.obh||''),{signal:LC.signal})
       .then(function(r){return r.ok?r.text():Promise.reject(r.status)}).then(function(h){
         if(gen!=LS)return;
         var w=document.createElement('div');w.innerHTML=h;
         var nt=w.querySelector('#tail');
-        if(nt){nt.remove();tail.dataset.high=nt.dataset.high;tail.dataset.up=nt.dataset.up;
+        if(nt){nt.remove();tail.dataset.high=nt.dataset.high;tail.dataset.up=nt.dataset.up;tail.dataset.obh=nt.dataset.obh;
+          var ob=document.getElementById('outbox');
+          if(ob){ob.innerHTML=nt.dataset.ob||'';ob.querySelectorAll('[data-t]').forEach(function(o){
+            document.querySelectorAll('.pend:not(.bad)').forEach(function(q){if(q.dataset.t==o.dataset.t)q.remove()})});
+            if(ob.firstChild){mathify(ob);if(stick&&!window._h)scrollTo(0,1e7)}}
           var dn=document.getElementById('down');if(dn)dn.hidden=nt.dataset.up!='0';
           var pp=document.getElementById('paused');if(pp){var pt=nt.dataset.paused||'';pp.hidden=!pt;if(pt)pp.textContent=pt}}
         var n=w.firstChild,any=false;
@@ -519,7 +526,7 @@ document.addEventListener('htmx:afterRequest',function(e){
   var m=/^model: (\S+)/.exec(r);
   if(m||(p&&r!='sent'&&r!='queued')){if(p)p.remove()}
   if(m){t.textContent=r;var h=document.getElementById('mdl');if(h)h.textContent=m[1]}
-  else if(r!='sent')t.textContent=r;});
+  else if(r!='sent'&&r!='queued')t.textContent=r;});
 // older messages load above, keeping the reader where they were
 document.addEventListener('htmx:beforeRequest',function(e){
   if(e.target.id=='older')window._h=document.body.scrollHeight});
@@ -832,22 +839,52 @@ fn pause_line() -> String {
 }
 fn paused_text(line: &str) -> String { format!("engine {}: replies wait until then", line) }
 
-fn log_fragment(cfg: &Cfg, since: i64, wait: bool) -> String {
+/// The user's own messages the chat does not hold yet, from the files alone (so with the engine
+/// down, and after a reload): in the inbox = "queued" (the server has it, the engine has not),
+/// in the engine's saved queue = "working" (taken, its turn not begun). Once its turn begins it
+/// is in the log and shows as an ordinary message. See optchat/inbox.rs.
+fn outbox_html(cfg: &Cfg) -> String {
+    use crate::optchat::inbox;
+    let base = note_base(cfg);
+    let one = |text: &str, class: &str, label: &str| format!(
+        "<div class=\"msg user ob {}\" data-t=\"{}\">{}<span class=\"st at\">{}</span></div>",
+        class, md::esc(text.trim()), md::render(text, &base), label);
+    // the engine's side first: it removes its record only after the log has the message, and the
+    // inbox file only after its record is saved, so reading in this order never loses sight of one
+    let mut out: String = inbox::working().iter().map(|t| one(t, "working", "working")).collect();
+    out.extend(inbox::list().iter().map(|i| one(&i.text, "queued", if i.later { "queued · for its own turn" } else { "queued" })));
+    out
+}
+fn obh(h: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut x = std::collections::hash_map::DefaultHasher::new();
+    h.hash(&mut x);
+    x.finish().to_string()
+}
+
+fn log_fragment(cfg: &Cfg, since: i64, wait: bool) -> String { log_fragment_ob(cfg, since, wait, "", false).0 }
+
+/// `known`: the outbox hash the page has; a different one ends the wait too. Returns the
+/// fragment and the outbox markup (for the first page to place after the tail).
+fn log_fragment_ob(cfg: &Cfg, since: i64, wait: bool, known: &str, in_tail: bool) -> (String, String) {
     let t0 = Instant::now();
     let mut cur = since;
-    let (msgs, high) = loop {
+    let (msgs, high, ob) = loop {
+        // outbox before log: a message moving from the one to the other is then in at least one
+        let ob = outbox_html(cfg);
         let msgs = log::since(cfg, cur);
         let high = msgs.last().map(|m| m.i).unwrap_or(cur);
         // a step or a card comment only moves the cursor: it is not worth waking the page for
-        if !wait || msgs.iter().any(|m| m.in_chat()) || t0.elapsed() >= LONG { break (msgs, high) }
+        if !wait || msgs.iter().any(|m| m.in_chat()) || (in_tail && obh(&ob) != known) || t0.elapsed() >= LONG { break (msgs, high, ob) }
         cur = high;
         std::thread::sleep(Duration::from_millis(250));
     };
     let mut out: String = msgs.iter().filter(|m| m.in_chat()).map(|m| msg_html(cfg, m)).collect();
     let pl = pause_line();
-    out.push_str(&format!("<div id=tail data-high=\"{}\" data-up={} data-paused=\"{}\" hidden></div>",
-        high, if tell::healthy(cfg) { 1 } else { 0 }, if pl.is_empty() { String::new() } else { md::esc(&paused_text(&pl)) }));
-    out
+    out.push_str(&format!("<div id=tail data-high=\"{}\" data-up={} data-paused=\"{}\" data-obh=\"{}\" data-ob=\"{}\" hidden></div>",
+        high, if tell::healthy(cfg) { 1 } else { 0 }, if pl.is_empty() { String::new() } else { md::esc(&paused_text(&pl)) },
+        obh(&ob), md::esc(&ob)));
+    (out, ob)
 }
 
 const PAGE: usize = 40;
@@ -877,12 +914,13 @@ fn chat_page(cfg: &Cfg) -> String {
     // a parked compactor holds every turn: say so, with when it ends by itself (kept current
     // by the live poll: the tail carries the line, `live()` shows or hides it)
     let pl = pause_line();
+    let (frag, ob) = log_fragment_ob(cfg, since, false, "", false);
     let paused = format!("<p id=paused class=at style=\"color:var(--err)\"{}>{}</p>",
         if pl.is_empty() { " hidden" } else { "" }, md::esc(&paused_text(&pl)));
     page(cfg, "Facet", "chat", &format!("{}<p id=down class=at style=\"color:var(--err)\"{}>the engine is not running: \
-        nothing will answer until it is restarted</p><div id=log>{}{}</div>", paused,
+        nothing will answer until it is restarted; what you send is kept</p><div id=log>{}{}<div id=outbox>{}</div></div>", paused,
         if tell::healthy(cfg) { " hidden" } else { "" },
-        older_sentinel(cfg, &all[k..], k > 0), log_fragment(cfg, since, false)), true)
+        older_sentinel(cfg, &all[k..], k > 0), frag, ob), true)
 }
 
 /// A note, rendered whole. Its cards are not in this markup: the page places them under their
@@ -1238,7 +1276,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         ["chat"] => html(chat_page(cfg), 200),
 
         ["f", "older"] => html(older_fragment(cfg, qnum("before")), 200),
-        ["f", "log"] => html(log_fragment(cfg, qnum("since"), qnum("wait") > 0), 200),
+        ["f", "log"] => html(log_fragment_ob(cfg, qnum("since"), qnum("wait") > 0, &qstr("obh"), true).0, 200),
 
         // the cards of the notes on a page (or `all`), held with `wait` until any card changes
         // from `v`: a reply, a new card the agent opened, one closed elsewhere
@@ -1308,7 +1346,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
                 return html(md::esc(&crate::tg::model_cmd(&t[6..])), 200);
             }
             match tell::tell(cfg, &text, "reader", field(&f, "later") == "1") {
-                Ok(_) => html("sent".into(), 200),
+                Ok(_) => html("queued".into(), 200),
                 Err(e) => html(format!("not sent: {}", md::esc(&e)), 200),
             }
         }

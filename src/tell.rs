@@ -22,10 +22,10 @@ pub fn tell(cfg: &Cfg, text: &str, origin: &str, later: bool) -> Result<String, 
     Ok(body)
 }
 
-/// The one adapter: the engine's socket. A message goes whole, newlines and all.
+/// The one adapter: the inbox (optchat/inbox.rs), a file on disk the engine drains. It is
+/// written before anyone is answered, so a message is kept whether or not the engine is up.
 fn send(_cfg: &Cfg, line: &str, later: bool) -> Result<(), String> {
-    let v = crate::optchat::engine::request(&crate::optchat::engine::dir(), serde_json::json!({"op": "send", "text": line, "later": later}))?;
-    if v["ok"].as_bool() == Some(true) { Ok(()) } else { Err(v["error"].as_str().unwrap_or("refused").to_string()) }
+    crate::optchat::inbox::push(line, later).map(|_| ())
 }
 
 /// Is the input path actually there? Not a predicate on a noun — a health check on one adapter.

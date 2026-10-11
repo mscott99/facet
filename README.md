@@ -219,7 +219,8 @@ Web pages (`facet serve`, all under `/<token>`):
     /d/                every open card, under its note and the lines it is about
     POST /x/send       a message into the conversation (form field `text`; `later=1`: a turn of
                        its own; in the box, Enter sends, Shift-Enter sends later, Alt-Enter is
-                       a new line)
+                       a new line). Answers `queued`: the message is a file in the inbox (below)
+                       before the answer, whether or not the engine is running
     POST /x/card       a card, from its page (`do`=say: `id`, `text`, and for the first word
                        `note`/`line`/`quote`; close; apply) -> JSON {ok, k | text | error}
     /f/log, /f/doc/<slug>, /f/note/<name>, /f/cards, /static/htmx.js
@@ -360,6 +361,13 @@ reaches the user, and a `fallback` event is written (the turn record gets `fallb
 The text then stands in the stream twice, once as `talk` and once as `chat`.
 
 ## chat
+
+On the web chat, the user's own message has three states, drawn from files so they survive
+a reload and need no engine (web.rs `outbox_html`): **queued** (grey, "queued": in the inbox,
+the engine has not taken it, e.g. the engine is down or paused), **working** (accent edge,
+pulsing "working": in the engine's queue.json, its turn not begun), then an ordinary message
+once its turn has logged it. The live poll (`/f/log?wait=1&obh=`) wakes on a change of the
+outbox as well as of the log.
 
     facet chat          the conversation in this terminal; starts the engine if needed
     facet engine        the engine in the foreground
@@ -774,6 +782,13 @@ logged). (Cards are not here: they live in the vault, see **cards**; a `cards.js
 here is the old file, already absorbed.)
 
     events.jsonl   introspection, below
+    inbox/         messages taken by serve, the CLI or Telegram, one JSON file each
+                   ({text, later}, name = arrival time), written whole (tmp, fsync, rename)
+                   before the sender is answered; the engine takes them (twice a second, and
+                   at start) into queue.json / later.json and deletes the file after that
+                   is saved. One queue in, not two: the engine's socket `send` op remains for
+                   the tests but no route uses it. A crash between "saved" and "deleted" can
+                   replay one message (never lose one)
     queue.json     accepted messages not yet in the log; queued again at start
     later.json     the same, for messages waiting for turns of their own
     notes.json     notes imported during a turn, not yet in the log; added at start
@@ -840,6 +855,7 @@ only as current as the archived job's last run).
 
 ## tests
 
+`python3 tests/inbox_test.py` (no engine: send, reload, restart serve, then start the engine);
 `cargo test`; `python3 tests/engine_test.py` (the whole engine against a fake `claude`, no
 tokens); `python3 tests/live_test.py` (real `claude -p`, Sonnet, ~100k eq: checks every
 cache claim above from request usage; with `ANTHROPIC_BASE_URL` at a logging proxy and

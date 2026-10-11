@@ -121,6 +121,12 @@ pub fn restore(e: &Arc<Engine>) {
     for t in later { input(e, t, true); }
 }
 
+/// Take what serve, the CLI and Telegram left in the inbox (inbox.rs) into the engine's own
+/// queue, in arrival order. `input` has saved each message (queue.json) before its file goes.
+pub fn drain_inbox(e: &Arc<Engine>) -> usize {
+    super::inbox::drain_in(&super::inbox::dir(), |it| input(e, it.text.clone(), it.later))
+}
+
 impl State {
     fn write(&mut self, text: String) {
         let ok = self.stdin.as_mut().is_some_and(|w| w.write_all(user_line(&text).as_bytes()).and_then(|_| w.flush()).is_ok());
