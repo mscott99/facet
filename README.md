@@ -449,23 +449,33 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 
 **Choices the gist leaves open, and safety additions**
 
-12. *The system prompt's subagent paragraph keeps the gist's free hand, with a nudge (§7.2;
-    the user's decision).* There is no
-    spawn, tell or computer tool, so the gist's wording would describe tools that do not
-    exist, and its "use subagents only when the user asks for them" is a caution about
-    delegating blind, not about price. A spawn here carries the whole view, as the gist's
-    does (see 19), but a subagent's steps stay out of the log, which makes delegating cheaper
-    here than elsewhere and is the whole of the price: what the subagent read and did is gone,
-    only its report survives, and it cannot be asked again. The paragraph states both halves
-    and gives the one quantity the choice turns on: how much of the work will be worth
-    remembering. Little, send it out (a search, a survey, a fact, a contained piece of
-    programming); much, do it here. Cost alone must not decide it, since the saving and the
-    loss are the same fact. The choice is left to the agent's judgement rather than made a
-    rule of. Added:
-    each turn is a fresh process, so anything started in the background dies with it. The
-    paragraph names `facet spawn` as the one way to send a subagent out (19): `--wait` when
-    the master needs what it finds within the turn, plain when the work should outlive it
-    (21). It runs on the master's model by default, since that is what shares the cache.
+12. *Subagents by default (§7.2; the user's decision, 2026-10-11).* There is no spawn, tell or
+    computer tool, so the gist's wording would describe tools that do not exist, and its "use
+    subagents only when the user asks for them" is a caution about delegating blind, not about
+    price. The user's words: "It is essentially async requests to the main agent at this
+    point. The fact that it is as cheap to run a sub-agent as doing it yourself should be made
+    clear, and tradeoffs of running sonnet or different effort levels should be stated. This
+    essentially means to be very generous with calling subagents. Subagents by default,
+    essentially, with the exception direct responses to the viewer; the startup cost is
+    writing the subagent task prompt and reading its output on completion. So anything that
+    requires tool calls are likely cheaper through subagents." The paragraph therefore makes
+    sending out the default for anything that needs tool calls, and keeps for the master only
+    what speaks to the user (send_chat, card answers) and the rare single trivial call that is
+    cheaper than writing a task. It states the measured cost (19): on the master's model and
+    effort a spawn shares the cache prefix and a call costs about what a master request does,
+    a little less; its steps cost no compaction; its only overhead is the task and the report.
+    It states the tradeoff of `--model`/`--effort`: a cache miss on the whole view, worth it
+    only for a long task that can be stated exactly. It keeps the caveats: only the report
+    survives, so the task asks for findings, sources, changes and what is unverified; the
+    spawn sees the view as of turn start and cannot ask; several run at once; never sleep or
+    poll; `--wait` only when the reply needs the result. This replaces the earlier framing
+    (the choice turning on "how much of the work will be worth remembering", a lean
+    pro-subagent nudge taken from the gist), which assumed delegation traded memory for cost;
+    with the shared prefix it costs no more, and what the master needs remembered is what it
+    asks the report for. Added: each turn is a fresh process, so anything started in the
+    background dies with it; the paragraph names `facet spawn` as the one way to send a
+    subagent out (19), plain when the work should outlive the turn (21). It runs on the
+    master's model by default, since that is what shares the cache.
 13. *Free nodes are built at once*, without waiting for the start rule (§4: fewer than 8
     unbuilt lines before a message): they need no model call, so no call ever sees them
     unbuilt; the result is the same.
@@ -532,12 +542,11 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     Its run is kept in `<state dir>/agents/<id>.jsonl` for `zoom("<id>")` (§6), and its events
     never enter the chat's log.
 
-    Exploration that would have been twenty tool/echo pairs in the log costs one line.
-    The system prompt therefore keeps the gist's free hand and states the one quantity the choice turns
-    on (see 12): how much of the work will be worth remembering. Little, and it is sent out
-    (a search, a survey, a fact, a contained piece of programming); much, and it stays here,
-    as does anything whose next step depends on the last or that the user is waiting on. The
-    saving and the loss are the same fact, so cost alone must not decide it. The price of a logged message, measured over this chat (1206 messages,
+    Exploration that would have been twenty tool/echo pairs in the log costs one line, and
+    the system prompt therefore sends work out by default (see 12). Measured 2026-10-11: a
+    trivial spawn on the master's model and effort read 57,049 cached tokens and wrote 1,151
+    (7,166 token-equivalents), against about 8.3-8.9k for a master request, since it skips the
+    turn's messages; each master tool output is summarized at roughly 10-40k eq. The price of a logged message, measured over this chat (1206 messages,
     $270 at per-model rates): 11.9 cents of compaction, 22.4 cents all in. An average run of
     four tool calls is eight messages, so delegating it saves about a dollar of compaction and
     pays the subagent's own reads once. The report is a message too: a transcript handed back
