@@ -221,7 +221,35 @@ function atEnd(){return innerHeight+scrollY>document.body.scrollHeight-120}
 var stick=true;
 addEventListener('scroll',function(){stick=atEnd()});
 document.addEventListener('htmx:afterSwap',function(e){mathify(e.target);if(stick&&!window._h)scrollTo(0,1e7)});
-addEventListener('load',function(){diffApply();mathify(document);if(location.hash=='')scrollTo(0,1e7);start()});
+addEventListener('load',function(){diffApply();mathify(document);if(location.hash=='')readNext();start()});
+// Coming back to the chat lands on what is next to read: the first agent message newer than the
+// last one that was fully on screen, else the bottom. `chatseen` (localStorage) is that last
+// message's index. Only a return (load, the tab shown again, the page restored) does this; live
+// updates within a visit never move a reader who scrolled up (see `stick`). A hidden tab or a
+// display:none pane has no height, so nothing is marked seen then, and the scroll the host
+// restores for a pane is overridden by the host's 'shown' message.
+function seenMark(){
+  if(!document.getElementById('tail')||!innerHeight||document.hidden)return;
+  var hi=+localStorage.chatseen||0;
+  document.querySelectorAll('#log .msg[data-i]').forEach(function(m){
+    var i=+m.dataset.i;if(i>hi&&m.getBoundingClientRect().bottom<=innerHeight)hi=i});
+  localStorage.chatseen=hi}
+function readNext(){
+  if(!document.getElementById('tail')){scrollTo(0,1e7);return}
+  var seen=+localStorage.chatseen||0,n=null;
+  var ms=document.querySelectorAll('#log .msg.talk[data-i]');
+  for(var j=0;j<ms.length;j++)if(+ms[j].dataset.i>seen){n=ms[j];break}
+  // nothing unread, or everything loaded is unread (older ones are not loaded): the bottom
+  if(!n||n===ms[0]&&document.getElementById('older'))scrollTo(0,1e7);
+  else scrollTo(0,Math.max(0,n.getBoundingClientRect().top+scrollY-16));
+  stick=atEnd();
+  [150,600].forEach(function(ms){setTimeout(function(){seenMark()},ms)})}
+var _st=0;
+addEventListener('scroll',function(){clearTimeout(_st);_st=setTimeout(seenMark,250)},{passive:true});
+addEventListener('pagehide',seenMark);
+addEventListener('pageshow',function(e){if(e.persisted&&location.hash=='')readNext()});
+addEventListener('message',function(e){var m=e.data;
+  if(e.origin==location.origin&&m&&m.facet&&m.t=='shown'&&location.hash=='')readNext()});
 // A page keeps itself current by asking the server for news and being answered when there is
 // some (the request is held up to ~25s): a chat message shows as it lands, an edited note
 // refreshes, with no poll every few seconds. A hidden tab stops asking and catches up when
@@ -320,8 +348,8 @@ function start(){
   cardLive();
 }
 document.addEventListener('visibilitychange',function(){
-  if(document.hidden){LS++;DL++;CG++;if(LC)LC.abort();if(DC)DC.abort();if(CC)CC.abort()}
-  else start()});
+  if(document.hidden){seenMark();LS++;DL++;CG++;if(LC)LC.abort();if(DC)DC.abort();if(CC)CC.abort()}
+  else{start();if(location.hash=='')readNext()}});
 // ---- Cards ----
 // Everything said about a line — a comment typed here, a review's warning, the agent's answer
 // — is one card, and one component shows it wherever it appears: under its line on a note, or
@@ -541,6 +569,7 @@ addEventListener('scroll',nearTop,{passive:true});
 document.addEventListener('keydown',function(e){
   var c=document.querySelector('#compose textarea');if(!c||e.defaultPrevented)return;
   if(e.ctrlKey||e.metaKey||e.altKey||e.isComposing||e.key.length!=1)return;
+  if(e.key=='u'||e.key=='d')return; // the half-page scroll keys below, not typing
   var t=e.target;
   if(t.tagName=='TEXTAREA'||t.tagName=='INPUT'||t.tagName=='SELECT'||t.isContentEditable)return;
   e.preventDefault();c.focus();
@@ -744,7 +773,8 @@ function show(tab,url,mode){ // mode: 'push' (default), 'pop' (history moved), '
   cur=tab;
   if(mode!='pop'){history[mode=='init'?'replaceState':'pushState']({tab:tab},'',p.url)}
   document.title=p.title||'Facet';if(p.at!=null)atEl.innerHTML=p.at;
-  try{p.f.contentWindow.focus()}catch(e){}}
+  try{p.f.contentWindow.focus()}catch(e){}
+  if(tab=='chat')[0,60].forEach(function(ms){setTimeout(function(){if(cur=='chat')try{p.f.contentWindow.postMessage({facet:1,t:'shown'},location.origin)}catch(e){}},ms)})}
 hdr.addEventListener('click',function(e){var a=e.target.closest('a');if(!a||e.button||e.ctrlKey||e.metaKey||e.shiftKey)return;
   var k=a==lastnote?'note':tabOf(a.getAttribute('href'));e.preventDefault();
   if(a==lastnote){syncNote();show('note',panes.note?null:a.getAttribute('href'))}else show(k,null)});
@@ -831,8 +861,8 @@ fn home_of(d: &doc::Doc) -> String { d.path.file_stem().unwrap_or_default().to_s
 fn msg_html(cfg: &Cfg, m: &log::Msg) -> String {
     let base = note_base(cfg);
     match m.kind.as_str() {
-        "user" => format!("<div class=\"msg user\" data-t=\"{}\">{}</div>", md::esc(m.text.trim()), md::render(&m.text, &base)),
-        "chat" | "talk" | "note" | "work" => format!("<div class=\"msg talk\">{}</div>", md::render(&m.text, &base)),
+        "user" => format!("<div class=\"msg user\" data-i=\"{}\" data-t=\"{}\">{}</div>", m.i, md::esc(m.text.trim()), md::render(&m.text, &base)),
+        "chat" | "talk" | "note" | "work" => format!("<div class=\"msg talk\" data-i=\"{}\">{}</div>", m.i, md::render(&m.text, &base)),
         _ => {
             let head: String = m.text.lines().next().unwrap_or("").chars().take(110).collect();
             format!("<details class=step><summary>{} · {}</summary><pre>{}</pre></details>",
