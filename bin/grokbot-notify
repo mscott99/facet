@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""grokbot-notify "<text>": send a message to Grok Bot (Matthew's other assistant).
+
+POSTs {"text": TEXT} to the webhook in ~/.config/facet/grokbot_webhook.json
+({"url": "...", "authorization": "..."}, mode 600). Never prints the url or the
+authorization. Exits nonzero if the file is missing or unfilled, or the POST fails.
+Use it to ask Grok Bot vault/LaTeX questions or answer its reports.
+"""
+import json, os, sys, urllib.request
+
+CONF = os.path.expanduser("~/.config/facet/grokbot_webhook.json")
+
+def main():
+    if len(sys.argv) != 2 or not sys.argv[1].strip():
+        sys.exit('usage: grokbot-notify "<text>"')
+    try:
+        with open(CONF) as f:
+            c = json.load(f)
+    except (OSError, ValueError):
+        sys.exit(f"grokbot-notify: cannot read {CONF}")
+    url, auth = (c.get("url") or "").strip(), (c.get("authorization") or "").strip()
+    if not url or not auth:
+        sys.exit(f"grokbot-notify: {CONF} not filled in (url, authorization)")
+    req = urllib.request.Request(url, data=json.dumps({"text": sys.argv[1]}).encode(),
+                                 headers={"Content-Type": "application/json", "Authorization": auth},
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            print(f"sent ({r.status})")
+    except urllib.error.HTTPError as e:
+        sys.exit(f"grokbot-notify: HTTP {e.code}")
+    except Exception as e:
+        sys.exit(f"grokbot-notify: {type(e).__name__}")
+
+main()
