@@ -761,7 +761,10 @@ def idle_wait(c, secs=IDLE_SECS):
     hit = False
     try:
         while True:
-            if b" EXISTS" in c.readline():
+            line = c.readline()
+            if not line:                          # EOF: server dropped us; without this the loop spins at 100% CPU
+                raise RuntimeError("connection closed during IDLE")
+            if b" EXISTS" in line:
                 hit = True
                 break
     except (socket.timeout, TimeoutError):
