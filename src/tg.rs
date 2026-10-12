@@ -74,6 +74,56 @@ pub fn push(cfg: &Cfg, text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Send a file to the paired chat as a document (full quality). Bot API limit: 50 MB.
+pub fn send_file(cfg: &Cfg, path: &str, caption: Option<&str>) -> Result<(), String> {
+    let tok = cfg.opt("telegram.bot_token").ok_or("no telegram.bot_token")?;
+    let chat = cfg.num("telegram.chat_id", 0);
+    if chat == 0 { return Err("not paired".into()) }
+    let p = std::path::Path::new(path);
+    let data = std::fs::read(p).map_err(|e| format!("{}: {}", path, e))?;
+    if data.len() > 50 * 1024 * 1024 {
+        return Err(format!("{}: {} bytes exceeds the 50 MB Telegram bot limit", path, data.len()))
+    }
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("file").replace('"', "_");
+    let b = format!("----facet{:x}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+    let mut body: Vec<u8> = Vec::new();
+    let mut field = |k: &str, v: &str| body.extend(format!(
+        "--{}\r\nContent-Disposition: form-data; name=\"{}\"\r\n\r\n{}\r\n", b, k, v).into_bytes());
+    field("chat_id", &chat.to_string());
+    if let Some(c) = caption.filter(|c| !c.is_empty()) { field("caption", c); }
+    body.extend(format!("--{}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{}\"\r\nContent-Type: application/octet-stream\r\n\r\n", b, name).into_bytes());
+    body.extend(data);
+    body.extend(format!("\r\n--{}--\r\n", b).into_bytes());
+    let base = cfg.opt("telegram.api").unwrap_or_else(|| "https://api.telegram.org".into());
+    let url = format!("{}/bot{}/sendDocument", base.trim_end_matches('/'), tok);
+    let mut r = ureq::post(&url).config().timeout_global(Some(Duration::from_secs(300)))
+        .http_status_as_error(false).build()
+        .header("Content-Type", format!("multipart/form-data; boundary={}", b))
+        .send(&body[..]).map_err(|e| e.to_string())?;
+    let text = r.body_mut().read_to_string().map_err(|e| e.to_string())?;
+    let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if v["ok"] == true { Ok(()) } else { Err(v["description"].as_str().unwrap_or("telegram error").to_string()) }
+}
+
+/// Download a file the user sent (Bot API getFile) into ~/telegram_inbox/<date>_<name>.
+fn download(cfg: &Cfg, file_id: &str, name: &str) -> Result<std::path::PathBuf, String> {
+    let tok = cfg.opt("telegram.bot_token").ok_or("no telegram.bot_token")?;
+    let v = api(cfg, "getFile", json!({"file_id": file_id}))?;
+    let fp = v["result"]["file_path"].as_str().ok_or("getFile failed (files over 20 MB cannot be fetched)")?;
+    let base = cfg.opt("telegram.api").unwrap_or_else(|| "https://api.telegram.org".into());
+    let url = format!("{}/file/bot{}/{}", base.trim_end_matches('/'), tok, fp);
+    let mut r = ureq::get(&url).config().timeout_global(Some(Duration::from_secs(300))).build()
+        .call().map_err(|e| e.to_string())?;
+    let bytes = r.body_mut().with_config().limit(60 * 1024 * 1024).read_to_vec().map_err(|e| e.to_string())?;
+    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join("telegram_inbox");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let safe: String = name.chars().map(|c| if c.is_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
+    let path = dir.join(format!("{}_{}", crate::log_stamp().replace([' ', ':'], "-"), safe));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 fn chunks(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -317,8 +367,14 @@ fn inbound(cfg: Cfg) {
             bump_offset(id + 1);
             let Some(msg) = up.get("message") else { continue };
             let chat = msg["chat"]["id"].as_i64().unwrap_or(0);
-            let text = msg["text"].as_str().unwrap_or("").to_string();
-            if text.is_empty() { continue }
+            let mut text = msg["text"].as_str().unwrap_or("").to_string();
+            let fileinfo = if let Some(d) = msg.get("document") {
+                Some((d["file_id"].as_str().unwrap_or("").to_string(), d["file_name"].as_str().unwrap_or("document").to_string()))
+            } else {
+                msg["photo"].as_array().and_then(|a| a.last()).map(|p|
+                    (p["file_id"].as_str().unwrap_or("").to_string(), "photo.jpg".to_string()))
+            };
+            if text.is_empty() && fileinfo.is_none() { continue }
 
             // pairing: the first chat to speak owns the bridge
             let mut c = Cfg::load();
@@ -329,6 +385,14 @@ fn inbound(cfg: Cfg) {
             }
             let c = Cfg::load();
             if c.num("telegram.chat_id", 0) != chat { continue }
+            if let Some((fid, name)) = fileinfo {
+                let cap = msg["caption"].as_str().unwrap_or("");
+                match download(&c, &fid, &name) {
+                    Ok(p) => text = if cap.is_empty() { format!("[file] {}", p.display()) }
+                                    else { format!("[file] {} ({})", p.display(), cap) },
+                    Err(e) => { let _ = push(&c, &format!("could not fetch file: {}", e)); continue }
+                }
+            }
 
             if text.starts_with('/') {
                 let (reply, keep) = command(&c, &text);

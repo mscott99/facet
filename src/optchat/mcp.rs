@@ -27,6 +27,8 @@ pub fn tools() -> Value {
         a.push(json!({"name": "send_chat", "description": prompts::SEND_DOC,
             "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}));
         let st = json!({"type": "string"});
+        a.push(json!({"name": "send_file", "description": "Send a file from the server's disk to the user's Telegram chat as a document (max 50 MB). Also logs a line in the chat.",
+            "inputSchema": {"type": "object", "properties": {"path": st, "caption": st}, "required": ["path"]}}));
         a.push(json!({"name": "new_card", "description": prompts::NEW_CARD_DOC,
             "inputSchema": {"type": "object", "properties": {"note": st, "anchor": st, "line": {"type": "integer"},
                 "text": st, "kind": {"type": "string", "enum": ["comment", "info", "warn", "error"]}, "fix": st},
@@ -51,7 +53,7 @@ pub const SENT: &str = "sent";
 pub const ANSWERED: &str = "answered";
 
 /// The tools a subagent is refused: everything that speaks or changes a card.
-pub const WRITES: [&str; 5] = ["send_chat", "new_card", "answer_card", "fix_card", "close_card"];
+pub const WRITES: [&str; 6] = ["send_chat", "send_file", "new_card", "answer_card", "fix_card", "close_card"];
 
 /// The card tools that speak (and so log themselves); `list_cards` only reads.
 pub fn card_action(tool: &str) -> Option<&'static str> {
@@ -171,6 +173,17 @@ fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
                     Ok(()) => (SENT.into(), false),
                     Err(x) => (format!("send_chat failed: {}", x), true),
                 },
+                "send_file" => {
+                    let cap = a["caption"].as_str().unwrap_or("");
+                    match crate::tg::send_file(&crate::cfg::Cfg::load(), &st("path"), Some(cap)) {
+                        Ok(()) => {
+                            let nm = std::path::Path::new(&st("path")).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                            let _ = super::engine::chat(e, &format!("[file sent] {}{}", nm, if cap.is_empty() { String::new() } else { format!(" — {}", cap) }));
+                            (SENT.into(), false)
+                        }
+                        Err(x) => (format!("send_file failed: {}", x), true),
+                    }
+                }
                 t if card_action(t).is_some() => {
                     let mut q = a.clone();
                     if !q.is_object() { q = json!({}); }
@@ -201,7 +214,7 @@ mod tests {
     fn a_subagent_sees_the_master_tool_list_and_is_refused_writes() {
         assert_eq!(agent_url("http://127.0.0.1:5/abc/mcp"), "http://127.0.0.1:5/abc/agent");
         let names = |t: Value| t.as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
-        assert_eq!(names(tools()), ["zoom", "date", "send_chat", "new_card", "answer_card", "fix_card", "close_card", "list_cards"]);
+        assert_eq!(names(tools()), ["zoom", "date", "send_chat", "send_file", "new_card", "answer_card", "fix_card", "close_card", "list_cards"]);
         for w in WRITES { assert!(names(tools()).contains(&w.to_string())); }
         assert!(!WRITES.contains(&"list_cards") && !WRITES.contains(&"zoom") && !WRITES.contains(&"date"));
     }

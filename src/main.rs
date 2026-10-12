@@ -98,6 +98,11 @@ fn main() {
             println!("{:<16} {:<60} {}", slug, cfg.url(&format!("/m/{}", slug)), path.display());
         },
 
+        "send-file" => {
+            let path = rest.iter().find(|a| !a.starts_with("--")).cloned().unwrap_or_else(|| die("usage: facet send-file PATH [--caption TEXT]"));
+            let cap = rest.iter().position(|a| a == "--caption").and_then(|i| rest.get(i + 1)).cloned();
+            match tg::send_file(&cfg, &path, cap.as_deref()) { Ok(()) => println!("sent {}", path), Err(e) => die(&e) }
+        }
         "send" => match tell::tell(&cfg, &rest.iter().filter(|a| *a != "--later").cloned().collect::<Vec<_>>().join(" "),
                                    "cli", rest.iter().any(|a| a == "--later")) {
             Ok(line) => println!("{}", line),
