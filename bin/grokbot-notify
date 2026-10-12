@@ -19,6 +19,8 @@ def main():
     except (OSError, ValueError):
         sys.exit(f"grokbot-notify: cannot read {CONF}")
     url, auth = (c.get("url") or "").strip(), (c.get("authorization") or "").strip()
+    if auth and " " not in auth:
+        auth = "Bearer " + auth  # bare token from the routine panel
     if not url or not auth:
         sys.exit(f"grokbot-notify: {CONF} not filled in (url, authorization)")
     req = urllib.request.Request(url, data=json.dumps({"text": sys.argv[1]}).encode(),
