@@ -51,12 +51,12 @@ p{margin:0 0 1.05em}
 hr{border:0;border-top:1px solid var(--line);margin:2.2rem 0}
 .at{color:var(--dim);font:12.5px/1.6 var(--mono)}
 .msg{margin:1.5rem 0}
-.pend{opacity:.4}
-.pend.bad{opacity:.7;border-left-color:#c88}
+.msg.user,.say .t{transition:opacity .5s ease,border-color .5s ease}
+.pend,.user.pend{opacity:.35}.user.pend{border-left:2px dashed #8fa8c880}
+.pend.bad,.user.pend.bad{opacity:.7;border-left:2px solid #c88}
 .pend.bad::after{content:' ✕';color:#c88}
-.ob{opacity:.45}.ob .st{display:block;margin-top:-.7em}
-.ob.working{opacity:.85;border-left-color:var(--acc)}.ob.working .st{color:var(--acc);animation:pulse 1.6s ease-in-out infinite}
-@keyframes pulse{50%{opacity:.35}}
+.ob{opacity:.6}.user.ob{border-left:2px solid #8fa8c880}.ob .st{display:block;margin-top:-.7em}
+.ob.working{opacity:.8}.user.ob.working{border-left-color:var(--acc)}.ob.working .st{color:var(--acc)}
 .user{border-left:2px solid #8fa8c84d;padding-left:1.1rem}
 details.step{margin:.5rem 0;font:12.5px/1.6 var(--mono);color:var(--dim)}
 details.step summary{cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -116,7 +116,7 @@ del.dm{color:var(--dim);text-decoration:line-through;text-decoration-thickness:1
 .say .cmp .no:hover{color:var(--err)}
 .say .cmp textarea:focus::placeholder{color:transparent}
 .say .cmp.bad textarea{outline:1px solid #c88}
-.say .t.pend{opacity:.4}
+.say .t.pend{opacity:.35;border-left:2px dashed #8fa8c880}
 .ctx{margin:2.2rem 0 .3rem}.ctx pre{margin:.3rem 0 0;white-space:pre-wrap}
 form.busy textarea,form.busy button{opacity:.45}
 #older{min-height:1px}
