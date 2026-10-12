@@ -508,13 +508,24 @@ def cmd_mail_send(a):
             print("[attachments: " + ", ".join(os.path.basename(x) for x in a.attach) + "]")
         return
     smtp_send(acct, m, list(a.to) + list(a.cc or []))
-    if not acct["gmail"] and acct.get("sent_folder"):      # Gmail files its own copy; others only if asked
-        c = imap_connect(acct)
-        try:
-            c.append(acct["sent_folder"], "\\Seen", imaplib.Time2Internaldate(datetime.now().timestamp()), m.as_bytes())
-        finally:
-            c.logout()
-    print(f"sent from {acct['name']}")
+    saved = save_to_sent(acct, m)
+    print(f"sent from {acct['name']}" + (f", copy filed in {saved}" if saved else ""))
+
+
+def save_to_sent(acct, m):
+    """File a copy in the Sent folder (Gmail does this itself). -> folder name or None."""
+    if acct["gmail"]:
+        return None
+    c = imap_connect(acct)
+    try:
+        folder = special_folders(c, acct).get("s")
+        if not folder:
+            print("life: no Sent folder found; no copy saved", file=sys.stderr)
+            return None
+        typ, _ = c.append('"' + folder.replace("\\", "\\\\").replace('"', '\\"') + '"', "\\Seen", imaplib.Time2Internaldate(datetime.now().timestamp()), m.as_bytes())
+        return folder if typ == "OK" else None
+    finally:
+        c.logout()
 
 
 # ------------------------------------------------------------------ calendar
