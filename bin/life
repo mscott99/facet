@@ -166,11 +166,16 @@ def cmd_mail_send(a):
     q = lambda s: s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
     recips = "".join(f'make new to recipient at end of to recipients with properties {{address:"{q(t)}"}}\n' for t in a.to)
     recips += "".join(f'make new cc recipient at end of cc recipients with properties {{address:"{q(t)}"}}\n' for t in (a.cc or []))
+    for p in (a.attach or []):
+        if not os.path.isfile(p):
+            sys.exit(f"life: --attach {p!r}: no such file; nothing sent")
+    atts = "".join(f'make new attachment with properties {{file name:(POSIX file "{q(os.path.abspath(p))}")}} at after the last paragraph\n' for p in (a.attach or []))
     act = "send m" if a.send else "set visible of m to true"
     print(osa(f'''tell application "Mail"
   set m to make new outgoing message with properties {{subject:"{q(a.subject)}", content:"{q(body)}", visible:false}}
   tell m
     {recips}
+    {atts}
   end tell
   {act}
   return "{'sent' if a.send else 'draft open in Mail'}"
@@ -357,6 +362,7 @@ def main():
     s = m.add_parser("send"); s.add_argument("--to", action="append", required=True); s.add_argument("--cc", action="append")
     s.add_argument("--from", dest="from_account", help="account name (Linux; default: first)")
     s.add_argument("--subject", required=True); s.add_argument("--body"); s.add_argument("--body-file")
+    s.add_argument("--attach", action="append", metavar="PATH", help="attach a file (repeatable)")
     s.add_argument("--send", action="store_true", help="actually send (default: open a draft)")
     s.set_defaults(fn=cmd_mail_send)
 

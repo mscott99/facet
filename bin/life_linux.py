@@ -3,7 +3,7 @@
 Stdlib only. Config: ~/.config/life/accounts.json (override with $LIFE_CONFIG), chmod 600.
 Loaded by bin/life when not on macOS; the macOS paths live in bin/life itself.
 """
-import email, imaplib, json, os, re, smtplib, ssl, subprocess, sys, urllib.error, urllib.parse, urllib.request
+import email, imaplib, mimetypes, json, os, re, smtplib, ssl, subprocess, sys, urllib.error, urllib.parse, urllib.request
 from datetime import date, datetime, timedelta, timezone
 from email import policy
 from email.message import EmailMessage
@@ -468,6 +468,13 @@ def build_message(acct, a):
     m["Date"] = formatdate(localtime=True)
     m["Message-ID"] = make_msgid()
     m.set_content(body)
+    for path in getattr(a, "attach", None) or []:
+        ctype, enc = mimetypes.guess_type(path)
+        if ctype is None or enc:
+            ctype = "application/octet-stream"
+        maintype, subtype = ctype.split("/", 1)
+        with open(path, "rb") as f:
+            m.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=os.path.basename(path))
     return m
 
 
@@ -491,9 +498,14 @@ def cmd_mail_send(a):
     acct = next((x for x in accts if x["name"] == name), None) if name else accts[0]
     if acct is None:
         sys.exit(f"life: --from {name!r}: no such account; have {', '.join(x['name'] for x in accts)}")
+    for path in getattr(a, "attach", None) or []:
+        if not os.path.isfile(path):
+            sys.exit(f"life: --attach {path!r}: no such file; nothing sent")
     m = build_message(acct, a)
     if not a.send:
         print(f"[draft, not sent — add --send]\n{m.as_string()[:2000]}")
+        if getattr(a, "attach", None):
+            print("[attachments: " + ", ".join(os.path.basename(x) for x in a.attach) + "]")
         return
     smtp_send(acct, m, list(a.to) + list(a.cc or []))
     if not acct["gmail"] and acct.get("sent_folder"):      # Gmail files its own copy; others only if asked
