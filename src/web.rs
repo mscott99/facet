@@ -221,7 +221,7 @@ function diffClear(){
 function atEnd(){return innerHeight+scrollY>document.body.scrollHeight-120}
 var stick=true;
 addEventListener('scroll',function(){stick=atEnd()});
-document.addEventListener('htmx:afterSwap',function(e){mathify(e.target);if(stick&&!window._h)scrollTo(0,1e7)});
+document.addEventListener('htmx:afterSwap',function(e){mathify(e.target);if(stick&&!window._h&&document.getElementById('tail'))scrollTo(0,1e7)});
 addEventListener('load',function(){diffApply();mathify(document);if(location.hash=='')readNext();start()});
 // Coming back to the chat lands on what is next to read: the first agent message newer than the
 // last one that was fully on screen, else the bottom. `chatseen` (localStorage) is that last
@@ -236,7 +236,7 @@ function seenMark(){
     var i=+m.dataset.i;if(i>hi&&m.getBoundingClientRect().bottom<=innerHeight)hi=i});
   localStorage.chatseen=hi}
 function readNext(){
-  if(!document.getElementById('tail')){scrollTo(0,1e7);return}
+  if(!document.getElementById('tail'))return; // only the chat goes to the bottom; a note keeps its place
   if(localStorage.chatseen==null){scrollTo(0,1e7);stick=true;return}
   var seen=+localStorage.chatseen||0,n=null;
   var ms=document.querySelectorAll('#log .msg.talk[data-i]');
