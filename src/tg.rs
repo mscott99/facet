@@ -152,6 +152,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn help_is_recognised_only_when_it_is_the_whole_message() {
+        for t in ["--help", " -H ", "/help", "Help"] { assert!(is_help(t), "{}", t); }
+        for t in ["help me with the paper", "/helpx", ""] { assert!(!is_help(t), "{}", t); }
+    }
+
+    #[test]
     fn a_short_message_is_one_chunk() {
         assert_eq!(chunks("hello\nworld"), vec!["hello\nworld".to_string()]);
     }
@@ -251,6 +257,32 @@ pub fn model_cmd(arg: &str) -> String {
     }
 }
 
+/// The one help text (Telegram, web chat). Edit here.
+pub const HELP: &str = "\
+Facet: plain text goes to the agent. Say it in words:
+- export and compile: LaTeX/PDF of a paper note; master logs are read
+- push to Overleaf: pulls first, never force-pushes
+- draft / send: an email draft is shown first; sent only when you say send; attachments ok
+- check mail, update calendar
+- paper feedback: comment on a note line (a card); replies give choices or a fix
+- coding goes to subagents
+
+Commands:
+/model [opus|sonnet]  show or switch the main model
+/now <text>  into the running turn   /later <text>  wait for it to end
+/queue on|off  default for plain messages (Telegram)
+/diag open cards   /notes  published notes   /cal [N]  calendar
+/mail [query]   /last N  recent messages   /link  reader links
+/ping  engine and usage left   /buffer  /flush  queued prelude
+/help  this text
+
+Tools on the server: life mail (send --attach), export-cycle, facet spawn, facet restart";
+
+/// Is this whole message a request for help? (`--help`, `-h`, `/help`, `help`)
+pub fn is_help(text: &str) -> bool {
+    matches!(text.trim().to_lowercase().as_str(), "--help" | "-h" | "/help" | "help")
+}
+
 /// Returns (reply, remember_it). Meta commands are not worth replaying to the conversation.
 pub fn command(cfg: &Cfg, text: &str) -> (String, bool) {
     let mut it = text.trim_start_matches('/').split_whitespace();
@@ -280,18 +312,7 @@ pub fn command(cfg: &Cfg, text: &str) -> (String, bool) {
             _ => format!("queueing is {} (/queue on|off; /now and /later override once)",
                 if queueing(cfg) { "on" } else { "off" }),
         }, false),
-        "start" | "help" => (format!(
-            "Facet — your agent on this machine.\n\n\
-             Plain text goes into the conversation, waiting for the running turn to end.\n\
-             /now <text>  into the running turn   /later <text>  make it wait\n\
-             /model [opus|sonnet]  show or switch the main model\n\
-             /queue on|off  which of those is the default\n\n\
-             These are answered here instead, and ride along with your next message:\n\
-             /diag  open cards         /notes  published notes\n\
-             /cal N days ahead         /mail [query]\n\
-             /last N  recent messages  /buffer  what is queued   /flush  send it now\n\
-             /link  the reader         /ping  engine and usage left\n\n{}",
-            cfg.url("/")), false),
+        "start" | "help" => (format!("{}\n\n{}", HELP, cfg.url("/")), false),
         "link" => (format!("home {}\nchat {}\nnotes {}\ncomments {}\nmemory {}",
             cfg.url("/"), cfg.url("/chat"), cfg.url("/m/"), cfg.url("/d/"), cfg.url("/tree")), false),
         "ping" | "usage" => (engine_line(cfg), false),
@@ -338,6 +359,13 @@ fn engine_line(cfg: &Cfg) -> String {
 // ---- the two loops ----------------------------------------------------------------------
 
 fn inbound(cfg: Cfg) {
+    let _ = api(&cfg, "setMyCommands", json!({"commands": [
+        {"command": "help", "description": "what I can do"},
+        {"command": "model", "description": "show or switch the model"},
+        {"command": "ping", "description": "engine and usage left"},
+        {"command": "diag", "description": "open cards"},
+        {"command": "later", "description": "queue a message"},
+    ]}));
     // First run: start from the newest update rather than replaying a day of backlog into
     // the conversation.
     if cfg::state()["tg_offset"].as_i64().is_none() {
@@ -394,7 +422,9 @@ fn inbound(cfg: Cfg) {
                 }
             }
 
-            if text.starts_with('/') {
+            if is_help(&text) {
+                let _ = push(&c, HELP);
+            } else if text.starts_with('/') {
                 let (reply, keep) = command(&c, &text);
                 if keep { remember(&text, &reply); }
                 let _ = push(&c, if reply.is_empty() { "(nothing)" } else { &reply });

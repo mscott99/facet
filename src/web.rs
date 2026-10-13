@@ -1411,6 +1411,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
             if t == "/model" || t.starts_with("/model ") {
                 return html(md::esc(&crate::tg::model_cmd(&t[6..])), 200);
             }
+            if crate::tg::is_help(t) { return html(md::esc(crate::tg::HELP), 200); }
             match tell::tell(cfg, &text, "reader", field(&f, "later") == "1") {
                 Ok(_) => html("queued".into(), 200),
                 Err(e) => html(format!("not sent: {}", md::esc(&e)), 200),
