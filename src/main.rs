@@ -43,10 +43,48 @@ pub fn today() -> String { sh(&["/bin/date", "+%Y-%m-%d"]) }
 pub fn log_stamp() -> String { chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string() }
 pub fn stamp() -> String { sh(&["/bin/date", "+%Y%m%d-%H%M%S"]) }
 
+/// Usage lines of the subcommands, for `facet <subcommand> --help` (one place).
+fn usage_of(cmd: &str) -> String {
+    match cmd {
+        "chat" => "facet chat   open the terminal chat (TUI)",
+        "engine" => "facet engine   run the memory engine (normally started for you)",
+        "view" => "facet view   print the memory view",
+        "browse" => "facet browse [out.html]   write the memory as an HTML page",
+        "import" => "facet import <file>...   import notes into the chat as `note` messages",
+        "stats" => "facet stats   token/request usage table",
+        "cancel" => "facet cancel   cancel the running turn",
+        "init" => "facet init   set up the config",
+        "post" => "facet post <file> [slug]   publish a note at /m/<slug>",
+        "unpost" => "facet unpost <slug>   unpublish a note",
+        "docs" => "facet docs   list published notes",
+        "send-file" => "facet send-file PATH [--caption TEXT]   send a file to Telegram",
+        "send" => "facet send [--later] <text...>   send a chat message to the agent",
+        "push" => "facet push [--log] <text...>   send text to Telegram only (--log also notes it in the chat log)",
+        "answer" => "facet answer <id> <text> [--fix <replacement>]   reply on a card",
+        "card" | "cards" => "facet card new|reply|fix|close|apply|list ...   work on cards",
+        "restart" => "facet restart [--serve]   queue an engine (and with --serve the server) restart",
+        "resume" => "facet resume   lift a usage-limit pause",
+        "diag" => "facet diag   list open cards",
+        "review" => "facet review <note> [--replace] < spec   open many cards on a note from a spec on stdin",
+        "apply" => "facet apply <card id>   apply a card's fix",
+        "dismiss" => "facet dismiss <card id>   close a card",
+        "url" => "facet url [slug]   print the URL of a note or home",
+        "status" => "facet status   show paths, engine, Telegram, notes, cards",
+        "serve" => "facet serve   run the web/Telegram server",
+        _ => HELP,
+    }.to_string()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     let rest = &args[1..];
+    // `facet <subcommand> -h|--help` prints usage and exits: it never acts (nothing sent, logged or queued).
+    // spawn keeps its own, longer text below.
+    if cmd != "spawn" && rest.iter().any(|a| a == "-h" || a == "--help") {
+        println!("{}", usage_of(cmd));
+        return;
+    }
     let cfg = Cfg::load();
 
     match cmd {
@@ -337,4 +375,14 @@ fn init() {
     if c.0.get("port").is_none() { c.set("port", 8730.into()); }
     c.save();
     println!("wrote {}", cfg::dir().join("facet.json").display());
+}
+
+#[cfg(test)]
+mod help_tests {
+    #[test]
+    fn usage_names_the_subcommand() {
+        for c in ["send", "push", "chat", "card", "review", "import", "answer"] {
+            assert!(super::usage_of(c).contains(c), "{}", c);
+        }
+    }
 }
