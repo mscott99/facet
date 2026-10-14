@@ -467,6 +467,27 @@ def build_message(acct, a):
     m["Subject"] = a.subject
     m["Date"] = formatdate(localtime=True)
     m["Message-ID"] = make_msgid()
+    rid = getattr(a, "reply_to", None)
+    if rid:
+        racct, uid, kind = parse_id(rid, accounts())
+        c = imap_connect(racct)
+        try:
+            raw = fetch_raw(c, racct, kind, uid)
+        finally:
+            try:
+                c.logout()
+            except Exception:
+                pass
+        if raw is None:
+            sys.exit(f"life: --reply-to {rid!r}: no such message; nothing sent")
+        orig = email.message_from_bytes(raw, policy=policy.default)
+        mid = str(orig["Message-ID"] or "").strip()
+        if mid:
+            m["In-Reply-To"] = mid
+            refs = str(orig["References"] or "").split()
+            m["References"] = " ".join(refs + [mid])
+        quoted = "\n".join("> " + l if l else ">" for l in body_text(orig).rstrip().splitlines())
+        body = body.rstrip() + f"\n\nOn {orig['Date']}, {orig['From']} wrote:\n{quoted}\n"
     m.set_content(body)
     for path in getattr(a, "attach", None) or []:
         ctype, enc = mimetypes.guess_type(path)
@@ -790,6 +811,8 @@ def event_body(a):
             "end": {"dateTime": en.isoformat()}}
     if a.notes:
         body["description"] = a.notes
+    if getattr(a, "location", None):
+        body["location"] = a.location
     return body
 
 

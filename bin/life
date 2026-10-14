@@ -265,7 +265,7 @@ def cmd_cal_add(a):
     q = lambda s: s.replace('\\', '\\\\').replace('"', '\\"')
     print(osa(f'''tell application "Calendar"
   tell calendar "{q(a.calendar)}"
-    make new event with properties {{summary:"{q(a.title)}", start date:date "{d(st)}", end date:date "{d(en)}"{', description:"' + q(a.notes) + '"' if a.notes else ''}}}
+    make new event with properties {{summary:"{q(a.title)}", start date:date "{d(st)}", end date:date "{d(en)}"{', description:"' + q(a.notes) + '"' if a.notes else ''}{', location:"' + q(a.location) + '"' if getattr(a, 'location', None) else ''}}}
   end tell
   return "added: {q(a.title)} {d(st)}"
 end tell'''))
@@ -363,6 +363,7 @@ def main():
     s.add_argument("--from", dest="from_account", help="account name (Linux; default: first)")
     s.add_argument("--subject", required=True); s.add_argument("--body"); s.add_argument("--body-file")
     s.add_argument("--attach", action="append", metavar="PATH", help="attach a file (repeatable)")
+    s.add_argument("--reply-to", metavar="ID", help="reply in the thread of mail ID (sets In-Reply-To/References, quotes it)")
     s.add_argument("--send", action="store_true", help="actually send (default: open a draft)")
     s.set_defaults(fn=cmd_mail_send)
 
@@ -371,6 +372,7 @@ def main():
     s.set_defaults(fn=cmd_cal)
     s = c.add_parser("add"); s.add_argument("--title", required=True); s.add_argument("--start", required=True, help="YYYY-MM-DD HH:MM")
     s.add_argument("--minutes", type=int, default=60); s.add_argument("--calendar", default=None, help="macOS default: Work; Linux: Google calendar id"); s.add_argument("--notes")
+    s.add_argument("--location", help="where the event is (always give one)")
     s.set_defaults(fn=cmd_cal_add)
     c.add_parser("calendars").set_defaults(fn=cmd_cal_list)
     s = c.add_parser("delete", help="Linux: delete Google events whose title contains TEXT (dry run without --yes)")
