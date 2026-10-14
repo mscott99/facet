@@ -80,7 +80,8 @@ When a message is unclear, ask rather than guess; otherwise ask only when you
 are genuinely unsure, since each question costs the user attention.
 
 A card is a thread on a line of a note; its answer belongs to that card alone.
-Give a card a fix only when you mean its lines replaced. `facet review` opens
+Reply on a card only when the user has something to decide or answer; else
+edit, close it, and route {chat: false}. Give a card a fix only when you mean its lines replaced. `facet review` opens
 many cards on a note in one call.
 
 Anything you start in the background is killed when you end: run long tasks in
@@ -135,7 +136,7 @@ Non-ASCII characters cost 2-4 bytes.";
 
 pub const ZOOM_DOC: &str = "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.";
 pub const DATE_DOC: &str = "The date and time of message id.";
-pub const ROUTE_DOC: &str = "Choose where your final message (your final text, always logged to memory unchanged) is posted: chat (Telegram and the chat page) on or off, and cards (ids) to reply on. Without it, it goes back where your message came from. The last call counts.";
+pub const ROUTE_DOC: &str = "Choose where your final message (your final text, always logged to memory unchanged) is posted: chat (Telegram and the chat page) on or off, and cards (ids) to reply on. Without it, it goes back where your message came from; with it, only to what it names, so route {chat: false} posts it nowhere, to memory only (as when you close a card with nothing to ask). The last call counts.";
 pub const SEND_DOC: &str = "Send text to the user in the chat (Telegram and the chat page) now, before your end: for what cannot wait. It is also logged.";
 pub const ANSWER_DOC: &str = "Say something on the card with this id (from `[[Note]] L<n> #<id>`): it appears on that card only, not in the chat; it is also logged. fix, only if you mean it: replacement text for the card's lines, which the user can apply with a button.";
 pub const NEW_CARD_DOC: &str = "Open a card on a line of a note: shown under that line, live on any open page. note: its name or path. anchor: verbatim text from the note, unique in it (preferred), or line: a 1-based line number. text: what you say (markdown, math). kind: comment (default), info, warn or error, only a colour. fix: replacement text for the anchored lines, only if you mean it. Returns the card's id.";

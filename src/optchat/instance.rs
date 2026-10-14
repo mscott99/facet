@@ -190,7 +190,9 @@ fn limit_hit(e: &Arc<Engine>, text: &str, error: bool) -> bool {
 /// `route` (chat, cards; the last call counts) and logged once, unchanged, as its end record
 /// (`work`), at this moment. The chat venue reads it from the log (`log::end_body`); a card
 /// gets it as a reply. With no `route` call it goes back where the message came from: a chat
-/// message to the chat, a card's message to that card, a handed-on task nowhere.
+/// message to the chat, a card's message to that card, a handed-on task nowhere. With one,
+/// what it leaves out is off: `route {chat: false}` posts nowhere (memory only), as when a
+/// card is closed with nothing to say on it.
 #[allow(clippy::too_many_arguments)]
 fn finish(e: &Arc<Engine>, job: &Job, sv: &str, owed: bool, status: &str, last: &str, spoke: bool, ending: Option<Value>, mut trace: Value) {
     let served_chat = owed && crate::log::wants_chat(&job.text);
@@ -199,7 +201,7 @@ fn finish(e: &Arc<Engine>, job: &Job, sv: &str, owed: bool, status: &str, last: 
     let (chat, cards) = match &ending {
         Some(v) => (
             v["chat"].as_bool().unwrap_or(served_chat),
-            v["cards"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(|s| s.trim().trim_start_matches('#').to_string())).filter(|c| !c.is_empty()).collect()).unwrap_or(origin_card),
+            v["cards"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(|s| s.trim().trim_start_matches('#').to_string())).filter(|c| !c.is_empty()).collect()).unwrap_or_default(),
         ),
         None => (served_chat, origin_card),
     };
