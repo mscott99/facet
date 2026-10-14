@@ -41,7 +41,8 @@ def find_item(ck):
 
 def main():
     a = sys.argv[1:]
-    if not a or a[0] in ("-h", "--help", "help"):
+    H = ("-h", "--help", "help")
+    if not a or a[0] in H or any(x in ("-h", "--help") for x in a):
         print(__doc__); return
     if a[0] != "pdf" or len(a) < 2: sys.exit("usage: zot pdf <citekey> [-o DIR]")
     ck, out = a[1], "."
