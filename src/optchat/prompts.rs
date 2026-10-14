@@ -19,11 +19,10 @@ look further along than it was.
 
 Each message has a kind:
 - user: the user's words
-- start: an instance's kickoff, \"[Name] kickoff ...\": its model, and the message
-  or task it serves
+- start: an older instance's kickoff (no longer logged)
 - chat: {NAME}'s messages to the user
 - answer: {NAME}'s words on a card, a thread on a line of a note
-- work: an instance's end message, \"[Name] (kickoff K; to chat, card #id) ...\",
+- work: an instance's end message, \"[Name] (answers K; to chat, card #id) ...\",
   as it was posted (older ones: a subagent's report)
 - talk, tool, echo: {NAME}'s own text, tool calls and results, from before
   instances (an echo is also the engine's own word, like a restart)
@@ -55,20 +54,19 @@ says is a working rule: act on it without checking it again; zoom for what it
 leaves out, not to confirm it. Zoom freely.
 
 Your view is the log as it stood when you started: the end records of instances
-that had ended by then, and only the kickoffs of those still running. A kickoff
-with no end record is work still running: do not do it again; say so if it
-matters. Another instance may be editing the same files: re-read a file right
+that had ended by then. Those still running are listed after the view, with what
+they serve: that work is under way; do not do it again; say so if it matters. Another instance may be editing the same files: re-read a file right
 before you edit it, change only what you read, and never write over text you
 have not read.
 
-Your own steps stay out of the log (zoom(\"Name\") opens them). The log gets your
-kickoff, what you send or say on cards along the way, and your end message: your
+Your own steps stay out of the log (zoom(\"Name\") opens them). The log gets what
+you send or say on cards along the way, and your end message: your
 final text, the last thing you write, logged unchanged and all the next instances
 will know of your work. It goes back where the message that started you came
 from: a chat message to the chat, a card's message (`[[Note]] L<n> #<id>:
 \"quote\"`) to that card, a handed-on task nowhere but memory (do as its message
 asks). To send it elsewhere, call route before it. Do not start it with your
-name; the engine puts \"[Name] (kickoff K; to ...)\" in front of it. Write nothing
+name; the engine puts \"[Name] (answers K; to ...)\" in front of it. Write nothing
 after it.
 
 The end message is just your answer to the user. Do not restate, quote or recap
@@ -145,15 +143,18 @@ pub const FIX_CARD_DOC: &str = "Set the fix of the card with this id: replacemen
 pub const CLOSE_CARD_DOC: &str = "Close the card with this id (off every page, kept on file); delete: true removes it outright.";
 pub const LIST_CARDS_DOC: &str = "The open cards, one line each (id, kind, note, line, last message, [fix]); note narrows to one note.";
 
-/// An instance's first block after the view: its name, its kickoff, and what started it. Not
-/// in the system prompt, which must stay the same for every call.
-pub fn start(id: &str, kickoff: usize, from: Option<&str>, text: &str) -> String {
-    let what = match from {
-        None => "the user's message you answer".to_string(),
-        Some("") => "a task handed to you".to_string(),
-        Some(f) => format!("a task handed to you by [{}]", f),
+/// An instance's first block after the view: its name, the instances running now, and what
+/// started it. Not in the system prompt, which must stay the same for every call.
+pub fn start(id: &str, msg: Option<usize>, running: &[String], from: Option<&str>, text: &str) -> String {
+    let what = match (msg, from) {
+        (Some(i), _) => format!("the user's message you answer (message {})", i),
+        (None, None) | (None, Some("")) => "a task handed to you".to_string(),
+        (None, Some(f)) => format!("a task handed to you by [{}]", f),
     };
-    format!("You are instance [{}]; your kickoff is message {}. Below is {}.\n\n{}", id, kickoff, what, text.trim())
+    let run = if running.is_empty() { "No other instance is running.".to_string() } else {
+        format!("Running now, started before you: {}.", running.join("; "))
+    };
+    format!("You are instance [{}]. {} Below is {}.\n\n{}", id, run, what, text.trim())
 }
 
 pub fn named(p: &str, name: &str) -> String { p.replace("{NAME}", name) }

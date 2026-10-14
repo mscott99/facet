@@ -31,18 +31,18 @@ impl Msg {
     }
 }
 
-/// An instance's kickoff or end record, or an older subagent's report: a text starting "[id] "
+/// An instance's end record (or an older kickoff), or an older subagent's report: a text starting "[id] "
 /// (no space inside the brackets, which tells it from the Telegram prelude's "[2 command(s) ...]").
 pub fn is_report(text: &str) -> bool {
     text.strip_prefix('[').and_then(|t| t.find("] ").map(|k| &t[..k]))
         .is_some_and(|id| !id.is_empty() && !id.contains(char::is_whitespace) && !id.starts_with('['))
 }
 
-/// An end record posted to the chat (instance.rs `end_record`: "[id] (kickoff K; to chat,
-/// card #c) message"): the message, as posted. None for one that went nowhere or only to cards.
+/// An end record posted to the chat (instance.rs `end_record`: "[id] (answers K; to chat,
+/// card #c) message", older ones "(kickoff K; ...)"): the message, as posted. None for one that went nowhere or only to cards.
 pub fn end_body(text: &str) -> Option<&str> {
     if !is_report(text) { return None }
-    let r = &text[text.find("] (kickoff ")? + 11..];
+    let r = &text[text.find("] (")? + 3..];
     let close = r.find(')')?;
     let to = r[..close].split_once("; to ")?.1;
     if !to.split(", ").any(|c| c == "chat") { return None }

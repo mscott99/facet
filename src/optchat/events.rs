@@ -7,7 +7,7 @@
 //
 //   engine   start: binary, settings, what was loaded
 //   req      one API request: what for (instance+step, node+try, prime), usage, ms, Claude Code version
-//   start    an instance started: its kickoff id, settle wait, priming, view size and how much of
+//   start    an instance started: the message it answers, settle wait, priming, view size and how much of
 //            it the previous start's view shared (the cache's chance)
 //   instance an instance ended: status, requests, eq, tools, whether it spoke, the safety net
 //   node     one compactor node: tries' sizes, the kept size, gate wait, duration, failure

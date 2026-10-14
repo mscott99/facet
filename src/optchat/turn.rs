@@ -5,10 +5,10 @@
 // This file is the starter. User messages, and tasks one instance hands to another with
 // `facet spawn`, wait in one queue and are started one at a time, in arrival order: settle
 // (every line of the view a summary, §6), render the view, log the user's message, then
-// `instance::launch` logs the kickoff, primes the cache and starts the process. A start takes
+// `instance::launch` primes the cache and starts the process. A start takes
 // seconds; the instance then runs on its own, detached, and the next one starts. So each
 // instance's view is the log as it stood at its own start: the end records of instances that
-// had ended, the kickoffs of those still running, nothing later.
+// had ended, nothing later; the ones still running are listed in its start block, not logged.
 use super::claude::{self, Meter, Proc, Tick};
 use super::engine::{state_dir, Engine};
 use super::{prompts, view, CAP};
@@ -44,6 +44,8 @@ pub struct State {
     /// bumped by `cancel`: an instance started under an older epoch stops
     pub epoch: u64,
     pub phase: String,
+    /// instances running now, oldest first: name, and the line a new instance is shown
+    pub live: Vec<(String, String)>,
 }
 
 fn new_id() -> String {

@@ -330,12 +330,12 @@ still write) is absorbed as server cards and the file left as `{}`; the engine's
 ### stream and venues
 
 The log is the **stream**: the memory tree is built on it alone — user messages, instances'
-kickoffs and end records, chat sends, card comments and card answers. A **venue** is where some
+end records, chat sends, card comments and card answers. A **venue** is where some
 of it is also delivered. There are two:
 
   - **chat**: Telegram and the web chat page, one venue. It shows the user's messages, what
     an instance sent with `send_chat` (logged as kind `chat`), and end messages posted to the
-    chat (kind `work`, head `[id] (kickoff K; to chat...)` stripped for display), nothing else.
+    chat (kind `work`, head `[id] (answers K; to chat...)` stripped for display), nothing else.
   - **card**: a card on a line of a note (`<vault>/.claude/cards.json`). It shows what an
     instance says with the card tools / `facet card` (logged as kind `answer`, text `#<id> on
     [[Note]] L<n>: ...`, or `new <kind> card #<id> on ...`), and the user's own words on it.
@@ -351,7 +351,7 @@ result) is the message. By default it goes back where the instance's message cam
 chat message: the chat; a card's message: that card; a handed-on task: memory only); a
 `route {chat, cards}` call before it picks other channels, the last call counting. When it
 ends, the engine replies with that text on each card and logs it once as its end record,
-`[id] (kickoff K; to chat, card #c) text`, which the chat venue shows. send_chat and the card
+`[id] (answers K; to chat, card #c) text`, which the chat venue shows. send_chat and the card
 tools remain for what cannot wait (a draft to approve, progress).
 
 ## instances
@@ -362,29 +362,31 @@ co-equal: there is no master and no relay; several run at once. (2026-10-14, the
 "each of my reply comes with a kickoff that is visible in the log. Then upon termination the
 instance writes to memory what was learned ... memory builds from all instances"; "The new agent
 can just reply to me. Follow ups are just new instances. ... Running jobs see the results of
-those terminated before its own start, not more not less. Both start and end chronological.")
+those terminated before its own start, not more not less. Both start and end chronological."
+Then, same day: "Lets remove the kickoff lines. No more kickoff programstically": nothing is
+logged at a start.)
 
   - **The starter** (`turn.rs`): user messages and handed-on tasks wait in one queue and start
     one at a time, in arrival order: settle (every view line a summary, §6), render the view,
-    log the user's message (`user`), then `instance::launch` logs the kickoff, primes the cache
+    log the user's message (`user`), then `instance::launch` primes the cache
     (1) and starts the process detached (own process group, a thread of the engine reads it).
-  - **Kickoff** (kind `start`, logged at the start): `[inst_<hex>] kickoff (model, effort
-    E): answers message N`, or for a handed-on task `... : task from [inst_...] (desc):` and the
-    task verbatim.
+  - **No kickoff**: nothing is logged at a start (older logs keep kind `start` kickoffs).
+    The engine keeps the running instances in memory only (`turn::State::live`).
   - **The instance's view** is the log as of its start: end records of instances that had
-    ended, kickoffs (not results) of those still running; nothing that is logged later. Its own
-    block after the view names it and its kickoff ("You are instance [x]; your kickoff is
-    message K.") and then carries the user's message or the task.
+    ended; nothing that is logged later. Its own block after the view names it, lists the
+    instances running at its start ("Running now, started before you: [x] (opus, answers 41);
+    ...", or "No other instance is running."), and then carries the user's message (with its
+    id) or the task. The list is not logged.
   - **What enters the log while it runs**: only what it sends (`chat`, `answer`), at the moment
     it sends it. Its own steps go to `<state dir>/agents/<id>.jsonl`, opened by zoom("id").
-  - **End record** (kind `work`, logged at its end): its last text, prefixed `[id] (kickoff K)`
-    so it points back; a status replaces the text if it was cancelled, timed out (900 s
+  - **End record** (kind `work`, logged at its end): its last text, prefixed `[id] (answers K)`,
+    or `[id] (task from [x]: desc)` for a handed-on task; a status replaces the text if it was cancelled, timed out (900 s
     without an event), failed, or cut off by the usage limit. `facet spawn --wait` gets it too.
   - **Handing on**: `facet spawn` (from inside an instance: `FACET_INSTANCE` names the caller)
     queues a task as an instance like any other, on `agent_model` (Sonnet) unless `--model`.
   - **Concurrent edits**: no locks. The rule, in the prompt: re-read a file right before
     editing it, change only what you read, never write over text you have not read. A
-    follow-up whose work is still running sees its kickoff without an end record.
+    follow-up whose work is still running sees it in its running list.
   - **Cancel** stops the start that waits (its messages are logged unanswered) and every
     running instance. **Restart** waits until nothing is starting and no instance is alive.
 

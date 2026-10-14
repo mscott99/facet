@@ -14,7 +14,7 @@
 //   usage    one line per API request, and the tables made from them
 //   browse   the whole tree as one HTML page (§10)
 //   events   introspection log, outside the chat directory (never read back)
-//   instance one instance: its own detached `claude -p`, its kickoff and end record in the
+//   instance one instance: its own detached `claude -p`, its end record in the
 //            log, its own steps kept beside it for zoom("Name")
 pub mod browse;
 pub mod claude;
