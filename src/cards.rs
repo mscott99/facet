@@ -501,18 +501,18 @@ pub fn op(cfg: &Cfg, v: &Value) -> Result<(Value, Option<String>), String> {
             let c = get(cfg, &id).ok_or_else(|| format!("no card {}", id))?;
             set_fix(cfg, &id, fix.or(v["text"].as_str()))?;
             let f = fix.or(v["text"].as_str()).unwrap_or("").trim().to_string();
-            Ok((json!({"ok": true, "id": id}), Some(line_of(&c, &if f.is_empty() { "(fix removed)".into() } else { format!("(fix set: {})", f) }))))
+            Ok((json!({"ok": true, "id": id}), if f.is_empty() { None } else { Some(line_of(&c, &format!("(fix set: {})", f))) }))
         }
         "kind" => { set_kind(cfg, &id, &s("kind"))?; Ok((json!({"ok": true}), None)) }
         "close" => {
             let c = get(cfg, &id).ok_or_else(|| format!("no card {}", id))?;
             close(cfg, &id, &s("reason"))?;
-            Ok((json!({"ok": true}), Some(line_of(&c, "(closed)"))))
+            let _ = c; Ok((json!({"ok": true}), None))
         }
         "delete" => {
             let c = get(cfg, &id).ok_or_else(|| format!("no card {}", id))?;
             delete(cfg, &id)?;
-            Ok((json!({"ok": true}), Some(line_of(&c, "(deleted)"))))
+            let _ = c; Ok((json!({"ok": true}), None))
         }
         "apply" => { let m = apply(cfg, &id)?; Ok((json!({"ok": true, "text": m}), None)) }
         "list" => {

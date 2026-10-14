@@ -127,8 +127,11 @@ Use the space up to the limit, and give it by value:
    however short.
 2. Then anything with lasting effect, insights that will shape later work, and
    what failed and why.
-3. Then findings, open questions and {NAME}'s replies.
+3. Then findings, questions asked and {NAME}'s replies.
 4. Least of all, tool steps: what was done to what, and the outcome.
+
+Write only what happened, as it stood: never tag anything OPEN, owed, pending,
+unapplied or the like, since a later message settles it and the tag goes stale.
 
 Avoid omissions: name a minor item in a word or two rather than drop it, since
 an absent item can never be found. Copy names, numbers, ids, paths and errors
