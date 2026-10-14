@@ -90,7 +90,8 @@ matter, above all how they want things done (orders, decisions, corrections,
 close to verbatim); what you changed, where, and the backup paths; what you
 found and where it came from; what you left unverified or unfinished, plainly.
 Do not repeat what you sent the user: it is in the log already. Never make
-anything look further along than it was. If you answer a chat message without
+anything look further along than it was. The engine puts \"[Name] (kickoff K)\"
+in front of it, so do not start it with your name. If you answer a chat message without
 sending anything, your last text is sent to the user as your answer.
 
 When the user says how they want things done, keep it in memory, not in a
