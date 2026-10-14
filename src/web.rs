@@ -28,11 +28,16 @@ const SHELL: &str = r#"<!DOCTYPE html><html><head><meta charset=utf-8>
 /* Dark, low contrast, one accent. Typography does the work: a serif at a reading measure,
    room between the lines, a shallow heading scale. Rules and panels are the exception —
    where a border or a background could be whitespace instead, it is. */
-:root{--bg:#15161a;--fg:#bdbcb8;--dim:#75767a;--line:#272930;--acc:#8fa8c8;--warn:#b59566;--err:#c08276;
+:root{--bg:#2b2e33;--fg:#a9adb3;--dim:#868a91;--line:#3d4046;--inset:#26292d;--wl:#585c63;--num:#6c7077;--hov:#ffffff0a;--acc:#86a0c0;--warn:#a38b63;--err:#b07d74;
  --measure:37rem;--serif:ui-serif,"New York",Charter,"Iowan Old Style",Palatino,Georgia,serif;
  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;color-scheme:dark}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
+.katex,.katex *{color:inherit}svg{color:inherit}img{filter:brightness(.85)}
+::selection{background:#86a0c040;color:inherit}
+html{scrollbar-color:#4a4e55 var(--bg)}
+input,select,textarea{color-scheme:dark}
+
 body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.7 var(--serif)}
 header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:.3rem 1.1rem;align-items:baseline;
  padding:.7rem 1.1rem;background:var(--bg);font:12.5px/1.4 var(--mono)}
@@ -52,22 +57,22 @@ hr{border:0;border-top:1px solid var(--line);margin:2.2rem 0}
 .at{color:var(--dim);font:12.5px/1.6 var(--mono)}
 .msg{margin:1.5rem 0}
 .msg.user,.say .t{transition:opacity .5s ease,border-color .5s ease}
-.pend,.user.pend{opacity:.35}.user.pend{border-left:2px dashed #8fa8c880}
-.pend.bad,.user.pend.bad{opacity:.7;border-left:2px solid #c88}
-.pend.bad::after{content:' ✕';color:#c88}
-.ob{opacity:.6}.user.ob{border-left:2px solid #8fa8c880}.ob .st{display:block;margin-top:-.7em}
+.pend,.user.pend{opacity:.35}.user.pend{border-left:2px dashed #86a0c080}
+.pend.bad,.user.pend.bad{opacity:.7;border-left:2px solid #b88880}
+.pend.bad::after{content:' ✕';color:#b88880}
+.ob{opacity:.6}.user.ob{border-left:2px solid #86a0c080}.ob .st{display:block;margin-top:-.7em}
 .ob.working{opacity:.8}.user.ob.working{border-left-color:var(--acc)}.ob.working .st{color:var(--acc)}
-.user{border-left:2px solid #8fa8c84d;padding-left:1.1rem}
+.user{border-left:2px solid #86a0c04d;padding-left:1.1rem}
 details.step{margin:.5rem 0;font:12.5px/1.6 var(--mono);color:var(--dim)}
 details.step summary{cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 details.step pre{white-space:pre-wrap;margin:.4rem 0}
-pre{overflow-x:auto;background:#101115;padding:.75rem .9rem;border-radius:3px;
+pre{overflow-x:auto;background:var(--inset);padding:.75rem .9rem;border-radius:3px;
  font:12.5px/1.6 var(--mono);color:var(--dim)}
 code{font:.85em/1.5 var(--mono)}
 pre code{font-size:inherit;color:inherit}
-a{color:var(--acc);text-decoration:none;border-bottom:1px solid #8fa8c840}
+a{color:var(--acc);text-decoration:none;border-bottom:1px solid #86a0c040}
 a:hover{border-bottom-color:var(--acc)}
-a.wl{color:inherit;border-bottom:1px solid #4d4f57}
+a.wl{color:inherit;border-bottom:1px solid var(--wl)}
 a.wl:hover{color:var(--acc);border-bottom-color:currentColor}
 .cite{color:var(--dim);cursor:help}
 /* An inlined lemma, proof or definition reads as its own block, not a run of paragraphs
@@ -86,15 +91,15 @@ button:hover{color:var(--acc)}
 footer{position:fixed;bottom:0;left:0;right:0;background:var(--bg);
  padding:.6rem 1.1rem env(safe-area-inset-bottom)}
 footer form{max-width:var(--measure);margin:0 auto;display:flex;gap:.8rem;align-items:center}
-textarea{flex:1;resize:none;background:#101115;color:var(--fg);border:0;border-radius:4px;
+textarea{flex:1;resize:none;background:var(--inset);color:var(--fg);border:0;border-radius:4px;
  padding:.6rem .8rem;font:16px/1.5 var(--serif);max-height:40vh}
 textarea:focus{outline:1px solid var(--line)}
 /* A card reads like an aside: a coloured edge under the line (the colour is its kind, and
    nothing else about it differs), the quote dim at the top, the thread under it in order,
    the fix if it has one, and the composer always last. No frame. */
-.say{box-sizing:border-box;max-width:100%;margin:.5rem 0 1.2rem;padding-left:1.1rem;border-left:2px solid #8fa8c880;font-size:.95em}
-.say.info{border-left-color:#75767a99}.say.warn{border-left-color:var(--warn)}.say.error{border-left-color:var(--err)}
-ins.dm,span.dm{text-decoration:none;background:#8fa8c824;border-radius:2px;box-shadow:0 0 0 1px #8fa8c824}
+.say{box-sizing:border-box;max-width:100%;margin:.5rem 0 1.2rem;padding-left:1.1rem;border-left:2px solid #86a0c080;font-size:.95em}
+.say.info{border-left-color:#868a9199}.say.warn{border-left-color:var(--warn)}.say.error{border-left-color:var(--err)}
+ins.dm,span.dm{text-decoration:none;background:#86a0c024;border-radius:2px;box-shadow:0 0 0 1px #86a0c024}
 del.dm{color:var(--dim);text-decoration:line-through;text-decoration-thickness:1px;opacity:.75}
 .dm{cursor:pointer}
 .say .hd{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.35rem}
@@ -115,8 +120,8 @@ del.dm{color:var(--dim);text-decoration:line-through;text-decoration-thickness:1
 .say .cmp .no{flex:none;padding:.5rem .1rem;font:14px var(--mono);background:none;border:0;cursor:pointer;color:var(--dim)}
 .say .cmp .no:hover{color:var(--err)}
 .say .cmp textarea:focus::placeholder{color:transparent}
-.say .cmp.bad textarea{outline:1px solid #c88}
-.say .t.pend{opacity:.35;border-left:2px dashed #8fa8c880}
+.say .cmp.bad textarea{outline:1px solid #b88880}
+.say .t.pend{opacity:.35;border-left:2px dashed #86a0c080}
 .ctx{margin:2.2rem 0 .3rem}.ctx pre{margin:.3rem 0 0;white-space:pre-wrap}
 form.busy textarea,form.busy button{opacity:.45}
 #older{min-height:1px}
@@ -126,7 +131,7 @@ body{overflow-anchor:none}
 /* The line you can comment on says so only under the pointer, and only on the block a click
    would land on — never on touch, where there is no hover and every tap would light up. */
 @media (hover:hover){p[data-line]:hover,li[data-line]:hover,blockquote[data-line]:hover,
- h1[data-line]:hover,h2[data-line]:hover,h3[data-line]:hover,h4[data-line]:hover{background:#ffffff08}}
+ h1[data-line]:hover,h2[data-line]:hover,h3[data-line]:hover,h4[data-line]:hover{background:var(--hov)}}
 /* Source line numbers in the left margin, for talking about a paper by line. Desktop only:
    a fine pointer and room beside the column. Drawn by ::before, so never selected or copied;
    a block from an embedded note carries that note's own numbers, italic and dimmer. */
@@ -135,7 +140,7 @@ body{overflow-anchor:none}
  p[data-line]::before,li[data-line]::before,h1[data-line]::before,h2[data-line]::before,h3[data-line]::before,
  h4[data-line]::before,h5[data-line]::before,h6[data-line]::before,pre[data-line]::before{
   content:attr(data-line);position:absolute;left:-3.6rem;width:2.8rem;text-align:right;
-  font:10.5px/1.9 var(--mono);color:#5a5b60;opacity:.7;user-select:none;-webkit-user-select:none;pointer-events:none;font-weight:400;font-style:normal}
+  font:10.5px/1.9 var(--mono);color:var(--num);opacity:.7;user-select:none;-webkit-user-select:none;pointer-events:none;font-weight:400;font-style:normal}
  li>p[data-line]::before,blockquote>p[data-line]:not(:first-child)::before{content:none}
  [data-emb][data-line]::before{font-style:italic;opacity:.45}
 }
@@ -751,7 +756,7 @@ if(matchMedia('(pointer: coarse)').matches){
 const HOST: &str = r#"<!DOCTYPE html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Facet</title><style>
-:root{--bg:#15161a;--fg:#bdbcb8;--dim:#75767a;--acc:#8fa8c8;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;color-scheme:dark}
+:root{--bg:#2b2e33;--fg:#a9adb3;--dim:#868a91;--acc:#86a0c0;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;color-scheme:dark}
 *{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--fg);display:flex;flex-direction:column}
 header{display:flex;flex-wrap:wrap;gap:.3rem 1.1rem;align-items:baseline;padding:.7rem 1.1rem;background:var(--bg);font:12.5px/1.4 var(--mono)}
@@ -1306,7 +1311,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
     // WebSocket upgrade can decline to carry.
     let tok = cfg.token();
     if tok.is_empty() || segs.first().map(|s| s != &tok).unwrap_or(true) {
-        return html("<!DOCTYPE html><meta charset=utf-8><body style=\"background:#15161a;color:#75767a;font:14px monospace;padding:2rem\">not found</body>".into(), 404);
+        return html("<!DOCTYPE html><meta charset=utf-8><body style=\"background:#2b2e33;color:#868a91;font:14px monospace;padding:2rem\">not found</body>".into(), 404);
     }
     let rest: Vec<&str> = segs[1..].iter().map(|s| s.as_str()).collect();
     let qnum = |k: &str| -> i64 {
