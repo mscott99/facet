@@ -883,7 +883,7 @@ fn msg_html(cfg: &Cfg, m: &log::Msg) -> String {
     let base = note_base(cfg);
     match m.kind.as_str() {
         "user" => format!("<div class=\"msg user\" data-i=\"{}\" data-t=\"{}\">{}</div>", m.i, md::esc(m.text.trim()), md::render(&m.text, &base)),
-        "chat" | "talk" | "note" | "work" => format!("<div class=\"msg talk\" data-i=\"{}\">{}</div>", m.i, md::render(&m.text, &base)),
+        "chat" | "talk" | "note" | "work" => format!("<div class=\"msg talk\" data-i=\"{}\">{}</div>", m.i, md::render(m.shown(), &base)),
         _ => {
             let head: String = m.text.lines().next().unwrap_or("").chars().take(110).collect();
             format!("<details class=step><summary>{} · {}</summary><pre>{}</pre></details>",

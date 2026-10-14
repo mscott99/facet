@@ -428,7 +428,8 @@ fn outbound(_cfg: Cfg) {
             high = high.max(m.i);
             // only what the agent sent to the chat venue (kind `chat`): never its plain text
             // (`talk`, stream-only) and never a card's answer (`answer`, card venue)
-            if m.kind == "chat" && !m.text.trim().is_empty() { let _ = push(&c, &m.text); }
+            // and an instance's end message posted to the chat, without its head
+            if (m.kind == "chat" || m.kind == "work") && m.in_chat() && !m.shown().trim().is_empty() { let _ = push(&c, m.shown()); }
         }
 
         // new published notes: title and link, never the body

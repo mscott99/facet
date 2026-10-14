@@ -15,6 +15,9 @@ pub struct Msg {
 
 impl Msg {
     pub fn is_prose(&self) -> bool { matches!(self.kind.as_str(), "user" | "talk" | "chat" | "answer" | "note" | "work" | "start") }
+    /// What the chat venue shows of it: an end message posted to the chat without its head,
+    /// anything else whole.
+    pub fn shown(&self) -> &str { if self.kind == "work" { end_body(&self.text).unwrap_or(&self.text) } else { &self.text } }
     /// The chat venue (Telegram and the web chat page; README, "Stream and venues"): the user's
     /// own chat messages and what the agent sent there with `send_chat`. Not its plain text
     /// (`talk`), its steps, card comments and card answers, or subagent reports.
@@ -22,6 +25,7 @@ impl Msg {
         match self.kind.as_str() {
             "chat" => true,
             "user" => wants_chat(&self.text),
+            "work" => end_body(&self.text).is_some(),
             _ => false,
         }
     }
@@ -32,6 +36,17 @@ impl Msg {
 pub fn is_report(text: &str) -> bool {
     text.strip_prefix('[').and_then(|t| t.find("] ").map(|k| &t[..k]))
         .is_some_and(|id| !id.is_empty() && !id.contains(char::is_whitespace) && !id.starts_with('['))
+}
+
+/// An end record posted to the chat (instance.rs `end_record`: "[id] (kickoff K; to chat,
+/// card #c) message"): the message, as posted. None for one that went nowhere or only to cards.
+pub fn end_body(text: &str) -> Option<&str> {
+    if !is_report(text) { return None }
+    let r = &text[text.find("] (kickoff ")? + 11..];
+    let close = r.find(')')?;
+    let to = r[..close].split_once("; to ")?.1;
+    if !to.split(", ").any(|c| c == "chat") { return None }
+    Some(r[close + 1..].trim_start())
 }
 
 /// A user message that came through the chat venue, and so is owed an answer there:
@@ -75,6 +90,10 @@ mod tests {
         assert!(!m("answer", "#c1 on [[N]] L3: right").in_chat());
         assert!(!m("user", "[[N]] L3 #c1: \"q\" fix").in_chat());
         assert!(!m("user", "[spawn_5a7e6b2a3878] REPORT").in_chat());
+        assert!(m("work", "[inst_1] (kickoff 4; to chat, card #c2) Done (see L3).").in_chat());
+        assert_eq!(m("work", "[inst_1] (kickoff 4; to chat, card #c2) Done (see L3).").shown(), "Done (see L3).");
+        assert!(!m("work", "[inst_1] (kickoff 4; to card #c2) Done.").in_chat());
+        assert!(!m("work", "[inst_1] (kickoff 4) Done; to chat later.").in_chat());
         assert!(!m("tool", "Bash {}").in_chat() && !m("echo", "x").in_chat() && !m("work", "x").in_chat());
     }
 }

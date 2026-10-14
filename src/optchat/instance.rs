@@ -43,14 +43,17 @@ pub fn kickoff(job: &Job, msg: Option<usize>) -> String {
     }
 }
 
-/// The end record as logged: its name and kickoff first, so it points back to it.
-pub fn end_record(id: &str, k: usize, status: &str, text: &str) -> String {
+/// The end record as logged: its name and kickoff first, so it points back to it, then where
+/// it was posted (`; to chat, card #c1`), then the message itself, as posted, unchanged.
+pub fn end_record(id: &str, k: usize, status: &str, text: &str, to: &[String]) -> String {
     let text = text.trim();
+    let to = if to.is_empty() { String::new() } else { format!("; to {}", to.join(", ")) };
+    let head = format!("[{}] (kickoff {}{})", id, k, to);
     match (status, text.is_empty()) {
-        ("done", false) => format!("[{}] (kickoff {}) {}", id, k, text),
-        ("done", true) => format!("[{}] (kickoff {}) ended without an end record", id, k),
-        (s, true) => format!("[{}] (kickoff {}) {}, no end record", id, k, s),
-        (s, false) => format!("[{}] (kickoff {}) {}; its last text: {}", id, k, s, text),
+        ("done", false) => format!("{} {}", head, text),
+        ("done", true) => format!("{} ended without an end message", head),
+        (s, true) => format!("{} {}, no end message", head, s),
+        (s, false) => format!("{} {}; its last text: {}", head, s, text),
     }
 }
 
@@ -73,7 +76,7 @@ pub fn launch(e: &Arc<Engine>, job: Job, view: String, msg: Option<usize>, epoch
     let e2 = e.clone();
     match started {
         Ok(p) => { std::thread::spawn(move || run(e2, p, job, k, msg.is_some(), epoch)); }
-        Err(x) => finish(&e2, &job, k, msg.is_some(), "failed to start", &x.to_string(), false, json!({})),
+        Err(x) => finish(&e2, &job, k, msg.is_some(), "failed to start", &x.to_string(), false, None, json!({})),
     }
 }
 
@@ -90,6 +93,8 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, k: usize, owed: bool, epoch: u64) 
     let mut spoke = false;
     let mut speaking: Vec<String> = Vec::new();
     let mut quiet = Instant::now();
+    // its end message and where it goes: the input of its `end` call, the last one counting
+    let mut ending: Option<Value> = None;
     loop {
         if e.turn.lock().unwrap().epoch != epoch { status = "cancelled"; p.kill(); break }
         let ev = match p.next(Duration::from_millis(500)) {
@@ -122,6 +127,7 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, k: usize, owed: bool, epoch: u64) 
                     "text" => { let s = b["text"].as_str().unwrap_or(""); if !s.trim().is_empty() { last = s.to_string(); } }
                     "tool_use" => {
                         tool_uses += 1;
+                        if b["name"].as_str().is_some_and(|n| n.ends_with("__end")) && !b["input"]["text"].as_str().unwrap_or("").trim().is_empty() { ending = Some(b["input"].clone()); }
                         if speaks(b["name"].as_str().unwrap_or("")) { speaking.push(b["id"].as_str().unwrap_or("").to_string()); }
                     }
                     _ => {}
@@ -152,7 +158,7 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, k: usize, owed: bool, epoch: u64) 
     if status != "cancelled" && status != "timed out" { p.finish(); }
     if let Some(r) = meter.take() { e.spend("instance", &r); }
     let trace = json!({"reqs": reqs, "eq": eq.round(), "tools": tool_uses, "ms": at.elapsed().as_millis()});
-    finish(&e, &job, k, owed, status, &turn::cap(last.trim()), spoke, trace);
+    finish(&e, &job, k, owed, status, &turn::cap(last.trim()), spoke, ending, trace);
 }
 
 /// The output tools: what an instance says to the user.
@@ -172,21 +178,37 @@ fn limit_hit(e: &Arc<Engine>, text: &str, error: bool) -> bool {
     true
 }
 
-/// The end: the end record into the log, at this moment. The safety net for the chat venue:
-/// an instance that served a chat message and said nothing to the user has its last text sent
-/// to the chat as its reply (logged once, as `chat`), and its end record says so.
+/// The end: one message, posted where the instance chose (its `end` call: chat, cards) and
+/// logged once, unchanged, as its end record (`work`), at this moment. The chat venue reads
+/// it from the log (`log::end_body`); a card gets it as a reply. With no `end` call its last
+/// text is the message, and an instance that served a chat message and said nothing to the
+/// user posts it to the chat (the safety net).
 #[allow(clippy::too_many_arguments)]
-fn finish(e: &Arc<Engine>, job: &Job, k: usize, owed: bool, status: &str, last: &str, spoke: bool, mut trace: Value) {
-    let net = owed && !spoke && crate::log::wants_chat(&job.text);
-    let record = if net {
-        let said = if last.trim().is_empty() { format!("(no reply: the instance {})", if status == "done" { "ended without one" } else { status }) } else { last.to_string() };
-        e.log("chat", &said);
-        format!("[{}] (kickoff {}) {}; it sent no reply, so its last text went to the chat as one", job.id, k, status)
-    } else { end_record(&job.id, k, status, last) };
+fn finish(e: &Arc<Engine>, job: &Job, k: usize, owed: bool, status: &str, last: &str, spoke: bool, ending: Option<Value>, mut trace: Value) {
+    let served_chat = owed && crate::log::wants_chat(&job.text);
+    let (text, chat, cards) = match &ending {
+        Some(v) => (
+            turn::cap(v["text"].as_str().unwrap_or("").trim()),
+            v["chat"].as_bool().unwrap_or(served_chat && !spoke),
+            v["cards"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(|s| s.trim().trim_start_matches('#').to_string())).filter(|c| !c.is_empty()).collect()).unwrap_or_default(),
+        ),
+        None => (last.to_string(), served_chat && !spoke, Vec::<String>::new()),
+    };
+    let net = ending.is_none() && chat;
+    let mut to = Vec::new();
+    if chat { to.push("chat".to_string()); }
+    let posted = if text.trim().is_empty() && status != "done" { format!("(no reply: the instance {})", status) } else { text.clone() };
+    for c in &cards {
+        match crate::cards::op(&crate::cfg::Cfg::load(), &json!({"do": "reply", "id": c, "text": posted})) {
+            Ok(_) => to.push(format!("card #{}", c)),
+            Err(x) => e.notice(&format!("[{}] end message to card #{} failed: {}", job.id, c, x)),
+        }
+    }
+    let record = end_record(&job.id, k, status, &text, &to);
     e.log("work", &record);
     if let Some(w) = &job.wait { let _ = w.send(record.clone()); }
     trace["instance"] = json!(job.id); trace["kickoff"] = json!(k); trace["status"] = json!(status);
-    trace["model"] = json!(job.model); trace["spoke"] = json!(spoke); trace["net"] = json!(net); trace["record_bytes"] = json!(record.len());
+    trace["model"] = json!(job.model); trace["spoke"] = json!(spoke); trace["net"] = json!(net); trace["ended"] = json!(ending.is_some()); trace["to"] = json!(to); trace["record_bytes"] = json!(record.len());
     super::events::log(&e.dir, "instance", trace);
     e.instances.fetch_sub(1, SeqCst);
     let line = usage::limits_line(&e.limits());
@@ -252,9 +274,13 @@ mod tests {
         assert_eq!(kickoff(&j, Some(41)), "[inst_1] kickoff (opus, effort high): answers message 41");
         let t = Job { from: Some("inst_0".into()), desc: "check".into(), model: "sonnet".into(), text: "do X".into(), ..j };
         assert_eq!(kickoff(&t, None), "[inst_1] kickoff (sonnet, effort high): task from [inst_0] (check):\n\ndo X");
-        assert_eq!(end_record("inst_1", 42, "done", " learned Y "), "[inst_1] (kickoff 42) learned Y");
-        assert_eq!(end_record("inst_1", 42, "cancelled", ""), "[inst_1] (kickoff 42) cancelled, no end record");
-        assert!(crate::log::is_report(&end_record("inst_1", 42, "done", "x")));
+        assert_eq!(end_record("inst_1", 42, "done", " learned Y ", &[]), "[inst_1] (kickoff 42) learned Y");
+        assert_eq!(end_record("inst_1", 42, "cancelled", "", &[]), "[inst_1] (kickoff 42) cancelled, no end message");
+        let to = ["chat".to_string(), "card #c1".to_string()];
+        let r = end_record("inst_1", 42, "done", "Done.", &to);
+        assert_eq!(r, "[inst_1] (kickoff 42; to chat, card #c1) Done.");
+        assert_eq!(crate::log::end_body(&r), Some("Done."));
+        assert!(crate::log::is_report(&end_record("inst_1", 42, "done", "x", &[])));
         assert!(crate::log::is_report(&kickoff(&t, None)));
     }
 
@@ -281,6 +307,7 @@ mod tests {
             printf '%s\\n' \"$line\" > '{}'/\"$FACET_INSTANCE\"\n\
             echo '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{{\"command\":\"STEP-ONLY\"}}}}]}}}}'\n\
             case \"$line\" in *'your kickoff is message 1.'*) sleep 1.5;; esac\n\
+            case \"$line\" in *ENDME*) echo '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"t2\",\"name\":\"mcp__optchat__end\",\"input\":{{\"text\":\"THE END, as posted\",\"chat\":true}}}}]}}}}';; esac\n\
             echo '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"LEARNED: something\"}}'\n",
             ins.display())).unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -324,7 +351,8 @@ mod tests {
         assert!(sb.contains(&format!("You are instance [{}]; your kickoff is message 3.", b)));
 
         // a third, started after both ended, sees both end records; it serves a chat message
-        // and says nothing to the user, so its last text goes to the chat (logged once)
+        // and says nothing to the user, so its last text is posted to the chat: one message,
+        // logged once, as its end record
         turn::input(&e, "plain chat message".into());
         until("third ended", &|| msgs(&e).iter().filter(|m| m.0 == "work").count() == 3 && idle(&e));
         let m = msgs(&e);
@@ -332,20 +360,29 @@ mod tests {
         let sc = sent(&c);
         assert!(sc.contains(&format!("[{}] (kickoff 1) LEARNED", a)) && sc.contains(&format!("[{}] (kickoff 3) LEARNED", b)), "{}", sc);
         let kinds: Vec<&str> = m[6..].iter().map(|x| x.0.as_str()).collect();
-        assert_eq!(kinds, ["user", "start", "chat", "work"], "{:?}", m);
-        assert_eq!(m[8].1, "LEARNED: something");
-        assert!(m[9].1.starts_with(&format!("[{}] (kickoff 7) done; it sent no reply", c)), "{}", m[9].1);
+        assert_eq!(kinds, ["user", "start", "work"], "{:?}", m);
+        assert_eq!(m[8].1, format!("[{}] (kickoff 7; to chat) LEARNED: something", c));
+        assert_eq!(crate::log::end_body(&m[8].1), Some("LEARNED: something"));
 
         // a handed-on task: an instance like any other, on agent_model; --wait gets its record
         let (tx, rx) = std::sync::mpsc::channel();
         let id = turn::spawn(&e, "", "", "look", "find the thing", &c, Some(tx)).unwrap();
         let rec = rx.recv_timeout(Duration::from_secs(20)).unwrap();
-        assert_eq!(rec, format!("[{}] (kickoff 10) LEARNED: something", id));
+        assert_eq!(rec, format!("[{}] (kickoff 9) LEARNED: something", id));
         let m = msgs(&e);
-        assert_eq!(m[11].0, "work");
-        assert_eq!(m[10].1, format!("[{}] kickoff ({}, effort {}): task from [{}] (look):\n\nfind the thing", id, e.conf.agent_model, e.conf.effort, c));
+        assert_eq!(m[10].0, "work");
+        assert_eq!(m[9].1, format!("[{}] kickoff ({}, effort {}): task from [{}] (look):\n\nfind the thing", id, e.conf.agent_model, e.conf.effort, c));
         assert!(sent(&id).contains(&format!("a task handed to you by [{}]", c)));
         until("idle", &|| idle(&e));
+
+        // one that ends with `end`: its message, not its last text, is posted where it chose
+        // and logged once, unchanged
+        turn::input(&e, "ENDME please".into());
+        until("fourth ended", &|| msgs(&e).iter().filter(|m| m.0 == "work").count() == 5 && idle(&e));
+        let m = msgs(&e);
+        let f = name(&m, 12);
+        assert_eq!(m[13..].iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["work"], "{:?}", m);
+        assert_eq!(m[13].1, format!("[{}] (kickoff 12; to chat) THE END, as posted", f));
 
         let _ = std::fs::remove_dir_all(state_dir(&d));
         let _ = std::fs::remove_dir_all(&d);

@@ -267,7 +267,7 @@ Telegram and every `facet chat` use it):
 
 The MCP server listens on a random loopback port with a random secret path, for the engine's
 own instances only. Every instance gets the same path (`/<secret>/mcp`) and tools: `zoom`,
-`date`, `send_chat {text}`, `send_file`, and the card tools — `new_card {note, anchor | line,
+`date`, `end {text, chat, cards?}`, `send_chat {text}`, `send_file`, and the card tools — `new_card {note, anchor | line,
 text, kind?, fix?}`, `answer_card {id, text, fix?}`, `fix_card {id, fix}`, `close_card {id,
 delete?}`, `list_cards {note?}`.
 
@@ -333,16 +333,23 @@ The log is the **stream**: the memory tree is built on it alone — user message
 kickoffs and end records, chat sends, card comments and card answers. A **venue** is where some
 of it is also delivered. There are two:
 
-  - **chat**: Telegram and the web chat page, one venue. It shows the user's messages and what
-    an instance sent with `send_chat` (logged as kind `chat`), nothing else.
+  - **chat**: Telegram and the web chat page, one venue. It shows the user's messages, what
+    an instance sent with `send_chat` (logged as kind `chat`), and end messages posted to the
+    chat (kind `work`, head `[id] (kickoff K; to chat...)` stripped for display), nothing else.
   - **card**: a card on a line of a note (`<vault>/.claude/cards.json`). It shows what an
     instance says with the card tools / `facet card` (logged as kind `answer`, text `#<id> on
     [[Note]] L<n>: ...`, or `new <kind> card #<id> on ...`), and the user's own words on it.
 
 An instance's plain text, tool calls and results stay out of the stream (see **instances**).
-The safety net: an instance that served a chat message (not a card comment) and ended without
-any send_chat, send_file or card answer has its last text logged as `chat`, so it reaches the
-user, and its end record says so instead of repeating it.
+**The end is one message** (the user, 2026-10-14: "The end should be a single message. That
+message gets posted in toggled output locations. That same message goes to memory, no change
+or summary. Agent decides on which output channels to include, then emits the final
+message"). The instance calls `end {text, chat, cards}` as its last act; when it ends, the
+engine replies with that text on each card, and logs it once as its end record, `[id]
+(kickoff K; to chat, card #c) text`, which the chat venue shows. send_chat and the card tools
+remain for what cannot wait (a draft to approve, progress). The safety net: with no `end`
+call the last text is the message, posted to the chat only if the instance served a chat
+message and sent nothing there.
 
 ## instances
 
