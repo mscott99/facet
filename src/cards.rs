@@ -398,15 +398,52 @@ pub fn brief(cfg: &Cfg, note: Option<&str>) -> String {
 pub fn message(c: &Value, text: &str) -> String {
     let mut s = format!("[[{}]] L{} #{}: \"{}\"", stem(c["note"].as_str().unwrap_or("")), c["line"],
         c["id"].as_str().unwrap_or(""), c["quote"].as_str().unwrap_or(""));
-    if c["by"] == "server" {
-        if let Some(first) = c["thread"][0]["text"].as_str() {
-            let f: String = first.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(300).collect();
-            s.push_str(&format!("\n(on your {} card: {})", c["kind"].as_str().unwrap_or(""), f));
-        }
+    let earlier = thread_before(c, text);
+    if !earlier.is_empty() {
+        s.push_str("\n(earlier on this card");
+        if c["by"] == "server" { s.push_str(&format!(", your {} card", c["kind"].as_str().unwrap_or(""))); }
+        s.push_str(":\n");
+        s.push_str(&earlier);
+        s.push_str(")\n(reply:)");
     }
     s.push('\n');
     s.push_str(text.trim());
     s
+}
+
+/// Cap on one earlier card message, and on all of them together, in characters.
+const THREAD_EACH: usize = 600;
+const THREAD_ALL: usize = 2400;
+
+/// The card's thread before the reply `text` (its last entry, when it is that reply), in order,
+/// one speaker-marked line each ("you:" is OptChat, "user:" the user), each cut to
+/// `THREAD_EACH`; past `THREAD_ALL`, the first message stays and the oldest after it are left out.
+fn thread_before(c: &Value, text: &str) -> String {
+    let mut t: Vec<String> = c["thread"].as_array().map(|a| a.iter().map(|m| {
+        let who = if m["by"] == "user" { "user" } else { "you" };
+        let flat = m["text"].as_str().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut f: String = flat.chars().take(THREAD_EACH).collect();
+        if f.chars().count() < flat.chars().count() { f.push_str(" …"); }
+        format!("{}: {}", who, f)
+    }).collect()).unwrap_or_default();
+    if c["thread"].as_array().and_then(|a| a.last()).and_then(|m| m["text"].as_str())
+        .is_some_and(|x| x.trim() == text.trim() && c["thread"].as_array().unwrap().last().unwrap()["by"] == "user") {
+        t.pop();
+    }
+    if t.is_empty() { return String::new() }
+    let first = t.remove(0);
+    let mut rest: Vec<String> = Vec::new();
+    let mut left = THREAD_ALL.saturating_sub(first.chars().count() + 1);
+    for m in t.iter().rev() {
+        if m.chars().count() + 1 > left { break }
+        left -= m.chars().count() + 1;
+        rest.insert(0, m.clone());
+    }
+    let skipped = t.len() - rest.len();
+    let mut out = vec![first];
+    if skipped > 0 { out.push(format!("({} earlier message(s) left out)", skipped)); }
+    out.extend(rest);
+    out.join("\n")
 }
 
 /// The card a message came from, if it came from one: the id in `[[Note]] L<n> #<id>...`
@@ -649,6 +686,20 @@ mod tests {
     }
 
     #[test]
+    fn a_long_card_thread_is_capped_keeping_the_first_and_newest() {
+        let mut th: Vec<Value> = (0..20).map(|i| json!({"by": if i % 2 == 0 { "server" } else { "user" },
+            "text": format!("m{} {}", i, "w ".repeat(400))})).collect();
+        th.push(json!({"by": "user", "text": "now"}));
+        let c = json!({"note": "N.md", "line": 1, "id": "c9", "quote": "q", "by": "server", "kind": "warn", "thread": th});
+        let m = message(&c, "now");
+        assert!(m.contains("you: m0 ") && m.contains("user: m19 ") && !m.contains("m10 "), "{}", m);
+        assert!(m.contains("earlier message(s) left out") && m.contains(" …"));
+        assert!(m.chars().count() < THREAD_ALL + 300);
+        assert!(m.ends_with("(reply:)\nnow"));
+        assert_eq!(from_card(&m), Some("c9"));
+    }
+
+    #[test]
     fn a_card_is_created_even_without_a_claude_dir_and_holds_a_thread() {
         let cfg = vault("thread", "one\ntwo\nthree\n");
         let c = create(&cfg, New { id: Some("c1"), note: "Note", at: At::Line(2), text: "hm", kind: "comment",
@@ -662,7 +713,9 @@ mod tests {
         let c = get(&cfg, "c1").unwrap();
         let by: Vec<&str> = c["thread"].as_array().unwrap().iter().map(|m| m["by"].as_str().unwrap()).collect();
         assert_eq!(by, ["user", "server", "user"]);
-        assert!(message(&c, "x").starts_with("[[Note]] L2 #c1: \"two\"\nx"));
+        let m = message(&c, "and?");
+        assert!(m.starts_with("[[Note]] L2 #c1: \"two\"\n(earlier on this card:\nuser: hm\nyou: looks right)\n(reply:)\nand?"), "{}", m);
+        assert!(!m.contains("user: and?"));
         assert_eq!(from_card(&message(&c, "x")), Some("c1"));
         unsay(&cfg, "c1", 2).unwrap();
         assert_eq!(get(&cfg, "c1").unwrap()["thread"].as_array().unwrap().len(), 2);
