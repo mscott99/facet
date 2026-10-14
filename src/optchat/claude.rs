@@ -107,6 +107,9 @@ impl Proc {
         self.send(json!([{"type": "text", "text": text}]))
     }
 
+    /// No more input: claude finishes what it has queued and exits. Does not wait.
+    pub fn close_input(&mut self) { self.stdin = None; }
+
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();

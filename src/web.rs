@@ -282,8 +282,8 @@ function live(){
           var pp=document.getElementById('paused');if(pp){var pt=nt.dataset.paused||'';pp.hidden=!pt;if(pt)pp.textContent=pt}}
         var n=w.firstChild,any=false;
         while(n){var nx=n.nextSibling;
-          if(n.nodeType==1&&n.dataset&&n.dataset.t){var ps=document.querySelectorAll('.pend'),q=null;
-            for(var i=0;i<ps.length;i++)if(ps[i].dataset.t==n.dataset.t){q=ps[i];break}
+          if(n.nodeType==1&&n.dataset&&n.dataset.t){var ps=document.querySelectorAll('.pend'),q=null,bt=n.dataset.t.replace(/^\(to \[\w+\]\) /,'');
+            for(var i=0;i<ps.length;i++)if(ps[i].dataset.t==bt){q=ps[i];break}
             if(q)q.remove()}
           tail.parentNode.insertBefore(n,tail);
           if(n.nodeType==1){any=true;mathify(n);htmx.process(n)}n=nx}
@@ -548,12 +548,14 @@ document.addEventListener('focusout',function(e){
   if(!e.target.closest||!e.target.closest('.say'))return;
   setTimeout(function(){if(typing()||document.hidden)return;
     if(document.getElementById('docwrap'))docLive();cardLive()},0)});
-// Enter (or Shift-Enter) sends, and starts an instance; Alt-Enter is a new line
+// Enter sends, and starts an instance; Alt-Enter sends to the instance running (the one started
+// last; if it has ended, it is an ordinary send); Shift-Enter is a new line
 document.addEventListener('keydown',function(e){
   if(e.key!='Enter'||e.target.tagName!='TEXTAREA')return;
   if(e.target.closest('.say'))return; // the line-comment box keeps its own keys
   e.preventDefault();
-  if(e.altKey){e.target.setRangeText('\n',e.target.selectionStart,e.target.selectionEnd,'end');return}
+  if(e.shiftKey){e.target.setRangeText('\n',e.target.selectionStart,e.target.selectionEnd,'end');return}
+  e.target.form.elements.to.value=e.altKey?'latest':'';
   htmx.trigger(e.target.form,'submit');});
 // The compose box: dim while the server has it, clear on success, say plainly when it failed.
 // A `/model` reply is not a message, so it goes to the toast and refreshes the header's model.
@@ -857,7 +859,7 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
     // toast line stays either way — the comment cards post through it.
     let foot = format!("<footer>{}<div id=toast></div></footer>", if compose {
         format!("<form hx-post=\"{}/x/send\" hx-swap=none id=compose>\
-            <textarea name=text rows=1 placeholder=\"message\"></textarea>\
+            <textarea name=text rows=1 placeholder=\"message\"></textarea><input type=hidden name=to>\
             <button>send</button></form>", t)
     } else { String::new() });
     SHELL.replace("{{TITLE}}", &md::esc(title))
@@ -1414,7 +1416,8 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
                 return html(md::esc(&crate::tg::model_cmd(&t[6..])), 200);
             }
             if crate::tg::is_help(t) { return html(md::esc(crate::tg::HELP), 200); }
-            match tell::tell(cfg, &text, "reader") {
+            let to = (field(&f, "to") == "latest").then_some(crate::optchat::inbox::Target::Latest);
+            match tell::tell_to(cfg, &text, "reader", to.as_ref()) {
                 Ok(_) => html("queued".into(), 200),
                 Err(e) => html(format!("not sent: {}", md::esc(&e)), 200),
             }

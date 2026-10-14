@@ -14,20 +14,53 @@ use super::engine::{self, state_dir};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Whom a message is for, when not for a new instance: a running one (owners.rs resolves it;
+/// if that instance has ended by then, the message is an ordinary one).
 #[derive(Clone, Debug, PartialEq)]
-pub struct Item { pub id: String, pub text: String }
+pub enum Target {
+    /// the instance started last (web: Alt+Enter)
+    Latest,
+    /// the instance that posted log message `i` (Telegram: a reply to one of its messages)
+    Log { i: usize },
+    /// the instance that answered the user's message that went in as inbox item `id`
+    /// (Telegram: a reply to the user's own message)
+    Inbox { id: String },
+}
+
+impl Target {
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            Target::Latest => serde_json::json!({"kind": "latest"}),
+            Target::Log { i } => serde_json::json!({"kind": "log", "i": i}),
+            Target::Inbox { id } => serde_json::json!({"kind": "inbox", "id": id}),
+        }
+    }
+    fn from_json(v: &serde_json::Value) -> Option<Target> {
+        match v["kind"].as_str()? {
+            "latest" => Some(Target::Latest),
+            "log" => Some(Target::Log { i: v["i"].as_u64()? as usize }),
+            "inbox" => Some(Target::Inbox { id: v["id"].as_str()?.to_string() }),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Item { pub id: String, pub text: String, pub to: Option<Target> }
 
 pub fn dir() -> PathBuf { state_dir(&engine::dir()).join("inbox") }
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Store a message; its id is the file name. Atomic: a reader sees all of it or none.
-pub fn push_in(d: &Path, text: &str) -> Result<String, String> {
+pub fn push_to(d: &Path, text: &str, to: Option<&Target>) -> Result<String, String> {
     std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     let us = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|t| t.as_micros()).unwrap_or(0);
     let id = format!("{:020}-{:06}-{}", us, SEQ.fetch_add(1, Ordering::SeqCst), std::process::id());
     let tmp = d.join(format!(".{}.tmp", id));
-    let body = serde_json::json!({"text": text}).to_string();
+    let mut body = serde_json::json!({"text": text});
+    if let Some(t) = to { body["to"] = t.to_json(); }
+    let body = body.to_string();
     {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
@@ -37,7 +70,7 @@ pub fn push_in(d: &Path, text: &str) -> Result<String, String> {
     if let Ok(dd) = std::fs::File::open(d) { let _ = dd.sync_all(); }
     Ok(id)
 }
-pub fn push(text: &str) -> Result<String, String> { push_in(&dir(), text) }
+pub fn push(text: &str, to: Option<&Target>) -> Result<String, String> { push_to(&dir(), text, to) }
 
 /// What is waiting, oldest first.
 pub fn list_in(d: &Path) -> Vec<Item> {
@@ -47,7 +80,8 @@ pub fn list_in(d: &Path) -> Vec<Item> {
     names.sort();
     names.into_iter().filter_map(|n| {
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(d.join(&n)).ok()?).ok()?;
-        Some(Item { id: n.trim_end_matches(".json").to_string(), text: v["text"].as_str()?.to_string() })
+        Some(Item { id: n.trim_end_matches(".json").to_string(), text: v["text"].as_str()?.to_string(),
+            to: Target::from_json(&v["to"]) })
     }).collect()
 }
 pub fn list() -> Vec<Item> { list_in(&dir()) }
@@ -80,8 +114,8 @@ mod tests {
     fn persists_in_order_and_drains_once() {
         let d = tmp("a");
         assert!(list_in(&d).is_empty());
-        push_in(&d, "one\nwith newline").unwrap();
-        push_in(&d, "two").unwrap();
+        push_to(&d, "one\nwith newline", None).unwrap();
+        push_to(&d, "two", None).unwrap();
         // a half-written file (tmp) is never listed
         std::fs::write(d.join(".x.tmp"), "{").unwrap();
         let l = list_in(&d);
@@ -93,6 +127,20 @@ mod tests {
         assert_eq!(got, vec!["one\nwith newline", "two"]);
         assert!(list_in(&d).is_empty());
         assert_eq!(drain_in(&d, |_| panic!("taken twice")), 0);
+    }
+    #[test]
+    fn a_target_round_trips_and_old_files_have_none() {
+        let d = tmp("c");
+        push_to(&d, "plain", None).unwrap();
+        push_to(&d, "a", Some(&Target::Latest)).unwrap();
+        push_to(&d, "b", Some(&Target::Log { i: 7 })).unwrap();
+        push_to(&d, "c", Some(&Target::Inbox { id: "x-1".into() })).unwrap();
+        // a file as written before targets existed
+        std::fs::write(d.join("99999999999999999999-000000-1.json"), r#"{"text":"old"}"#).unwrap();
+        let l = list_in(&d);
+        assert_eq!(l.iter().map(|i| i.to.clone()).collect::<Vec<_>>(),
+            vec![None, Some(Target::Latest), Some(Target::Log { i: 7 }), Some(Target::Inbox { id: "x-1".into() }), None]);
+        assert_eq!(l[4].text, "old");
     }
     #[test]
     fn working_reads_the_engines_saved_queues() {

@@ -31,6 +31,8 @@ pub struct Job {
     pub from: Option<String>,
     pub desc: String,
     pub wait: Option<Waiter>,
+    /// the inbox item a user message came in as (owners.rs: replies to it find its instance)
+    pub inbox: Option<String>,
 }
 
 #[derive(Default)]
@@ -87,12 +89,35 @@ pub fn restore(e: &Arc<Engine>) {
 /// Take what serve, the CLI and Telegram left in the inbox (inbox.rs) into the engine's own
 /// queue, in arrival order. `input` has saved each message (queue.json) before its file goes.
 pub fn drain_inbox(e: &Arc<Engine>) -> usize {
-    super::inbox::drain_in(&super::inbox::dir(), |it| input(e, it.text.clone()))
+    super::inbox::drain_in(&super::inbox::dir(), |it| input_item(e, it))
 }
 
 /// A user message from any route (§7: "on user input text"): it starts an instance of its own.
 pub fn input(e: &Arc<Engine>, text: String) {
-    let job = Job { id: new_id(), model: e.model(), effort: e.conf.effort.clone(), text, from: None, desc: String::new(), wait: None };
+    input_item(e, &super::inbox::Item { id: String::new(), text, to: None });
+}
+
+/// A message that names a running instance goes into it (instance.rs), logged at once as
+/// `(to [inst_x]) text`, which is no new message to answer but one more for that instance. Any
+/// other, or one for an instance that has ended, starts an instance of its own.
+pub fn input_item(e: &Arc<Engine>, it: &super::inbox::Item) {
+    if let Some(to) = &it.to {
+        // the lock is held through the send: an instance takes its tap away under it, then
+        // reads what was sent, so no message is sent into a tap that is no longer read
+        let mut o = e.owners.lock().unwrap();
+        if let Some((inst, tap)) = o.resolve(to) {
+            let (inst, tap) = (inst.to_string(), tap.clone());
+            let text = it.text.trim().to_string();
+            if let Some(i) = e.log_at("user", &format!("(to [{}]) {}", inst, text), &super::store::now_iso()) {
+                o.own(i, &inst);
+                o.inbox(&it.id, i);
+                let _ = tap.send(super::owners::Inject { msg: i, text });
+                return
+            }
+        }
+    }
+    let inbox = Some(it.id.clone()).filter(|i| !i.is_empty());
+    let job = Job { id: new_id(), model: e.model(), effort: e.conf.effort.clone(), text: it.text.clone(), from: None, desc: String::new(), wait: None, inbox };
     enqueue(e, job);
 }
 
@@ -104,7 +129,7 @@ pub fn spawn(e: &Arc<Engine>, model: &str, effort: &str, desc: &str, task: &str,
     let pick = |x: &str, d: &str| if x.trim().is_empty() { d.to_string() } else { x.trim().to_string() };
     let job = Job {
         id: new_id(), model: pick(model, &e.conf.agent_model), effort: pick(effort, &e.conf.effort),
-        text: task.to_string(), from: Some(from.trim().to_string()), desc: desc.trim().to_string(), wait,
+        text: task.to_string(), from: Some(from.trim().to_string()), desc: desc.trim().to_string(), wait, inbox: None,
     };
     let id = job.id.clone();
     enqueue(e, job);
@@ -175,6 +200,11 @@ fn run(e: &Arc<Engine>) {
         let mut vstats = super::events::view_stats(&view, parts);
         vstats["settle_ms"] = json!(settle_ms);
         let msg = if job.from.is_none() { e.log("user", &job.text); Some(e.mem.lock().unwrap().store.t() - 1) } else { None };
+        if let Some(i) = msg {
+            let mut o = e.owners.lock().unwrap();
+            o.own(i, &job.id);
+            if let Some(x) = &job.inbox { o.inbox(x, i); }
+        }
         { let t = e.turn.lock().unwrap(); save(e, &t); }
         super::instance::launch(e, job, view, msg, epoch, vstats);
     }

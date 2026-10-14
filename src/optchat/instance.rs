@@ -16,7 +16,8 @@ use super::turn::{self, Job};
 use super::{prompts, usage};
 use serde_json::{json, Value};
 use std::io::Write;
-use std::sync::mpsc::RecvTimeoutError;
+use super::owners::Inject;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
 use std::time::{Duration, Instant};
@@ -31,13 +32,15 @@ pub fn dir(e: &Engine) -> std::path::PathBuf {
 
 /// What it serves, as its end record's head names it and the running list shows it:
 /// "answers 41", "task from [inst_0]: check". No brackets or ';' inside, so the head parses.
-pub fn serves(job: &Job, msg: Option<usize>) -> String {
+/// `extra`: the messages sent to it while it ran (the record names them all: "answers 41, 45").
+pub fn serves(job: &Job, msg: Option<usize>, extra: &[usize]) -> String {
     let s = match (msg, &job.from) {
-        (Some(i), _) => format!("answers {}", i),
+        (Some(i), _) => format!("answers {}", std::iter::once(i).chain(extra.iter().copied()).map(|x| x.to_string()).collect::<Vec<_>>().join(", ")),
         (None, Some(f)) => {
             let by = if f.is_empty() { String::new() } else { format!(" from [{}]", f) };
             let d = if job.desc.is_empty() { String::new() } else { format!(": {}", job.desc) };
-            format!("task{}{}", by, d)
+            let x = if extra.is_empty() { String::new() } else { format!(", and answers {}", extra.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")) };
+            format!("task{}{}{}", by, d, x)
         }
         (None, None) => "task".to_string(),
     };
@@ -63,14 +66,15 @@ pub fn end_record(id: &str, serves: &str, status: &str, text: &str, to: &[String
 /// memory). Called by the starter (turn.rs), one at a time, with the view as it stands now.
 pub fn launch(e: &Arc<Engine>, job: Job, view: String, msg: Option<usize>, epoch: u64, mut stats: Value) {
     e.instances.fetch_add(1, SeqCst);
-    let sv = serves(&job, msg);
+    let sv = serves(&job, msg, &[]);
     let running: Vec<String> = {
         let mut t = e.turn.lock().unwrap();
         let r = t.live.iter().map(|(_, l)| l.clone()).collect();
         t.live.push((job.id.clone(), format!("[{}] ({}, {})", job.id, job.model, sv)));
         r
     };
-    let url = e.mcp_url.get().cloned().unwrap_or_default();
+    // its own URL names it, so what it says in the chat is known to be its (owners.rs)
+    let url = format!("{}?i={}", e.mcp_url.get().cloned().unwrap_or_default(), job.id);
     let args = turn::shared_args(e, &job.model, &job.effort, &url);
     if let Some((r, w)) = turn::prime(e, &args, &view, &job.id) { stats["prime_read"] = json!(r); stats["prime_write"] = json!(w); }
     let mut env = turn::env(e);
@@ -83,20 +87,29 @@ pub fn launch(e: &Arc<Engine>, job: Job, view: String, msg: Option<usize>, epoch
     super::events::log(&e.dir, "start", stats);
     let e2 = e.clone();
     match started {
-        Ok(p) => { std::thread::spawn(move || run(e2, p, job, sv, msg.is_some(), epoch)); }
+        Ok(p) => {
+            let (tx, rx) = std::sync::mpsc::channel();
+            e.owners.lock().unwrap().tap(&job.id, tx);
+            std::thread::spawn(move || run(e2, p, job, msg, epoch, rx));
+        }
         Err(x) => finish(&e2, &job, &sv, msg.is_some(), "failed to start", &x.to_string(), false, None, json!({})),
     }
 }
 
 /// Owned by a thread of the engine: runs for as long as the process does.
-fn run(e: Arc<Engine>, mut p: Proc, job: Job, sv: String, owed: bool, epoch: u64) {
+fn run(e: Arc<Engine>, mut p: Proc, job: Job, msg: Option<usize>, epoch: u64, rx: Receiver<Inject>) {
     let at = Instant::now();
     let logf = dir(&e).join(format!("{}.jsonl", job.id));
     let mut meter = Meter::default();
     let (mut reqs, mut eq, mut tool_uses) = (0usize, 0.0f64, 0u64);
     let mut cc = String::new();
     let mut last = String::new();
-    let status;
+    let mut status = "failed";
+    // the messages the user sent it while it ran, in the log (they are answered by its end message)
+    let mut answered: Vec<usize> = Vec::new();
+    // its first result is in and its input closed: claude finishes the messages it still has
+    // queued (each may end in a result of its own) and exits
+    let mut closing = false;
     // it said something to the user: an output tool's call that succeeded
     let mut spoke = false;
     let mut speaking: Vec<String> = Vec::new();
@@ -105,13 +118,15 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, sv: String, owed: bool, epoch: u64
     let mut ending: Option<Value> = None;
     loop {
         if e.turn.lock().unwrap().epoch != epoch { status = "cancelled"; p.kill(); break }
+        inject(&mut p, &rx, &mut answered);
         let ev = match p.next(Duration::from_millis(500)) {
             Ok(ev) => ev,
             Err(RecvTimeoutError::Timeout) => {
                 if quiet.elapsed() > Duration::from_secs(900) { status = "timed out"; p.kill(); break }
                 continue
             }
-            Err(RecvTimeoutError::Disconnected) => { status = "failed"; break }
+            // after the first result, the process going away is its normal end
+            Err(RecvTimeoutError::Disconnected) => { if !closing { status = "failed"; } break }
         };
         quiet = Instant::now();
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&logf) { let _ = writeln!(f, "{}", ev); }
@@ -158,7 +173,14 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, sv: String, owed: bool, epoch: u64
                 }
                 if ok { e.proof_of_life(); }
                 status = if ok { "done" } else { "failed" };
-                break;
+                if !ok { break }
+                // no more messages into it from now on (under the lock they are sent under);
+                // what was sent before is read, and if it got any, claude is left to finish them
+                e.owners.lock().unwrap().untap(&job.id);
+                inject(&mut p, &rx, &mut answered);
+                if answered.is_empty() { break }
+                p.close_input();
+                closing = true;
             }
             _ => {}
         }
@@ -166,7 +188,15 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, sv: String, owed: bool, epoch: u64
     if status != "cancelled" && status != "timed out" { p.finish(); }
     if let Some(r) = meter.take() { e.spend("instance", &r); }
     let trace = json!({"reqs": reqs, "eq": eq.round(), "tools": tool_uses, "ms": at.elapsed().as_millis()});
-    finish(&e, &job, &sv, owed, status, &turn::cap(last.trim()), spoke, ending, trace);
+    finish(&e, &job, &serves(&job, msg, &answered), msg.is_some(), status, &turn::cap(last.trim()), spoke, ending, trace);
+}
+
+/// Write the messages the user has sent to this instance into its input, as they came.
+fn inject(p: &mut Proc, rx: &Receiver<Inject>, answered: &mut Vec<usize>) {
+    while let Ok(m) = rx.try_recv() {
+        let _ = p.send_text(&prompts::injected(m.msg, &m.text));
+        answered.push(m.msg);
+    }
 }
 
 /// The output tools: what an instance says to the user.
@@ -222,6 +252,7 @@ fn finish(e: &Arc<Engine>, job: &Job, sv: &str, owed: bool, status: &str, last: 
     trace["model"] = json!(job.model); trace["spoke"] = json!(spoke); trace["net"] = json!(net); trace["ended"] = json!(ending.is_some()); trace["to"] = json!(to); trace["record_bytes"] = json!(record.len());
     super::events::log(&e.dir, "instance", trace);
     e.turn.lock().unwrap().live.retain(|(i, _)| i != &job.id);
+    e.owners.lock().unwrap().untap(&job.id);
     e.instances.fetch_sub(1, SeqCst);
     let line = usage::limits_line(&e.limits());
     e.notice(&format!("[{}] {}{}", job.id, status, if line.is_empty() { String::new() } else { format!(" · {}", line) }));
@@ -282,10 +313,11 @@ mod tests {
 
     #[test]
     fn end_records_name_what_they_serve() {
-        let j = Job { id: "inst_1".into(), model: "opus".into(), effort: "high".into(), text: "hi".into(), from: None, desc: String::new(), wait: None };
-        assert_eq!(serves(&j, Some(41)), "answers 41");
+        let j = Job { id: "inst_1".into(), model: "opus".into(), effort: "high".into(), text: "hi".into(), from: None, desc: String::new(), wait: None, inbox: None };
+        assert_eq!(serves(&j, Some(41), &[]), "answers 41");
+        assert_eq!(serves(&j, Some(41), &[45, 47]), "answers 41, 45, 47");
         let t = Job { from: Some("inst_0".into()), desc: "check (a); b".into(), model: "sonnet".into(), text: "do X".into(), ..j };
-        assert_eq!(serves(&t, None), "task from [inst_0]: check a, b");
+        assert_eq!(serves(&t, None, &[]), "task from [inst_0]: check a, b");
         assert_eq!(end_record("inst_1", "answers 42", "done", " learned Y ", &[]), "[inst_1] (answers 42) learned Y");
         assert_eq!(end_record("inst_1", "answers 42", "cancelled", "", &[]), "[inst_1] (answers 42) cancelled, no end message");
         let to = ["chat".to_string(), "card #c1".to_string()];
@@ -293,7 +325,7 @@ mod tests {
         assert_eq!(r, "[inst_1] (answers 42; to chat, card #c1) Done.");
         assert_eq!(crate::log::end_body(&r), Some("Done."));
         assert!(crate::log::is_report(&end_record("inst_1", "answers 42", "done", "x", &[])));
-        assert!(crate::log::is_report(&end_record("inst_1", &serves(&t, None), "done", "x", &[])));
+        assert!(crate::log::is_report(&end_record("inst_1", &serves(&t, None, &[]), "done", "x", &[])));
     }
 
     /// The architecture end to end, with a stand-in model: each message starts an instance;
@@ -393,6 +425,76 @@ mod tests {
         let f = name(&m, 8);
         assert_eq!(m[8..].iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["work"], "{:?}", m);
         assert_eq!(m[8].1, format!("[{}] (answers 7) LEARNED: something", f));
+
+        let _ = std::fs::remove_dir_all(state_dir(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A message sent to a running instance: logged `(to [id]) ...`, written to the model's
+    /// input, answered in the same end message, whose head names both messages. One sent to an
+    /// instance that has ended (by `Latest` or by a log message of its own) is an ordinary
+    /// message and starts an instance.
+    #[test]
+    fn a_message_can_be_sent_to_a_running_instance() {
+        use crate::optchat::inbox::{Item, Target};
+        let _env = crate::optchat::CLAUDE_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        let d = std::env::temp_dir().join(format!("facet-sendto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let ins = d.join("in");
+        std::fs::create_dir_all(&ins).unwrap();
+        // the stand-in, like claude -p: takes a first message, answers it, then answers a
+        // second one if one was written to its input before it was closed
+        let fake = d.join("fake.sh");
+        std::fs::write(&fake, format!("#!/bin/sh\n\
+            [ \"$DISABLE_PROMPT_CACHING\" = 1 ] && {{ echo '{{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"no priming here\"}}'; exit 0; }}\n\
+            IFS= read -r line\n\
+            printf '%s\\n' \"$line\" > '{0}'/\"$FACET_INSTANCE\"\n\
+            case \"$line\" in *SLOW*) sleep 1.5;; esac\n\
+            echo '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"FIRST\"}}'\n\
+            if IFS= read -r second; then\n\
+              printf '%s\\n' \"$second\" > '{0}'/\"$FACET_INSTANCE\".2\n\
+              echo '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"SECOND\"}}'\n\
+            fi\n", ins.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FACET_CLAUDE", &fake); }
+
+        let e = crate::optchat::engine::bare(&d, "");
+        let msgs = |e: &Engine| e.mem.lock().unwrap().store.msgs.iter().map(|m| (m.kind.clone(), m.text.clone())).collect::<Vec<_>>();
+        let until = |what: &str, f: &dyn Fn() -> bool| {
+            let t = Instant::now();
+            while !f() { assert!(t.elapsed() < Duration::from_secs(20), "timed out: {}", what); std::thread::sleep(Duration::from_millis(20)); }
+        };
+        let idle = |e: &Engine| e.instances.load(SeqCst) == 0 && !e.turn.lock().unwrap().running;
+        let item = |text: &str, to: Option<Target>| Item { id: format!("item-{}", text), text: text.into(), to };
+
+        turn::input_item(&e, &item("first SLOW", None));
+        until("the first takes messages", &|| e.owners.lock().unwrap().resolve(&Target::Latest).is_some());
+        turn::input_item(&e, &item("second", Some(Target::Latest)));
+        until("it ended", &|| msgs(&e).iter().filter(|m| m.0 == "work").count() == 1 && idle(&e));
+        let m = msgs(&e);
+        let a = m[2].1[1..m[2].1.find(']').unwrap()].to_string();
+        let kinds: Vec<&str> = m.iter().map(|x| x.0.as_str()).collect();
+        assert_eq!(kinds, ["user", "user", "work"], "{:?}", m);
+        assert_eq!(m[1].1, format!("(to [{}]) second", a));
+        // one end message, naming both; the last result is the message
+        assert_eq!(m[2].1, format!("[{}] (answers 0, 1; to chat) SECOND", a), "{:?}", m);
+        // what the model was sent: the message, told apart as one sent while it ran
+        let sent = std::fs::read_to_string(ins.join(format!("{}.2", a))).unwrap();
+        assert!(sent.contains("Message 1 from the user") && sent.contains("second"), "{}", sent);
+
+        // after it ended: to the latest, or to a message of its own, it is an ordinary message
+        turn::input_item(&e, &item("third", Some(Target::Latest)));
+        until("third ended", &|| msgs(&e).iter().filter(|m| m.0 == "work").count() == 2 && idle(&e));
+        turn::input_item(&e, &item("fourth", Some(Target::Log { i: 0 })));
+        until("fourth ended", &|| msgs(&e).iter().filter(|m| m.0 == "work").count() == 3 && idle(&e));
+        turn::input_item(&e, &item("fifth", Some(Target::Inbox { id: "item-first SLOW".into() })));
+        until("fifth ended", &|| msgs(&e).iter().filter(|m| m.0 == "work").count() == 4 && idle(&e));
+        let m = msgs(&e);
+        let users: Vec<&str> = m.iter().filter(|x| x.0 == "user").map(|x| x.1.as_str()).collect();
+        assert_eq!(users, ["first SLOW", format!("(to [{}]) second", a).as_str(), "third", "fourth", "fifth"], "{:?}", m);
+        assert!(m.iter().filter(|x| x.0 == "work").skip(1).all(|x| x.1.ends_with("FIRST") && !x.1.contains("answers 0, 1")), "{:?}", m);
 
         let _ = std::fs::remove_dir_all(state_dir(&d));
         let _ = std::fs::remove_dir_all(&d);

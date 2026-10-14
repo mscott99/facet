@@ -12,6 +12,7 @@
 //
 // A plain message starts an instance of its own, like a message from any route.
 use crate::cfg::{self, Cfg};
+use crate::optchat::inbox::Target;
 use crate::{doc, log};
 use serde_json::{json, Value};
 use std::process::Command;
@@ -60,14 +61,45 @@ fn api(cfg: &Cfg, method: &str, body: Value) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
-pub fn push(cfg: &Cfg, text: &str) -> Result<(), String> {
+/// Send text to the paired chat; returns the Telegram ids of the messages it was sent as.
+pub fn push(cfg: &Cfg, text: &str) -> Result<Vec<i64>, String> {
     let chat = cfg.num("telegram.chat_id", 0);
     if chat == 0 { return Err("not paired".into()) }
+    let mut ids = Vec::new();
     for part in chunks(text) {
-        api(cfg, "sendMessage", json!({"chat_id": chat, "text": part,
+        let r = api(cfg, "sendMessage", json!({"chat_id": chat, "text": part,
             "disable_web_page_preview": true}))?;
+        if let Some(id) = r["result"]["message_id"].as_i64() { ids.push(id); }
     }
-    Ok(())
+    Ok(ids)
+}
+
+// A reply (Telegram's "reply to") to a message can be a message for the instance behind that
+// message, if it still runs (optchat/owners.rs). Two maps in state.json say which: `tg_out`,
+// the Telegram id of each message pushed -> its message in the log; `tg_in`, the Telegram id
+// of each message the user sent -> its inbox item. The newest KEEP of each are kept.
+const KEEP: usize = 2000;
+
+fn remember_id(field: &str, tg_id: i64, v: Value) {
+    let _g = STATE.lock().unwrap();
+    let mut st = cfg::state();
+    if !st[field].is_object() { st[field] = json!({}); }
+    let m = st[field].as_object_mut().unwrap();
+    m.insert(tg_id.to_string(), v);
+    while m.len() > KEEP {
+        // ids rise with time: the oldest is the smallest
+        let Some(old) = m.keys().min_by_key(|k| k.parse::<i64>().unwrap_or(0)).cloned() else { break };
+        m.remove(&old);
+    }
+    cfg::put_state(&st);
+}
+
+/// Whom a reply to Telegram message `reply_to` is for, from the two maps; nothing if it is
+/// no reply, or to a message not remembered.
+fn reply_target(st: &Value, reply_to: Option<i64>) -> Option<Target> {
+    let k = reply_to?.to_string();
+    if let Some(i) = st["tg_out"][&k].as_u64() { return Some(Target::Log { i: i as usize }) }
+    st["tg_in"][&k].as_str().map(|id| Target::Inbox { id: id.to_string() })
 }
 
 /// Send a file to the paired chat as a document (full quality). Bot API limit: 50 MB.
@@ -147,6 +179,15 @@ fn chunks(s: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_reply_finds_its_instance_from_the_two_maps() {
+        let st = json!({"tg_out": {"101": 55}, "tg_in": {"102": "item-7"}});
+        assert_eq!(reply_target(&st, Some(101)), Some(Target::Log { i: 55 }));
+        assert_eq!(reply_target(&st, Some(102)), Some(Target::Inbox { id: "item-7".into() }));
+        assert_eq!(reply_target(&st, Some(103)), None);
+        assert_eq!(reply_target(&st, None), None);
+        assert_eq!(reply_target(&json!({}), Some(101)), None);
+    }
     #[test]
     fn help_is_recognised_only_when_it_is_the_whole_message() {
         for t in ["--help", " -H ", "/help", "Help"] { assert!(is_help(t), "{}", t); }
@@ -404,8 +445,9 @@ fn inbound(cfg: Cfg) {
                 if keep { remember(&text, &reply); }
                 let _ = push(&c, if reply.is_empty() { "(nothing)" } else { &reply });
             } else {
-                match crate::tell::tell(&c, &text, "telegram") {
-                    Ok(_) => {}
+                let to = reply_target(&cfg::state(), msg["reply_to_message"]["message_id"].as_i64());
+                match crate::tell::tell_to(&c, &text, "telegram", to.as_ref()) {
+                    Ok((_, item)) => { if let Some(id) = msg["message_id"].as_i64() { remember_id("tg_in", id, json!(item)); } }
                     Err(e) => { let _ = push(&c, &format!("could not deliver: {}", e)); }
                 }
             }
@@ -429,7 +471,9 @@ fn outbound(_cfg: Cfg) {
             // only what the agent sent to the chat venue (kind `chat`): never its plain text
             // (`talk`, stream-only) and never a card's answer (`answer`, card venue)
             // and an instance's end message posted to the chat, without its head
-            if (m.kind == "chat" || m.kind == "work") && m.in_chat() && !m.shown().trim().is_empty() { let _ = push(&c, m.shown()); }
+            if (m.kind == "chat" || m.kind == "work") && m.in_chat() && !m.shown().trim().is_empty() {
+                for id in push(&c, m.shown()).unwrap_or_default() { remember_id("tg_out", id, json!(m.i)); }
+            }
         }
 
         // new published notes: title and link, never the body

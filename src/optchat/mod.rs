@@ -9,6 +9,7 @@
 //   claude   one `claude -p` process, stream-json in and out
 //   turn     the starter: one queue of user messages and handed-on tasks, each started as an
 //            instance in arrival order, after the view settles; priming (§6, §7, §8)
+//   owners   who a message belongs to; the taps of running instances (messages sent to them)
 //   mcp      zoom and date, served over HTTP from this process (§7.1)
 //   engine   the one process that owns the chat: lock socket, clients, state
 //   usage    one line per API request, and the tables made from them
@@ -25,6 +26,7 @@ pub mod import;
 pub mod inbox;
 pub mod instance;
 pub mod mcp;
+pub mod owners;
 pub mod prompts;
 pub mod store;
 pub mod turn;

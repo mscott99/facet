@@ -99,7 +99,10 @@ pub fn start(e: Arc<Engine>) -> String {
     let url = format!("http://127.0.0.1:{}{}", port, path);
     std::thread::spawn(move || {
         for mut req in server.incoming_requests() {
-            if req.url() != path {
+            // `?i=<instance>` names the caller (each instance is given its own URL, turn.rs)
+            let (rpath, query) = req.url().split_once('?').unwrap_or((req.url(), ""));
+            let inst = query.split('&').find_map(|kv| kv.strip_prefix("i=")).map(super::instance::safe).filter(|s| !s.is_empty());
+            if rpath != path {
                 let _ = req.respond(tiny_http::Response::empty(404));
                 continue;
             }
@@ -109,7 +112,7 @@ pub fn start(e: Arc<Engine>) -> String {
             }
             let mut body = String::new();
             let _ = req.as_reader().read_to_string(&mut body);
-            let reply = serde_json::from_str::<Value>(&body).ok().and_then(|v| handle(&e, &v));
+            let reply = serde_json::from_str::<Value>(&body).ok().and_then(|v| handle(&e, &v, inst.as_deref()));
             let resp = match reply {
                 None => tiny_http::Response::from_string("").with_status_code(202),
                 Some(r) => tiny_http::Response::from_string(r.to_string()).with_header(
@@ -121,8 +124,8 @@ pub fn start(e: Arc<Engine>) -> String {
     url
 }
 
-/// One JSON-RPC message; None for a notification.
-fn handle(e: &Arc<Engine>, v: &Value) -> Option<Value> {
+/// One JSON-RPC message; None for a notification. `inst` is the instance calling, if its URL names one.
+fn handle(e: &Arc<Engine>, v: &Value, inst: Option<&str>) -> Option<Value> {
     let id = v.get("id")?.clone();
     let method = v["method"].as_str().unwrap_or("");
     let result = match method {
@@ -154,7 +157,7 @@ fn handle(e: &Arc<Engine>, v: &Value) -> Option<Value> {
                 }, false),
                 "date" => (match num("id") { Some(i) => date(&e.mem.lock().unwrap().store, i), None => "date needs id.".into() }, false),
                 // the mem lock is not held here: logging takes it
-                "send_chat" => match super::engine::chat(e, &st("text")) {
+                "send_chat" => match super::engine::chat(e, &st("text"), inst) {
                     Ok(()) => (SENT.into(), false),
                     Err(x) => (format!("send_chat failed: {}", x), true),
                 },
@@ -165,7 +168,7 @@ fn handle(e: &Arc<Engine>, v: &Value) -> Option<Value> {
                     match crate::tg::send_file(&crate::cfg::Cfg::load(), &st("path"), Some(cap)) {
                         Ok(()) => {
                             let nm = std::path::Path::new(&st("path")).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                            let _ = super::engine::chat(e, &format!("[file sent] {}{}", nm, if cap.is_empty() { String::new() } else { format!(" — {}", cap) }));
+                            let _ = super::engine::chat(e, &format!("[file sent] {}{}", nm, if cap.is_empty() { String::new() } else { format!(" — {}", cap) }), inst);
                             (SENT.into(), false)
                         }
                         Err(x) => (format!("send_file failed: {}", x), true),

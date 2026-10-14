@@ -228,6 +228,8 @@ pub struct Engine {
     pub restart: Mutex<Option<bool>>,
     /// instances alive (instance.rs): a restart waits for them, their readers are threads of this process
     pub instances: std::sync::atomic::AtomicUsize,
+    /// who messages belong to; the taps of running instances (owners.rs)
+    pub owners: Mutex<super::owners::Owners>,
 }
 
 /// An engine over a chat directory, with no socket, compactor or MCP server: for tests.
@@ -244,7 +246,7 @@ pub fn bare(dir: &Path, mcp_url: &str) -> Arc<Engine> {
         turn: Mutex::new(turn::State::default()), compact_sys: state_dir(dir).join("system.txt"), mcp_url: OnceLock::new(),
         watchers: Mutex::new(Vec::new()), spend: Mutex::new(VecDeque::new()),
         limits: Mutex::new(Value::Null),
-        restart: Mutex::new(None), instances: Default::default(),
+        restart: Mutex::new(None), instances: Default::default(), owners: Default::default(),
     });
     let _ = e.mcp_url.set(mcp_url.to_string());
     let _ = std::fs::create_dir_all(state_dir(dir));
@@ -569,7 +571,7 @@ pub fn serve() -> ! {
         limits: Mutex::new(std::fs::read_to_string(sd.join("limits.json")).ok()
             .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null)),
         model: Mutex::new(String::new()),
-        restart: Mutex::new(None), instances: Default::default(),
+        restart: Mutex::new(None), instances: Default::default(), owners: Default::default(),
     });
     *e.model.lock().unwrap() = std::fs::read_to_string(sd.join("model")).ok().map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty()).unwrap_or_else(|| e.conf.model.clone());
@@ -715,10 +717,12 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
 /// is where some of it is also delivered. `chat` is the conversation as the user reads it, on
 /// Telegram and the web chat page alike: only what lands here as kind `chat` (and the user's
 /// own messages) is shown there.
-pub fn chat(e: &Arc<Engine>, text: &str) -> Result<(), String> {
+pub fn chat(e: &Arc<Engine>, text: &str, inst: Option<&str>) -> Result<(), String> {
     let text = text.trim();
     if text.is_empty() { return Err("empty".into()) }
-    e.log("chat", text);
+    let i = e.log_at("chat", text, &super::store::now_iso());
+    // so a reply to this message (Telegram) can reach the instance, while it runs
+    if let (Some(i), Some(inst)) = (i, inst) { e.owners.lock().unwrap().own(i, inst); }
     Ok(())
 }
 

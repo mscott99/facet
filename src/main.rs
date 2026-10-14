@@ -153,7 +153,7 @@ fn main() {
             let text = rest.iter().filter(|a| *a != "--log").cloned().collect::<Vec<_>>().join(" ");
             if text.trim().is_empty() { die("refusing to push empty text") }
             match tg::push(&cfg, &text) {
-                Ok(()) => println!("pushed"),
+                Ok(_) => println!("pushed"),
                 Err(e) => die(&e),
             }
             if log {

@@ -218,7 +218,8 @@ Web pages (`facet serve`, all under `/<token>`):
                        opens a card on it; the page places the note's cards itself)
     /d/                every open card, under its note and the lines it is about
     POST /x/send       a message into the conversation (form field `text`; in the box, Enter
-                       sends, Alt-Enter is a new line); it starts an instance. Answers `queued`:
+                       sends and starts an instance, Alt-Enter sends to the running instance (field `to`=`latest`),
+                       Shift-Enter is a new line). Answers `queued`:
                        the message is a file in the inbox (below) before the answer, whether or
                        not the engine is running
     POST /x/card       a card, from its page (`do`=say: `id`, `text`, and for the first word
@@ -239,6 +240,12 @@ plain text is a message into the conversation; what the agent sends to the chat 
 answer — and new notes and new cards the agent opened are announced. Commands are answered on the spot and ride along with
 the next message: `/help`, `/ping` (= `/usage`: engine state and usage left), `/last N`,
 `/link`, `/notes`, `/diag` (= `/cards`), `/cal N`, `/mail [query]`, `/buffer`, `/flush`.
+
+A reply (Telegram's "reply to") to one of the agent's messages, or to one of the user's own,
+goes to the instance behind it if that is still running (see **instances**, "Messages to a
+running instance"). `state.json` keeps two maps for it, `tg_out` (Telegram id of a message
+pushed -> its log message) and `tg_in` (Telegram id of a message sent -> its inbox item), the
+newest 2000 of each.
 
 Every message starts an instance of its own (see **instances**), from this route as from any
 other; `/now <text>` and `/later <text>`, from when a message could cut into a running turn,
@@ -387,6 +394,23 @@ logged at a start.)
   - **Concurrent edits**: no locks. The rule, in the prompt: re-read a file right before
     editing it, change only what you read, never write over text you have not read. A
     follow-up whose work is still running sees it in its running list.
+  - **Messages to a running instance** (2026-10-14, the user's design): a message may name an
+    instance that is running, and then it is not a new message to answer but one more for
+    that one. It is logged at once as an ordinary `user` message, `(to [inst_x]) text`, and
+    written to the instance's input as "Message N from the user, sent to you while you run".
+    The instance answers it in its final message, whose head names every message it answered
+    (`[id] (answers 41, 45; to chat)`). Who can be named: web Alt+Enter, the instance started
+    last (one variable; if it has ended, an ordinary send, even when older ones still run);
+    Telegram reply-to, the instance that posted the message replied to, or that answered the
+    user's message replied to (ended, or unknown: an ordinary message, never the latest). No
+    keep-alive: an instance ends at its result as before. Mechanism: the message is an inbox
+    item with a `to` (`inbox::Target`); `owners.rs` (in memory only: a restart waits for every
+    instance to end) maps log messages and inbox items to instances and holds each running
+    instance's *tap*, a channel `instance.rs` reads between events; the tap is taken away under
+    the same lock a send is made under, when the result arrives, and what was sent before is
+    written to claude, whose input is then closed so that it finishes anything it queued (a
+    message arriving mid-turn is taken into that turn: one result). Each instance's MCP URL
+    carries `?i=<id>` so that what it says in the chat (`send_chat`, `send_file`) is its own.
   - **Cancel** stops the start that waits (its messages are logged unanswered) and every
     running instance. **Restart** waits until nothing is starting and no instance is alive.
 

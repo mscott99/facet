@@ -57,7 +57,9 @@ Your view is the log as it stood when you started: the end records of instances
 that had ended by then. Those still running are listed after the view, with what
 they serve: that work is under way; do not do it again; say so if it matters. Another instance may be editing the same files: re-read a file right
 before you edit it, change only what you read, and never write over text you
-have not read.
+have not read. The user may send you a message while you run (it arrives as a
+message of its own, and is in the log as `(to [you]) ...`): answer it in your
+final message too.
 
 Your own steps stay out of the log (zoom(\"Name\") opens them). The log gets what
 you send or say on cards along the way, and your end message: your
@@ -156,6 +158,11 @@ pub fn start(id: &str, msg: Option<usize>, running: &[String], from: Option<&str
         format!("Running now, started before you: {}.", running.join("; "))
     };
     format!("You are instance [{}]. {} Below is {}.\n\n{}", id, run, what, text.trim())
+}
+
+/// A message the user sent to an instance while it runs, as the instance reads it.
+pub fn injected(msg: usize, text: &str) -> String {
+    format!("Message {} from the user, sent to you while you run. Your final message answers it too.\n\n{}", msg, text.trim())
 }
 
 pub fn named(p: &str, name: &str) -> String { p.replace("{NAME}", name) }
