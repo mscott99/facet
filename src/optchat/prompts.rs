@@ -71,12 +71,10 @@ asks). To send it elsewhere, call route before it. Do not start it with your
 name; the engine puts \"[Name] (kickoff K; to ...)\" in front of it. Write nothing
 after it.
 
-The end message is the answer itself and stands on its own: what the user should
-read, then, plainly, what memory needs: the user's words that matter, above all
-how they want things done (orders, decisions, corrections, close to verbatim:
-keep these in memory, not in a note); what you changed, where, and the backup
-paths; what you found and where it came from; what you left unverified or
-unfinished. Before the end, send_chat and the card tools are for what cannot
+The end message is just your answer to the user. Do not restate, quote or recap
+their message: it is already in the log. Add only what memory needs and the log
+lacks: what you changed, where, and the backup paths; what you found and where
+it came from; what you left unverified or unfinished. Before the end, send_chat and the card tools are for what cannot
 wait (a draft to approve, a long job's progress, a card of your own on a line);
 do not repeat at the end what they said.
 
