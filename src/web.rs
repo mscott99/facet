@@ -451,7 +451,6 @@ function cardLive(){
     fetch(TOK+'/f/cards?'+sc+'&wait=1&v='+CV,{signal:CC.signal})
       .then(function(r){return r.status==204?null:r.ok?r.json():Promise.reject(r.status)}).then(function(j){
         if(gen!=CG)return;
-        if(j&&typing())return setTimeout(go,1500);
         if(j){CV=j.v;CL=j.cards;place(j.cards,t0)}
         go();
       },function(e){if(gen==CG&&!(e&&e.name=='AbortError'))setTimeout(go,5000)});
@@ -489,7 +488,7 @@ function place(cs,t0){
   // this answer was asked for before the page knew the card at all
   document.querySelectorAll('.say').forEach(function(d){
     if(!d._known||d._known>=t0||seen[d.dataset.id])return;
-    if(d.querySelector('textarea').value.trim())return;
+    var ta=d.querySelector('textarea');if(ta.value.trim()||ta===document.activeElement)return;
     var x=document.querySelector('.ctx[data-for="'+d.dataset.id+'"]');if(x)x.remove();d.remove()});
   var none=document.getElementById('none');if(none)none.hidden=!!document.querySelector('.say');
   kbLabel();
@@ -535,8 +534,8 @@ function fill(d,c,t0){
     if(c.fix){fx.querySelector('pre').textContent=c.fix.text;
       fx.querySelector('.ap').addEventListener('click',function(){applyFix(d)})}}
 }
-// a card being typed or dictated in would be lost to a refresh of the page under it, or to
-// cards moving around it. Dictation may leave the box empty until it is done, so a focused card
+// a card being typed or dictated in would be lost to a refresh of the page under it (cards
+// themselves never wait: `place` keeps a box being written in and touches no other box's text). Dictation may leave the box empty until it is done, so a focused card
 // box holds updates too, except right after a send, until the next word goes in: then the
 // answer it waits for may come in.
 function typing(){var ts=document.querySelectorAll('.say textarea');
