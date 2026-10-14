@@ -556,6 +556,12 @@ document.addEventListener('keydown',function(e){
   if(e.shiftKey){e.target.setRangeText('\n',e.target.selectionStart,e.target.selectionEnd,'end');return}
   e.target.form.elements.to.value=e.altKey?'latest':'';
   htmx.trigger(e.target.form,'submit');});
+// Escape lets go of a box (the compose box, a search field...), so the scroll keys work again.
+// A card box handles its own Escape first and cancels it.
+document.addEventListener('keydown',function(e){
+  if(e.key!='Escape'||e.defaultPrevented||e.isComposing)return;
+  var t=e.target;if(t.tagName!='TEXTAREA'&&t.tagName!='INPUT'&&!t.isContentEditable)return;
+  e.preventDefault();t.blur();});
 // The compose box: dim while the server has it, clear on success, say plainly when it failed.
 // A `/model` reply is not a message, so it goes to the toast and refreshes the header's model.
 document.addEventListener('htmx:beforeRequest',function(e){
