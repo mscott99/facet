@@ -628,6 +628,11 @@ document.addEventListener('keydown',function(e){
   var a=to=='notes'&&l&&!l.hidden?l:[].find.call(document.querySelectorAll('header a'),function(a){return a.textContent==to});
   if(top!==window){e.preventDefault();parent.postMessage({facet:1,t:'tab',to:to},location.origin);return}
   if(a){e.preventDefault();location.href=a.href}},true);
+// The card count in the status line, live: every page holds one wait on `/f/ncards`, so the
+// count is the same in every tab (the host shows its pane's) and never one from load time.
+(function(){var nv=-1;(function go(){var el=document.querySelector('header .nc');if(!el)return;
+  fetch(TOK+'/f/ncards?wait=1&v='+nv).then(function(r){return r.status==204?null:r.ok?r.json():Promise.reject(r.status)})
+    .then(function(j){if(j){nv=j.v;if(el.textContent!=j.text)el.textContent=j.text}go()},function(){setTimeout(go,5000)})})()})();
 // Inside the tab host (see HOST): tell it where this pane is and what the status line says, and
 // let a link to a note, followed from any other pane, open in the note tab.
 if(top!==window){(function(){
@@ -842,6 +847,13 @@ fn nav_html(cfg: &Cfg, nav_on: &str) -> String {
     nav
 }
 
+/// The open-card count in the status line: one span, kept live by the page (`/f/ncards`),
+/// so every tab and pane says the same, and "no cards" when there are none.
+fn ncards_text(n: usize) -> String {
+    match n { 0 => "no cards".into(), 1 => "1 card".into(), n => format!("{} cards", n) }
+}
+fn ncards_html(n: usize) -> String { format!("<span class=nc>{}</span>", ncards_text(n)) }
+
 fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> String {
     let t = cfg.token_path();
     let nav = nav_html(cfg, nav_on);
@@ -853,7 +865,7 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
     let status = format!("{}{}{}",
         if model.is_empty() { String::new() } else { format!("<span id=mdl>{}</span> · ", md::esc(&model)) },
         if tell::healthy(cfg) { "" } else { "input down · " },
-        if n > 0 { format!("{} cards", n) } else { String::new() });
+        ncards_html(n));
     // Only the chat has a box standing ready at the bottom. Reading a note, what you want to say
     // is always about a line of it, so the box comes to the line you double-click instead. The
     // toast line stays either way — the comment cards post through it.
@@ -1334,8 +1346,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
         .map(|h| h.value.as_str().to_string()).unwrap_or_default();
     if dest == "document" && !post && matches!(rest.first().copied(), None | Some("home") | Some("chat") | Some("m") | Some("n") | Some("d") | Some("tree")) {
         let n = cards::open(cfg).len();
-        let status = format!("{}{}", if tell::healthy(cfg) { "" } else { "input down · " },
-            if n > 0 { format!("{} cards", n) } else { String::new() });
+        let status = format!("{}{}", if tell::healthy(cfg) { "" } else { "input down · " }, ncards_html(n));
         return html(HOST.replace("{{NAV}}", &nav_html(cfg, "")).replace("{{STATUS}}", &status)
             .replace("{{TOK}}", &cfg.token_path()), 200);
     }
@@ -1359,6 +1370,19 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
                 std::thread::sleep(Duration::from_millis(300));
             }
             Response::from_string(cards_json(cfg, notes.as_deref()))
+                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                .with_header(Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap())
+        }
+
+        // the open-card count, held with `wait` until any card changes from `v`
+        ["f", "ncards"] => {
+            let (v, t0) = (qnum("v"), Instant::now());
+            while qnum("wait") > 0 && cards::version(cfg) as i64 == v {
+                if t0.elapsed() >= LONG { return html(String::new(), 204) }
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            let n = cards::open(cfg).len();
+            Response::from_string(serde_json::json!({"v": cards::version(cfg), "n": n, "text": ncards_text(n)}).to_string())
                 .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
                 .with_header(Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap())
         }
