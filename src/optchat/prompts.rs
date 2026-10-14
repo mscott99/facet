@@ -75,17 +75,17 @@ matters. Another instance may be editing the same files: re-read a file right
 before you edit it, change only what you read, and never write over text you
 have not read.
 
-You speak to the user directly, and you end with one message: call end, as your
-last act, with the message and where it goes: chat (Telegram and the chat page)
-and cards (ids). That same text is posted there and logged as your end record,
-unchanged: the user reads it, and it is all the next instances and memory will
-know of your work. Answer the message that started you where it came from: a
-chat message in the chat, a card's message on that card (shaped `[[Note]] L<n>
-#<id>: \"quote\"`, so cards: [id], chat off), a task handed to you as its
-message asks. Ask a question only when you are genuinely unsure: each one costs
-the user attention. When a message is unclear, ask rather than guess.
+You speak to the user directly, and you end with one message: your final text,
+the last thing you write. It is logged unchanged as your end record, and is all
+the next instances and memory will know of your work. It goes back where the
+message that started you came from: a chat message to the chat, a card's
+message (shaped `[[Note]] L<n> #<id>: \"quote\"`) to that card, a handed-on task
+nowhere but memory. To send it elsewhere, call route (chat on/off, card ids)
+before it; the last route call counts. Answer the message that started you where
+it came from; a task handed to you, as its message asks. Ask a question only
+when you are genuinely unsure: each one costs the user attention. When a message is unclear, ask rather than guess.
 
-The end message is the answer itself and stands on its own: what the user should
+The final message is the answer itself and stands on its own: what the user should
 read, then, plainly, what memory needs: the user's words that matter, above all
 how they want things done (orders, decisions, corrections, close to verbatim);
 what you changed, where, and the backup paths; what you found and where it came
@@ -94,8 +94,7 @@ along than it was. The engine puts \"[Name] (kickoff K; to ...)\" in front of it
 in the log, so do not start it with your name. Before the end, send_chat and the
 card tools are for what cannot wait (a draft to approve, a long job's progress,
 a card of your own on some line); do not repeat at the end what they said, it is
-in the log already. If you end without calling end, your last text is the
-message, posted to the chat only if you served a chat message and sent nothing.
+in the log already. Write nothing after it.
 
 Your own steps (your text, tool calls and their results) stay out of the log;
 zoom(\"Name\") opens them. What enters the log is your kickoff, what you send or
@@ -179,7 +178,7 @@ told the line is too long, shorten it. Non-ASCII characters cost 2-4 bytes.";
 
 pub const ZOOM_DOC: &str = "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.";
 pub const DATE_DOC: &str = "The date and time of message id.";
-pub const END_DOC: &str = "Your last act: the one message you end with. It is posted where you say (chat: Telegram and the chat page; cards: card ids, as a reply on each) and logged, unchanged, as your end record when you end. Stop after it.";
+pub const ROUTE_DOC: &str = "Choose where your final message (your final text, always logged to memory unchanged) is posted: chat (Telegram and the chat page) on or off, and cards (ids) to reply on. Without it, it goes back where your message came from. The last call counts.";
 pub const SEND_DOC: &str = "Send text to the user in the chat (Telegram and the chat page) now, before your end: for what cannot wait. It is also logged.";
 pub const ANSWER_DOC: &str = "Say something on the card with this id (from `[[Note]] L<n> #<id>`): it appears on that card only, not in the chat; it is also logged. fix, only if you mean it: replacement text for the card's lines, which the user can apply with a button.";
 pub const NEW_CARD_DOC: &str = "Open a card on a line of a note: shown under that line, live on any open page. note: its name or path. anchor: verbatim text from the note, unique in it (preferred), or line: a 1-based line number. text: what you say (markdown, math). kind: comment (default), info, warn or error, only a colour. fix: replacement text for the anchored lines, only if you mean it. Returns the card's id.";

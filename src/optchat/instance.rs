@@ -93,7 +93,7 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, k: usize, owed: bool, epoch: u64) 
     let mut spoke = false;
     let mut speaking: Vec<String> = Vec::new();
     let mut quiet = Instant::now();
-    // its end message and where it goes: the input of its `end` call, the last one counting
+    // where its final message goes: the input of its `route` call, the last one counting
     let mut ending: Option<Value> = None;
     loop {
         if e.turn.lock().unwrap().epoch != epoch { status = "cancelled"; p.kill(); break }
@@ -127,7 +127,7 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, k: usize, owed: bool, epoch: u64) 
                     "text" => { let s = b["text"].as_str().unwrap_or(""); if !s.trim().is_empty() { last = s.to_string(); } }
                     "tool_use" => {
                         tool_uses += 1;
-                        if b["name"].as_str().is_some_and(|n| n.ends_with("__end")) && !b["input"]["text"].as_str().unwrap_or("").trim().is_empty() { ending = Some(b["input"].clone()); }
+                        if b["name"].as_str().is_some_and(|n| n.ends_with("__route")) { ending = Some(b["input"].clone()); }
                         if speaks(b["name"].as_str().unwrap_or("")) { speaking.push(b["id"].as_str().unwrap_or("").to_string()); }
                     }
                     _ => {}
@@ -178,23 +178,24 @@ fn limit_hit(e: &Arc<Engine>, text: &str, error: bool) -> bool {
     true
 }
 
-/// The end: one message, posted where the instance chose (its `end` call: chat, cards) and
-/// logged once, unchanged, as its end record (`work`), at this moment. The chat venue reads
-/// it from the log (`log::end_body`); a card gets it as a reply. With no `end` call its last
-/// text is the message, and an instance that served a chat message and said nothing to the
-/// user posts it to the chat (the safety net).
+/// The end: one message, its final text (claude -p's last word), posted where it chose with
+/// `route` (chat, cards; the last call counts) and logged once, unchanged, as its end record
+/// (`work`), at this moment. The chat venue reads it from the log (`log::end_body`); a card
+/// gets it as a reply. With no `route` call it goes back where the message came from: a chat
+/// message to the chat, a card's message to that card, a handed-on task nowhere.
 #[allow(clippy::too_many_arguments)]
 fn finish(e: &Arc<Engine>, job: &Job, k: usize, owed: bool, status: &str, last: &str, spoke: bool, ending: Option<Value>, mut trace: Value) {
     let served_chat = owed && crate::log::wants_chat(&job.text);
-    let (text, chat, cards) = match &ending {
+    let origin_card: Vec<String> = if owed { crate::cards::from_card(&job.text).map(|c| vec![c.to_string()]).unwrap_or_default() } else { vec![] };
+    let text = last.to_string();
+    let (chat, cards) = match &ending {
         Some(v) => (
-            turn::cap(v["text"].as_str().unwrap_or("").trim()),
-            v["chat"].as_bool().unwrap_or(served_chat && !spoke),
-            v["cards"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(|s| s.trim().trim_start_matches('#').to_string())).filter(|c| !c.is_empty()).collect()).unwrap_or_default(),
+            v["chat"].as_bool().unwrap_or(served_chat),
+            v["cards"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(|s| s.trim().trim_start_matches('#').to_string())).filter(|c| !c.is_empty()).collect()).unwrap_or(origin_card),
         ),
-        None => (last.to_string(), served_chat && !spoke, Vec::<String>::new()),
+        None => (served_chat, origin_card),
     };
-    let net = ending.is_none() && chat;
+    let net = ending.is_none() && (chat || !cards.is_empty());
     let mut to = Vec::new();
     if chat { to.push("chat".to_string()); }
     let posted = if text.trim().is_empty() && status != "done" { format!("(no reply: the instance {})", status) } else { text.clone() };
@@ -307,7 +308,7 @@ mod tests {
             printf '%s\\n' \"$line\" > '{}'/\"$FACET_INSTANCE\"\n\
             echo '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{{\"command\":\"STEP-ONLY\"}}}}]}}}}'\n\
             case \"$line\" in *'your kickoff is message 1.'*) sleep 1.5;; esac\n\
-            case \"$line\" in *ENDME*) echo '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"t2\",\"name\":\"mcp__optchat__end\",\"input\":{{\"text\":\"THE END, as posted\",\"chat\":true}}}}]}}}}';; esac\n\
+            case \"$line\" in *ENDME*) echo '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"t2\",\"name\":\"mcp__optchat__route\",\"input\":{{\"chat\":false}}}}]}}}}';; esac\n\
             echo '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"LEARNED: something\"}}'\n",
             ins.display())).unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -375,14 +376,14 @@ mod tests {
         assert!(sent(&id).contains(&format!("a task handed to you by [{}]", c)));
         until("idle", &|| idle(&e));
 
-        // one that ends with `end`: its message, not its last text, is posted where it chose
-        // and logged once, unchanged
+        // one that routes its final message away from the chat: logged once, unchanged, posted
+        // nowhere
         turn::input(&e, "ENDME please".into());
         until("fourth ended", &|| msgs(&e).iter().filter(|m| m.0 == "work").count() == 5 && idle(&e));
         let m = msgs(&e);
         let f = name(&m, 12);
         assert_eq!(m[13..].iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["work"], "{:?}", m);
-        assert_eq!(m[13].1, format!("[{}] (kickoff 12; to chat) THE END, as posted", f));
+        assert_eq!(m[13].1, format!("[{}] (kickoff 12) LEARNED: something", f));
 
         let _ = std::fs::remove_dir_all(state_dir(&d));
         let _ = std::fs::remove_dir_all(&d);

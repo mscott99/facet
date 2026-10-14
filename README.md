@@ -344,12 +344,15 @@ An instance's plain text, tool calls and results stay out of the stream (see **i
 **The end is one message** (the user, 2026-10-14: "The end should be a single message. That
 message gets posted in toggled output locations. That same message goes to memory, no change
 or summary. Agent decides on which output channels to include, then emits the final
-message"). The instance calls `end {text, chat, cards}` as its last act; when it ends, the
-engine replies with that text on each card, and logs it once as its end record, `[id]
-(kickoff K; to chat, card #c) text`, which the chat venue shows. send_chat and the card tools
-remain for what cannot wait (a draft to approve, progress). The safety net: with no `end`
-call the last text is the message, posted to the chat only if the instance served a chat
-message and sent nothing there.
+message"; then, same day: "the message output of claude p should be that final message.
+Prior tool calls can be used to select output channels before emitting the final message
+basically. Final message always goes to memory"). The instance's final text (claude -p's
+result) is the message. By default it goes back where the instance's message came from (a
+chat message: the chat; a card's message: that card; a handed-on task: memory only); a
+`route {chat, cards}` call before it picks other channels, the last call counting. When it
+ends, the engine replies with that text on each card and logs it once as its end record,
+`[id] (kickoff K; to chat, card #c) text`, which the chat venue shows. send_chat and the card
+tools remain for what cannot wait (a draft to approve, progress).
 
 ## instances
 
