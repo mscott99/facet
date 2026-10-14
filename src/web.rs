@@ -548,16 +548,13 @@ document.addEventListener('focusout',function(e){
   if(!e.target.closest||!e.target.closest('.say'))return;
   setTimeout(function(){if(typing()||document.hidden)return;
     if(document.getElementById('docwrap'))docLive();cardLive()},0)});
-// Enter sends (into the running turn, at its next tool call); Shift-Enter sends for a turn
-// of its own, after the running one; Alt-Enter is a new line
+// Enter (or Shift-Enter) sends, and starts an instance; Alt-Enter is a new line
 document.addEventListener('keydown',function(e){
   if(e.key!='Enter'||e.target.tagName!='TEXTAREA')return;
   if(e.target.closest('.say'))return; // the line-comment box keeps its own keys
   e.preventDefault();
   if(e.altKey){e.target.setRangeText('\n',e.target.selectionStart,e.target.selectionEnd,'end');return}
-  var f=e.target.form;f.elements.later.value=e.shiftKey?'1':'0';
-  htmx.trigger(f,'submit');});
-document.addEventListener('htmx:afterRequest',function(e){var l=e.target.elements&&e.target.elements.later;if(l)l.value='0'});
+  htmx.trigger(e.target.form,'submit');});
 // The compose box: dim while the server has it, clear on success, say plainly when it failed.
 // A `/model` reply is not a message, so it goes to the toast and refreshes the header's model.
 document.addEventListener('htmx:beforeRequest',function(e){
@@ -860,7 +857,7 @@ fn page(cfg: &Cfg, title: &str, nav_on: &str, body: &str, compose: bool) -> Stri
     // toast line stays either way — the comment cards post through it.
     let foot = format!("<footer>{}<div id=toast></div></footer>", if compose {
         format!("<form hx-post=\"{}/x/send\" hx-swap=none id=compose>\
-            <textarea name=text rows=1 placeholder=\"message\"></textarea><input type=hidden name=later value=0>\
+            <textarea name=text rows=1 placeholder=\"message\"></textarea>\
             <button>send</button></form>", t)
     } else { String::new() });
     SHELL.replace("{{TITLE}}", &md::esc(title))
@@ -923,7 +920,7 @@ fn outbox_html(cfg: &Cfg) -> String {
     // the engine's side first: it removes its record only after the log has the message, and the
     // inbox file only after its record is saved, so reading in this order never loses sight of one
     let mut out: String = inbox::working().iter().map(|t| one(t, "working", "working")).collect();
-    out.extend(inbox::list().iter().map(|i| one(&i.text, "queued", if i.later { "queued · for its own turn" } else { "queued" })));
+    out.extend(inbox::list().iter().map(|i| one(&i.text, "queued", "queued")));
     out
 }
 fn obh(h: &str) -> String {
@@ -1295,7 +1292,7 @@ fn card_say(cfg: &Cfg, f: &[(String, String)]) -> Result<serde_json::Value, Stri
         }
     };
     let c = cards::get(cfg, &id).ok_or("the card vanished")?;
-    if let Err(e) = tell::tell(cfg, &cards::message(&c, &text), "reader", true) {
+    if let Err(e) = tell::tell(cfg, &cards::message(&c, &text), "reader") {
         let _ = cards::unsay(cfg, &id, k);
         return Err(format!("not sent: {}", e));
     }
@@ -1417,7 +1414,7 @@ fn route(cfg: &Cfg, rq: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
                 return html(md::esc(&crate::tg::model_cmd(&t[6..])), 200);
             }
             if crate::tg::is_help(t) { return html(md::esc(crate::tg::HELP), 200); }
-            match tell::tell(cfg, &text, "reader", field(&f, "later") == "1") {
+            match tell::tell(cfg, &text, "reader") {
                 Ok(_) => html("queued".into(), 200),
                 Err(e) => html(format!("not sent: {}", md::esc(&e)), 200),
             }

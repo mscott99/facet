@@ -8,7 +8,7 @@ place it departs from the gist is listed below, under **Departures from the gist
 owns `~/.optchat`. Everything else only reads the log, and reaches the engine through its
 Unix socket.
 
-    optchat/  the engine: store, view fold, compactor, turn loop, zoom/date over MCP,
+    optchat/  the engine: store, view fold, compactor, instances and their starter, zoom/date over MCP,
               the lock socket every route talks to, browse, import, introspection log
     tui.rs    the terminal route: `facet chat`
 
@@ -217,10 +217,10 @@ Web pages (`facet serve`, all under `/<token>`):
                        both carry `data-line`/`data-note` on every block (a double-click
                        opens a card on it; the page places the note's cards itself)
     /d/                every open card, under its note and the lines it is about
-    POST /x/send       a message into the conversation (form field `text`; `later=1`: a turn of
-                       its own; in the box, Enter sends, Shift-Enter sends later, Alt-Enter is
-                       a new line). Answers `queued`: the message is a file in the inbox (below)
-                       before the answer, whether or not the engine is running
+    POST /x/send       a message into the conversation (form field `text`; in the box, Enter
+                       sends, Alt-Enter is a new line); it starts an instance. Answers `queued`:
+                       the message is a file in the inbox (below) before the answer, whether or
+                       not the engine is running
     POST /x/card       a card, from its page (`do`=say: `id`, `text`, and for the first word
                        `note`/`line`/`quote`; close; apply) -> JSON {ok, k | text | error}
     /f/log, /f/doc/<slug>, /f/note/<name>, /f/cards, /static/htmx.js
@@ -240,43 +240,36 @@ answer — and new notes and new cards the agent opened are announced. Commands 
 the next message: `/help`, `/ping` (= `/usage`: engine state and usage left), `/last N`,
 `/link`, `/notes`, `/diag` (= `/cards`), `/cal N`, `/mail [query]`, `/buffer`, `/flush`.
 
-A message typed on a phone is usually the next thing to deal with, not an interruption of the
-turn it lands in, so this route sends it with `later` by default (`telegram.queue`, default
-true): it waits for the running turn and then starts one of its own, instead of arriving
-mid-turn at the next tool call. Both ways stay one message away — `/now <text>` delivers into
-the running turn, `/later <text>` makes it wait, and `/queue on|off` moves the default (with
-`/queue` alone reporting it). With no turn running the flag changes nothing: the text starts a
-turn either way.
+Every message starts an instance of its own (see **instances**), from this route as from any
+other; `/now <text>` and `/later <text>`, from when a message could cut into a running turn,
+now both just send.
 
 The engine socket, `~/.optchat/lock` (one JSON object per line; `facet send`, the web,
 Telegram and every `facet chat` use it):
 
-    send {text, later}  a user message: queued, or delivered between tool calls; with `later`,
-                        it waits for a turn of its own (several: one turn each, in order), and
-                        a cancel logs the waiting ones unanswered
-    note {text, date}   an imported note (during a turn, queued until it is done; the same text twice
-                        is added once)
+    send {text}         a user message: it starts an instance (queued behind earlier starts;
+                        a cancel logs the waiting ones unanswered)
+    spawn {task, model?, effort?, desc?, from?, wait?}
+                        a task handed on (`facet spawn`): an instance like any other, on
+                        `agent_model` unless model says otherwise; with wait, the reply comes
+                        at its end, carrying its end record
+    note {text, date}   an imported note (the same text twice is added once)
     card {do, ...}      a card (see **cards**): do = new {note, anchor | line, text, kind?, fix?}
                         | reply {id, text, fix?} | fix {id, fix} | kind {id, kind} | close {id,
                         reason?} | delete {id} | apply {id} | list {note?}; what the agent does on
                         one is logged as kind `answer` (the same call as the MCP card tools)
     answer {id, text, apply?}   the old name of card/reply
-    cancel / resume     stop the turn or the wait / lift a compactor pause
+    cancel / resume     stop the start that waits and every running instance / lift a compactor pause
     view / status       the rendered view / engine state, usage left
     zoom {id, n}        a line of the view opened, as the agent's zoom
-    model {name}        the master model for the next turns
-    watch               then a stream of events: msg, delta, thought, accepted, phase, notice, limits
+    model {name}        the model of the instances user messages start
+    watch               then a stream of events: msg, accepted, phase, state, notice, limits
 
 The MCP server listens on a random loopback port with a random secret path, for the engine's
-own `claude` calls and the subagents they spawn only. The master's path (`/<secret>/mcp`) serves
-`zoom`, `date`, `send_chat {text}` and the card tools — `new_card {note, anchor | line, text,
-kind?, fix?}`, `answer_card {id, text, fix?}`, `fix_card {id, fix}`, `close_card {id, delete?}`,
-`list_cards {note?}`; a subagent (`facet spawn`) is given `/<secret>/agent`, which lists the
-very same tools, byte for byte (the list is part of the prefix it shares with the master, 19),
-and refuses the ones that write (`send_chat`, `new_card`, `answer_card`, `fix_card`,
-`close_card`) with an error telling it to put what it would say in its report.
-Zoom and date are logged like any tool, call and result, as in the gist: what was just recalled
-is fresh in the log, where the next turns are likely to need it again.
+own instances only. Every instance gets the same path (`/<secret>/mcp`) and tools: `zoom`,
+`date`, `send_chat {text}`, `send_file`, and the card tools — `new_card {note, anchor | line,
+text, kind?, fix?}`, `answer_card {id, text, fix?}`, `fix_card {id, fix}`, `close_card {id,
+delete?}`, `list_cards {note?}`.
 
 ### cards
 
@@ -336,29 +329,58 @@ still write) is absorbed as server cards and the file left as `{}`; the engine's
 
 ### stream and venues
 
-The log is the **stream**: everything lands in it, and the memory tree is built on it alone —
-user messages, the agent's text, its tool calls and results, subagent reports, card comments
-and card answers, chat sends. A **venue** is where some of it is also delivered. There are two:
+The log is the **stream**: the memory tree is built on it alone — user messages, instances'
+kickoffs and end records, chat sends, card comments and card answers. A **venue** is where some
+of it is also delivered. There are two:
 
   - **chat**: Telegram and the web chat page, one venue. It shows the user's messages and what
-    the agent sent with `send_chat` (logged as kind `chat`), nothing else.
-  - **card**: a card on a line of a note (`<vault>/.claude/cards.json`). It shows what the
-    agent says with the card tools / `facet card` (logged as kind `answer`, text `#<id> on
+    an instance sent with `send_chat` (logged as kind `chat`), nothing else.
+  - **card**: a card on a line of a note (`<vault>/.claude/cards.json`). It shows what an
+    instance says with the card tools / `facet card` (logged as kind `answer`, text `#<id> on
     [[Note]] L<n>: ...`, or `new <kind> card #<id> on ...`), and the user's own words on it.
 
-The agent's plain text (kind `talk`) reaches the stream only. A successful `send_chat` or card
-tool call (not `list_cards`, which only reads) leaves no `tool`/`echo` lines: the `chat` or
-`answer` message is the record
-(a failed one is logged as an echo, so the failure is remembered). One reply, not two: plain
-text written after a `send_chat` is held; if another step follows it is logged as `talk`
-(working notes), but if the call ends on it, it is a recap of what was just sent and is dropped
-(a `recap_dropped` event records its size) — unless no `chat` actually landed, when it is logged
-and the safety net below sends it. The safety net: when a call
-ends (not cancelled) and a user chat message in it — not a card comment, not a "[id] " report —
-has no `chat` after it, the turn's final text (the `talk` lines after its last step, else its
-last `talk`, else a line saying the turn ended without a reply) is logged as `chat`, so it
-reaches the user, and a `fallback` event is written (the turn record gets `fallback: true`).
-The text then stands in the stream twice, once as `talk` and once as `chat`.
+An instance's plain text, tool calls and results stay out of the stream (see **instances**).
+The safety net: an instance that served a chat message (not a card comment) and ended without
+any send_chat, send_file or card answer has its last text logged as `chat`, so it reaches the
+user, and its end record says so instead of repeating it.
+
+## instances
+
+Every user message, from any route, starts a new **instance**: a fresh `claude -p` whose input
+is [system][view][its own block], which answers the user directly and ends. Instances are
+co-equal: there is no master and no relay; several run at once. (2026-10-14, the user's design:
+"each of my reply comes with a kickoff that is visible in the log. Then upon termination the
+instance writes to memory what was learned ... memory builds from all instances"; "The new agent
+can just reply to me. Follow ups are just new instances. ... Running jobs see the results of
+those terminated before its own start, not more not less. Both start and end chronological.")
+
+  - **The starter** (`turn.rs`): user messages and handed-on tasks wait in one queue and start
+    one at a time, in arrival order: settle (every view line a summary, §6), render the view,
+    log the user's message (`user`), then `instance::launch` logs the kickoff, primes the cache
+    (1) and starts the process detached (own process group, a thread of the engine reads it).
+  - **Kickoff** (kind `start`, logged at the start): `[inst_<hex>] kickoff (model, effort
+    E): answers message N`, or for a handed-on task `... : task from [inst_...] (desc):` and the
+    task verbatim.
+  - **The instance's view** is the log as of its start: end records of instances that had
+    ended, kickoffs (not results) of those still running; nothing that is logged later. Its own
+    block after the view names it and its kickoff ("You are instance [x]; your kickoff is
+    message K.") and then carries the user's message or the task.
+  - **What enters the log while it runs**: only what it sends (`chat`, `answer`), at the moment
+    it sends it. Its own steps go to `<state dir>/agents/<id>.jsonl`, opened by zoom("id").
+  - **End record** (kind `work`, logged at its end): its last text, prefixed `[id] (kickoff K)`
+    so it points back; a status replaces the text if it was cancelled, timed out (900 s
+    without an event), failed, or cut off by the usage limit. `facet spawn --wait` gets it too.
+  - **Handing on**: `facet spawn` (from inside an instance: `FACET_INSTANCE` names the caller)
+    queues a task as an instance like any other, on `agent_model` (Sonnet) unless `--model`.
+  - **Concurrent edits**: no locks. The rule, in the prompt: re-read a file right before
+    editing it, change only what you read, never write over text you have not read. A
+    follow-up whose work is still running sees its kickoff without an end record.
+  - **Cancel** stops the start that waits (its messages are logged unanswered) and every
+    running instance. **Restart** waits until nothing is starting and no instance is alive.
+
+This replaces the turn loop (one call at a time, messages delivered mid-run at tool
+boundaries, a master that sent subagents and relayed their reports) and the `later` flag of
+every route; see Departures 24.
 
 ## chat
 
@@ -374,14 +396,11 @@ outbox as well as of the log.
     facet view          the view the model sees
     facet stats         usage per day and kind, from ~/.optchat/usage.jsonl
     facet browse [f]    the memory tree as one page (also /tree on the web)
-    facet import <f>... add files to the memory, one note each (during a turn, when it is done;
-                        so the agent can import files itself)
+    facet import <f>... add files to the memory, one note each
 
-In `facet chat`: Enter sends (during a turn, the agent sees it at its next tool call);
-Alt-Enter sends for a turn of its own, after the running one (terminals send Shift-Enter as
-a plain Enter, unless set up to send Alt-Enter, as Claude Code's `/terminal-setup` does), and
-such a message is printed again where it goes into the chat, since that is long after it was typed;
-Ctrl-J is a new line; Ctrl-C or Ctrl-D leaves (the engine and a running turn carry on). `/help` lists the commands: `/usage`, `/tree`,
+In `facet chat`: Enter sends (it starts an instance; one queued behind other starts is printed
+again where it goes into the chat); Ctrl-J is a new line; Ctrl-C or Ctrl-D leaves (the engine
+and running instances carry on). `/help` lists the commands: `/usage`, `/tree`,
 `/view`, `/zoom <id+n>`, `/model [opus|sonnet]`, `/import <file>...`, `/cancel`,
 `/resume`, `/stats`, `/status`, `/quit`. A mistyped `/command` is refused, never sent.
 
@@ -427,7 +446,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 3. *`</chat>` opens the task block (§4).* The bytes are the gist's; only the cache block
    boundary sits before `</chat>` instead of after it, so one compaction's context is a prefix
    of the next one's.
-5. *Mid-run messages (§7).* A message written to `claude` while the model writes its final
+5. *(Gone with 24: no message reaches a running instance.) Mid-run messages (§7).* A message written to `claude` while the model writes its final
    reply is run by Claude Code as a follow-up turn of the same conversation, with a stale view.
    So a message is written only while a tool runs (it rides on that tool's result, in the
    same call), else held for the next tool call. A call that ends with a message written but
@@ -464,7 +483,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 
 **Choices the gist leaves open, and safety additions**
 
-12. *Subagents by default (§7.2; the user's decision, 2026-10-11).* There is no spawn, tell or
+12. *(Superseded by 24: instances are co-equal; handing on is `facet spawn`.) Subagents by default (§7.2; the user's decision, 2026-10-11).* There is no spawn, tell or
     computer tool, so the gist's wording would describe tools that do not exist, and its "use
     subagents only when the user asks for them" is a caution about delegating blind, not about
     price. The user's words: "It is essentially async requests to the main agent at this
@@ -521,7 +540,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
 18. *Model switching (§10)* costs one cold cache write of the view for the first turn on the
     new model (prompt caches are per model).
 
-19. *Subagents go out through `facet spawn` only, and share the master's cache prefix (§9).*
+19. *(Superseded by 24: there is no master prefix; an instance is primed for its own view.) Subagents go out through `facet spawn` only, and share the master's cache prefix (§9).*
     The gist: "A subagent is a fresh call whose first message is the view, then its task"
     (gist L450), and among its mistakes, "A compaction without context, or with its own system
     prompt (it loses the turns' cache)" (L466). The same holds for a subagent: its request is
@@ -597,7 +616,7 @@ a structure-only logging proxy (`tests/live_test.py` with `WIRE_LOG`).
     assumption — how much to send out versus do here — becomes measurable: the subagent's own
     eq against the compaction its report avoided, over real turns.
 
-21. *A subagent that outlives its turn (§9, partial spawn).* A Task subagent lives and dies
+21. *(Superseded by 24: every instance is detached; an end record starts nothing.) A subagent that outlives its turn (§9, partial spawn).* A Task subagent lives and dies
     inside the master's own `claude -p` process: when the call's reply ends, Claude Code kills
     whatever it was still running in the background, no matter how it was told to behave.
     Measured: three backgrounded Task agents, 831k eq between them (one alone 564k eq, 21
@@ -714,6 +733,19 @@ Not implemented: computer use, and `tell` — a running `facet spawn` cannot be 
 sent, only awaited for its report (§9); `facet spawn` itself (21) is this engine's answer to
 the gist's `spawn`.
 
+24. *Co-equal instances instead of a turn loop (2026-10-14, the user's design; see
+    **instances**).* The gist has one turn at a time, messages arriving mid-run joining it, and
+    subagents whose reports come back to the caller. Here every user message starts an
+    instance of its own, which answers the user directly; its kickoff and its end record land
+    in the log at their own moments, and its own steps never do (zoom("id") opens them). Why:
+    relaying through a master was inefficient and logged each event three or four times
+    (report, card answer, recap, chat). What went: mid-run delivery (5), the master/subagent
+    split, its read-only MCP path and report relay (12, 19, 21), Task-agent tracking, the
+    recap-drop rule, `later` (every message is its own instance), the notes-wait-for-the-turn
+    queue (`notes.json`), streamed `delta`/`thought` events. Kept: settle (§6) before each
+    start, priming (1) per instance, the view rendered before the message is logged (§7),
+    durable `queue.json`, the safety net (now per instance).
+
 ## measured and rejected
 
 Cheaper-looking ideas, each measured against this chat's own logs (1098 messages,
@@ -761,22 +793,23 @@ Paths are the defaults; `facet status` prints the actual chat directory (`dir`) 
 state directory (`state_dir`). The state directory is named after a hash of the chat
 directory's path, so tests and other chats never share one.
 
-**The memory** (`~/.optchat`, or `$OPTCHAT_DIR`; a git repository, committed after each turn).
+**The memory** (`~/.optchat`, or `$OPTCHAT_DIR`; a git repository, committed after each instance).
 Append-only, one JSON object per line, fsynced; never edit or delete a line.
 
     chat/main/YYYY-MM-DD.jsonl   {i, kind, text, size, date}   every message; i is the permanent id,
-                                 kind is user | talk | chat | answer | tool | echo | note | work,
-                                 date is UTC ISO (talk: stream only; chat: sent to the chat
-                                 venue; answer: sent to a card — see **stream and venues**)
+                                 kind is user | start | chat | answer | work | note | echo (and,
+                                 before instances, talk | tool); start: a kickoff, work: an end
+                                 record (see **instances**); date is UTC ISO
     chat/tree/YYYY-MM-DD.jsonl   {l, i, text, size}            summary node (l, i) covers messages
                                  [i·2^l, (i+1)·2^l); shown as id+n with id = i·2^l, n = 2^l
     chat/view.json               [[l, i], ...]                 the chat's view (the gist's format);
                                  rewritten (write, rename) at every change, loaded at start,
                                  never refolded
     chat/images/<i>.json         [{type, media_type, data}]    the images of message i (a tool
-                                 result's), base64; zoom(i, 1) returns them
+                                 result's, from before instances), base64; zoom(i, 1) returns them
     usage.jsonl                  {date, kind, model, usage}    one line per API request the engine
-                                 caused; kind is turn | prime | compact; usage is the API's own
+                                 caused; kind is instance | prime | compact (turn | agent before
+                                 instances); usage is the API's own
                                  usage object (input, cache read, cache write by TTL, output)
 
 Cost in this README is in "eq", input-token equivalents at API price ratios:
@@ -784,26 +817,23 @@ Cost in this README is in "eq", input-token equivalents at API price ratios:
 `facet stats` tabulates it per day and kind).
 
 **Engine state** (`~/.local/share/facet/engine-<hash>/`): not memory, safe to delete when the
-engine is stopped, except `queue.json`, `later.json`, `notes.json` (accepted but not yet
-logged). (Cards are not here: they live in the vault, see **cards**; a `cards.json.migrated`
+engine is stopped, except `queue.json` (accepted but not yet logged). (Cards are not here: they live in the vault, see **cards**; a `cards.json.migrated`
 here is the old file, already absorbed.)
 
     events.jsonl   introspection, below
     inbox/         messages taken by serve, the CLI or Telegram, one JSON file each
-                   ({text, later}, name = arrival time), written whole (tmp, fsync, rename)
+                   ({text}, name = arrival time), written whole (tmp, fsync, rename)
                    before the sender is answered; the engine takes them (twice a second, and
-                   at start) into queue.json / later.json and deletes the file after that
+                   at start) into queue.json and deletes the file after that
                    is saved. One queue in, not two: the engine's socket `send` op remains for
                    the tests but no route uses it. A crash between "saved" and "deleted" can
                    replay one message (never lose one)
     queue.json     accepted messages not yet in the log; queued again at start
-    later.json     the same, for messages waiting for turns of their own
-    notes.json     notes imported during a turn, not yet in the log; added at start
     limits.json    the last rate_limit_info Claude Code reported
     model          the /model choice, if any (wins over chat.model)
-    system.txt     the system prompt as last sent, turns and compactions alike
-    agents/        each subagent's own run, <name>.jsonl (spawn_... for `facet spawn`; older
-                   ones by Claude Code's agentId, from Task subagents), read by zoom("Name")
+    system.txt     the system prompt as last sent, instances and compactions alike
+    agents/        each instance's own run, <id>.jsonl (inst_...; older: spawn_... subagents,
+                   and Task subagents by Claude Code's agentId), read by zoom("Name")
     prompts/       every distinct system prompt ever sent, named <name>-<hash>.txt
     memory.html    the last /tree page written by `facet chat`
     engine.log     stdout/stderr of an engine started by `facet chat` (under launchd, the
@@ -814,9 +844,15 @@ the engine's work, never read back by it; a write that fails is dropped silently
 
     engine   start: pid, exe, dir, messages, nodes, view_lines, view_bytes, startup_ms,
              load_notes (torn lines etc. found at load), conf (the settings in force)
-    req      one API request: kind (turn | prime | compact | agent), model, usage, eq, ms, cc
-             (Claude Code version), and what it was for: turn + step | turn + pieces (prime) |
-             node ("id+n") + try | agent (tool_use_id) + agent_kind + step (subagent)
+    req      one API request: kind (instance | prime | compact; turn | agent before
+             instances), model, usage, eq, ms, cc (Claude Code version), and what it was for:
+             instance + step | instance + pieces (prime) | node ("id+n") + try
+    start    an instance started: instance, kickoff, model, settle_ms, prime_read,
+             prime_write, view_bytes, view_lines, view_blocks, shared_bytes, shared_to_mark
+    instance an instance ended: instance, kickoff, status, model, spoke (it said something to
+             the user), net (the safety net sent its last text), record_bytes, reqs, eq,
+             tools, ms
+    (before instances:)
     turn     one fresh call: first, last (message ids), messages_in, settle_ms (waiting for
              summaries), ms, steps, primed, prime_read, prime_write, midrun_delivered,
              queue_after, outcome (done | cancelled | error | followup, the call killed at a
@@ -838,14 +874,15 @@ the engine's work, never read back by it; a write that fails is dropped silently
              and resetsAt), each time it changes
     fallback turn, bytes: a call ended with a chat message unanswered in the chat venue, so
              its final text was logged as `chat` (see **stream and venues**)
-    input    how (starting | queued | held | delivered | later), bytes; never the text
+    input    how (starting | queued; before instances also held | delivered | later), bytes;
+             never the text
     model    model: a /model switch
     system   name (master | compact), hash, bytes: a new system prompt version
     notice   text: every notice shown to the user
 
 Questions it answers, for example:
 
-    jq -c 'select(.ev=="turn") | {first, ms, steps, outcome, settle_ms}' events.jsonl
+    jq -c 'select(.ev=="instance") | {instance, status, ms, reqs, eq, spoke}' events.jsonl
     jq -s '[.[] | select(.ev=="req")] | group_by(.kind) | map({kind: .[0].kind, eq: (map(.eq) | add)})' events.jsonl
     jq -c 'select(.ev=="node" and (.tries | length) > 1) | {node, tries}' events.jsonl
     jq -c 'select(.ev=="agent") | {agent_kind, eq, reqs, report_bytes, ms}' events.jsonl
@@ -882,15 +919,14 @@ cache claim above from request usage; with `ANTHROPIC_BASE_URL` at a logging pro
                                cards (see **cards**); `facet diag` lists them, `facet apply` /
                                  `facet dismiss <id>` apply or close one, `facet answer <id>
                                  <text> [--fix R]` replies
-    facet restart [--serve]    queue an engine restart (re-exec of the binary, same pid) for after the
-                                  running reply, once no detached spawn is alive; --serve also
+    facet restart [--serve]    queue an engine restart (re-exec of the binary, same pid) for when
+                                  nothing is starting and no instance is alive; --serve also
                                   restarts serve (systemctl --user / launchctl kickstart)
-    facet send [--later] <text>  put a message into the conversation (--later: a turn of its own)
+    facet send <text>          put a message into the conversation: it starts an instance
     facet push <text>          push to Telegram
-    facet spawn [--wait] [--model M] [--effort E] [--kind general-purpose|explore] [--desc D] <task>
-                                a subagent on the master's prefix (19): returns its id at
-                                  once, its report arrives later as a message of its own (21);
-                                  --wait blocks and prints the report (logged as work)
+    facet spawn [--wait] [--model M] [--effort E] [--desc D] <task> | --task-file F | -
+                                hand a task to a new instance (see **instances**): returns
+                                  its name at once; --wait blocks and prints its end record
     facet status               where everything stands
 
 A longform keeps its prose in one note and every statement and proof in a note of its own,

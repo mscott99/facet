@@ -7,15 +7,15 @@
 //   view     the fold: append, then merge the most due pair (§5)
 //   compact  the pump and the node builder (§4)
 //   claude   one `claude -p` process, stream-json in and out
-//   turn     the turn loop, priming, mid-run messages (§6, §7, §8)
+//   turn     the starter: one queue of user messages and handed-on tasks, each started as an
+//            instance in arrival order, after the view settles; priming (§6, §7, §8)
 //   mcp      zoom and date, served over HTTP from this process (§7.1)
 //   engine   the one process that owns the chat: lock socket, clients, state
 //   usage    one line per API request, and the tables made from them
 //   browse   the whole tree as one HTML page (§10)
 //   events   introspection log, outside the chat directory (never read back)
-//   agent    a subagent spawned to outlive its turn: its own `claude -p`, owned by the
-//            engine, not the turn (§9, detached)
-pub mod agent;
+//   instance one instance: its own detached `claude -p`, its kickoff and end record in the
+//            log, its own steps kept beside it for zoom("Name")
 pub mod browse;
 pub mod claude;
 pub mod compact;
@@ -23,6 +23,7 @@ pub mod engine;
 pub mod events;
 pub mod import;
 pub mod inbox;
+pub mod instance;
 pub mod mcp;
 pub mod prompts;
 pub mod store;
@@ -57,6 +58,11 @@ pub const fn inner(budget: usize) -> usize { budget / 2 }
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long a cache entry is trusted to be alive (5 min TTL, minus a margin).
 pub const WARM: Duration = Duration::from_secs(270);
+
+/// Tests that point FACET_CLAUDE (one process-wide variable) at a stand-in model take this
+/// first, so two of them never run at once.
+#[cfg(test)]
+pub static CLAUDE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Cut `s` at a byte offset without splitting a UTF-8 character.
 pub fn cut_bytes(s: &str, max: usize) -> &str {

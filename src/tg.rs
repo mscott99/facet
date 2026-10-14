@@ -10,11 +10,7 @@
 // conversation still learns what was asked and when. That queue is this file's business only;
 // `tell` drains it through one call.
 //
-// A message typed on a phone is rarely an interruption of the turn it lands in: it is the next
-// thing to deal with. So this route queues by default (`telegram.queue`, default true) — the
-// text waits and starts a turn of its own rather than cutting into the running one at its next
-// tool call. Either choice stays one message away: `/now <text>` delivers into the running turn,
-// `/later <text>` queues whatever the default is, and `/queue on|off` moves the default.
+// A plain message starts an instance of its own, like a message from any route.
 use crate::cfg::{self, Cfg};
 use crate::{doc, log};
 use serde_json::{json, Value};
@@ -236,9 +232,6 @@ fn life(cfg: &Cfg, args: &[&str]) -> String {
     }
 }
 
-/// Does a plain message from here wait for the running turn to end, or cut into it?
-pub fn queueing(cfg: &Cfg) -> bool { cfg.get_bool("telegram.queue", true) }
-
 /// `/model` shows the master model, `/model opus|sonnet|…` switches it for the next turns.
 /// The web chat box and Telegram share this; it is the engine's `model` op, not a message.
 pub fn model_cmd(arg: &str) -> String {
@@ -265,12 +258,10 @@ Facet: plain text goes to the agent. Say it in words:
 - draft / send: an email draft is shown first; sent only when you say send; attachments ok
 - check mail, update calendar
 - paper feedback: comment on a note line (a card); replies give choices or a fix
-- coding goes to subagents
+- coding is handed on to Sonnet instances
 
 Commands:
 /model [opus|sonnet]  show or switch the main model
-/now <text>  into the running turn   /later <text>  wait for it to end
-/queue on|off  default for plain messages (Telegram)
 /diag open cards   /notes  published notes   /cal [N]  calendar
 /mail [query]   /last N  recent messages   /link  reader links
 /ping  engine and usage left   /buffer  /flush  queued prelude
@@ -289,36 +280,21 @@ pub fn command(cfg: &Cfg, text: &str) -> (String, bool) {
     let cmd = it.next().unwrap_or("").to_lowercase();
     let rest: Vec<&str> = it.collect();
     let n = rest.first().and_then(|x| x.parse::<i64>().ok());
-    // whatever followed the command word, verbatim: `/now` and `/later` carry a real message
     let tail = text.trim_start_matches('/').splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
     match cmd.as_str() {
-        // the two overrides of `telegram.queue`, per message
+        // from before instances, when a message could cut into a running turn: now every
+        // message starts its own, so both just send
         "now" | "later" => (if tail.is_empty() { "nothing to send".into() } else {
-            match crate::tell::tell(cfg, tail, "telegram", cmd == "later") {
-                Ok(_) => if cmd == "later" { "queued".into() } else { "sent".to_string() },
-                Err(e) => e,
-            }
+            match crate::tell::tell(cfg, tail, "telegram") { Ok(_) => "sent".into(), Err(e) => e }
         }, false),
         "model" => (model_cmd(tail), false),
-        "queue" => (match rest.first().map(|s| s.to_lowercase()).as_deref() {
-            Some("on") | Some("off") => {
-                let on = rest[0].eq_ignore_ascii_case("on");
-                let mut c = Cfg::load();
-                c.set("telegram.queue", Value::from(on));
-                c.save();
-                if on { "queueing on: a message waits and starts a turn of its own".into() }
-                else { "queueing off: a message goes into the running turn".to_string() }
-            }
-            _ => format!("queueing is {} (/queue on|off; /now and /later override once)",
-                if queueing(cfg) { "on" } else { "off" }),
-        }, false),
         "start" | "help" => (format!("{}\n\n{}", HELP, cfg.url("/")), false),
         "link" => (format!("home {}\nchat {}\nnotes {}\ncomments {}\nmemory {}",
             cfg.url("/"), cfg.url("/chat"), cfg.url("/m/"), cfg.url("/d/"), cfg.url("/tree")), false),
         "ping" | "usage" => (engine_line(cfg), false),
         "buffer" => (peek_prelude(), false),
         "flush" => (match take_prelude() {
-            Some(p) => match crate::tell::tell(cfg, &p, "telegram", false) { Ok(_) => "sent".into(), Err(e) => e },
+            Some(p) => match crate::tell::tell(cfg, &p, "telegram") { Ok(_) => "sent".into(), Err(e) => e },
             None => "nothing queued".into(),
         }, false),
         "diag" | "cards" => (crate::cards::brief(cfg, None), true),
@@ -364,7 +340,6 @@ fn inbound(cfg: Cfg) {
         {"command": "model", "description": "show or switch the model"},
         {"command": "ping", "description": "engine and usage left"},
         {"command": "diag", "description": "open cards"},
-        {"command": "later", "description": "queue a message"},
     ]}));
     // First run: start from the newest update rather than replaying a day of backlog into
     // the conversation.
@@ -429,7 +404,7 @@ fn inbound(cfg: Cfg) {
                 if keep { remember(&text, &reply); }
                 let _ = push(&c, if reply.is_empty() { "(nothing)" } else { &reply });
             } else {
-                match crate::tell::tell(&c, &text, "telegram", queueing(&c)) {
+                match crate::tell::tell(&c, &text, "telegram") {
                     Ok(_) => {}
                     Err(e) => { let _ = push(&c, &format!("could not deliver: {}", e)); }
                 }

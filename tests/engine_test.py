@@ -20,7 +20,6 @@ env["HOME"] = HOME
 env["FACET_LIMIT_BACKOFF_MS"] = "6000"  # a usage-limit pause of 6 s, not a minute
 CARDS = os.path.join(VAULT, ".claude", "cards.json")
 fails = []
-REPORT = "BG REPORT: the thing is in three files"  # what the fake's backgrounded subagent says
 
 def check(cond, what):
     print(("ok   " if cond else "FAIL ") + what)
@@ -122,85 +121,84 @@ try:
     called = [n for n in tree if n["text"].startswith("S")]
     check(called and all(n["size"] == 300 for n in called), "node keeps the try that fits")
 
-    # A: a plain turn, primed
+    # A: one message, one instance, primed: the user's message, the kickoff, the safety net's
+    # chat (the fake says nothing to the user), the end record pointing at its kickoff
+    def insts(): return [x for x in fake() if x["kind"] == "instance"]
+    def inst_of(name): return [x for x in insts() if x["env"].get("FACET_INSTANCE") == name][-1]
+    def name_of(m): return m["text"][1:m["text"].index("]")]
+    def view_of(x): return "".join(b["text"] for b in x["content"][:-1])
     n0 = len(log())
     req({"op": "send", "text": "hello"})
-    wait(lambda: any(m["kind"] in ("talk", "chat") for m in log()[n0:]), 30, "reply to hello")
+    wait(lambda: any(m["kind"] == "work" for m in log()[n0:]), 30, "end record for hello")
     wait(idle, 30, "idle after hello")
     L = log()[n0:]
-    check([m["kind"] for m in L[:2]] == ["user", "chat"] and L[0]["text"] == "hello" and L[1]["text"] == "ok", "turn: user, chat")
+    check([m["kind"] for m in L] == ["user", "start", "chat", "work"] and L[0]["text"] == "hello" and L[2]["text"] == "ok",
+          "an instance: user, kickoff, chat, end record: %r" % [(m["kind"], m["text"][:60]) for m in L])
+    nm = name_of(L[1])
+    check(L[1]["text"].startswith("[inst_") and L[1]["text"].endswith("answers message %d" % n0), "the kickoff names the message it answers: %r" % L[1]["text"])
+    check(L[3]["text"].startswith("[%s] (kickoff %d) done; it sent no reply" % (nm, n0 + 1)), "the end record points at its kickoff: %r" % L[3]["text"])
     F = fake()
     primes = [x for x in F if x["kind"] == "prime"]
-    turns = [x for x in F if x["kind"] == "turn"]
-    check(len(primes) == 1 and not any(x["kind"] == "prime-not-killed" for x in F), "the call was primed and the priming call killed")
+    turns = insts()
+    check(len(primes) == 1 and not any(x["kind"] == "prime-not-killed" for x in F), "the instance was primed and the priming call killed")
     pv = [b["text"] for b in primes[0]["content"]]
     tv = [b["text"] for b in turns[0]["content"]]
-    check(pv == tv[:-1] and tv[-1] == "hello", "priming sends exactly the real call's view blocks")
+    check(pv == tv[:-1] and tv[-1].startswith("You are instance [%s]; your kickoff is message %d." % (nm, n0 + 1)) and tv[-1].endswith("hello"),
+          "priming sends exactly the instance's view blocks; its own block names it and carries the message: %r" % tv[-1])
     pc = primes[0]["content"]
     pm = [k for k, b in enumerate(pc) if "cache_control" in b]
     lw = max([k for k, b in enumerate(pc) if b["text"].count("\n") == 4 and b["text"].endswith("\n")], default=-1)
     check(pm == sorted({lw, len(pc) - 1} - {-1}) and not any("cache_control" in b for b in turns[0]["content"]),
           "marks on the priming call only: its last whole 4-line block and its end")
     check(all(b["text"].count("\n") == 4 for b in pc[:-1]), "the view goes out in blocks of 4 lines")
-    check(primes[0]["argv"] == turns[0]["argv"], "priming and real call use identical arguments")
-    check(turns[0]["env"]["CLAUDE_CODE_PROMPT_CACHE_TTL"] == "5m" and primes[0]["env"]["DISABLE_PROMPT_CACHING"] == "1", "5m entries; priming with Claude Code marks off")
-    check("hello" not in "".join(tv[:-1]), "the view is rendered before the new message is logged")
+    check(primes[0]["argv"] == turns[0]["argv"], "priming and instance use identical arguments")
+    check(turns[0]["env"]["CLAUDE_CODE_PROMPT_CACHE_TTL"] == "5m" and primes[0]["env"]["DISABLE_PROMPT_CACHING"] == "1"
+          and turns[0]["env"]["FACET_INSTANCE"] == nm, "5m entries; priming with Claude Code marks off; the instance knows its name")
+    check("hello" not in view_of(turns[0]), "the view is rendered before the new message is logged")
+    av = [v.get("argv", []) for v in F if v["kind"] in ("instance", "prime")]
+    check(av and all("Task" not in a[a.index("--tools") + 1].split(",") and "--agents" not in a and "--replay-user-messages" not in a for a in av)
+          and all(len(x) < 100000 for a in av for x in a), "no Task tool, no Task agents, no argument carries the view")
 
-    # B: mid-run messages
+    # B: instances run side by side; each sees the log as of its own start: a running one's
+    # kickoff, an ended one's end record; both start and end are chronological
     n0 = len(log())
-    req({"op": "send", "text": "TOOLS 3"})
-    wait(lambda: any(m["kind"] == "tool" for m in log()[n0:]), 30, "first tool")
-    time.sleep(0.2)
-    req({"op": "send", "text": "MID during tool"})
-    wait(lambda: sum(1 for m in log()[n0:] if m["kind"] == "echo") >= 3, 30, "third tool result")
-    time.sleep(0.15)
-    req({"op": "send", "text": "LATE during reply"})
-    wait(lambda: any(m["text"] == "LATE during reply" for m in log()[n0:]), 30, "late message logged")
-    wait(idle, 30, "idle after mid-run")
-    L = [(m["kind"], m["text"]) for m in log()[n0:]]
-    print("     ", [k if k != "user" else "user:" + t for k, t in L])
-    ki = [k for k, _ in L]
-    mid = L.index(("user", "MID during tool"))
-    check(ki[mid - 1] == "echo" and ki[mid - 2] == "tool", "mid-run message logged right after the tool result it rode on")
-    late = L.index(("user", "LATE during reply"))
-    check(("chat", "done") in L[:late] and L[late + 1:] and L[late + 1] == ("chat", "ok"), "a message during the final reply starts a fresh call")
-    F = fake()
-    check(not any(x["kind"] == "followup" for x in F), "no follow-up turn in a stale conversation")
-    check(any(x["kind"] == "midrun" and x["text"] == "MID during tool" for x in F), "mid-run message was delivered to the running call")
+    req({"op": "send", "text": "SLOW TOOLS 2 first"})
+    wait(lambda: any(m["kind"] == "start" for m in log()[n0:]), 30, "first kickoff")
+    req({"op": "send", "text": "TOOLS 1 second"})
+    wait(lambda: sum(1 for m in log()[n0:] if m["kind"] == "work") >= 2, 40, "both end records")
+    wait(idle, 30, "idle after two instances")
+    L = log()[n0:]
+    print("     ", [(m["kind"], m["text"][:40]) for m in L])
+    ix = lambda f: next(k for k, m in enumerate(L) if f(m))
+    k1 = ix(lambda m: m["kind"] == "user" and m["text"] == "SLOW TOOLS 2 first"); a1 = name_of(L[k1 + 1])
+    k2 = ix(lambda m: m["kind"] == "user" and m["text"] == "TOOLS 1 second"); a2 = name_of(L[k2 + 1])
+    w1 = ix(lambda m: m["kind"] == "work" and m["text"].startswith("[%s] (kickoff %d)" % (a1, L[k1 + 1]["i"])))
+    w2 = ix(lambda m: m["kind"] == "work" and m["text"].startswith("[%s] (kickoff %d)" % (a2, L[k2 + 1]["i"])))
+    check(k2 < w1 and w2 < w1, "the second started while the first ran, and ended first: kickoffs and ends in time order")
+    check(not any(m["kind"] in ("tool", "echo", "talk") for m in L), "no instance's own steps reach the log")
+    v2 = view_of(inst_of(a2))
+    check(("[%s] kickoff" % a1) in v2 and ("[%s] (kickoff" % a1) not in v2, "the second's view has the first's kickoff, not its end record")
+    n1 = len(log())
+    req({"op": "send", "text": "third"})
+    wait(lambda: any(m["kind"] == "work" for m in log()[n1:]), 30, "third's end record")
+    wait(idle, 30, "idle after third")
+    a3 = name_of(log()[n1 + 1])
+    v3 = view_of(inst_of(a3))
+    check(("[%s] (kickoff" % a1) in v3 and ("[%s] (kickoff" % a2) in v3, "a later instance sees both end records")
+    z = req({"op": "zoom", "id": a1})["text"]
+    check("tool: Bash" in z and "echo: slept 0" in z, "zoom(\"name\") opens an instance's own steps: %r" % z[:200])
+    check(not any(x["kind"] == "followup" for x in fake()), "nothing is written to an instance after its start")
 
-    # B2: messages sent for turns of their own (`later`) wait, then start one call each, in
-    # order; a plain message sent meanwhile joins whichever turn is running
-    n0, f0 = len(log()), len(fake())
-    req({"op": "send", "text": "TOOLS 3"})
-    wait(lambda: any(m["kind"] == "tool" for m in log()[n0:]), 30, "first tool (later)")
-    req({"op": "send", "text": "TOOLS 2 own turn A", "later": True})
-    req({"op": "send", "text": "own turn B", "later": True})
-    check(req({"op": "status"})["later"] == 2, "later messages wait apart from the running turn")
-    time.sleep(0.2)
-    req({"op": "send", "text": "MID one"})
-    wait(lambda: any(m["text"] == "TOOLS 2 own turn A" for m in log()[n0:]), 30, "turn A starts")
-    wait(lambda: any(m["kind"] == "tool" for m in log()[[m["text"] for m in log()].index("TOOLS 2 own turn A"):]), 30, "turn A's first tool")
-    time.sleep(0.2)
-    req({"op": "send", "text": "MID two"})
-    wait(lambda: any(m["text"] == "own turn B" for m in log()[n0:]), 30, "turn B starts")
-    wait(idle, 30, "idle after later")
-    T = [x["content"][-1]["text"] for x in fake()[f0:] if x["kind"] == "turn"]
-    check(T == ["TOOLS 3", "TOOLS 2 own turn A", "own turn B"], "each later message starts a call of its own, in order: %r" % T)
-    M = [x["text"] for x in fake()[f0:] if x["kind"] == "midrun"]
-    check(M == ["MID one", "MID two"], "plain messages between them go into the running turn: %r" % M)
-    U = [m["text"] for m in log()[n0:] if m["kind"] == "user"]
-    check(U == ["TOOLS 3", "MID one", "TOOLS 2 own turn A", "MID two", "own turn B"], "logged in that order: %r" % U)
-
-    # C: cancel during a tool
+    # C: cancel stops a running instance; its end record says so
     n0 = len(log())
     req({"op": "send", "text": "TOOLS 6"})
-    wait(lambda: any(m["kind"] == "tool" for m in log()[n0:]), 30, "tool before cancel")
+    wait(lambda: any(m["kind"] == "start" for m in log()[n0:]), 30, "kickoff before cancel")
+    time.sleep(1.0)
     req({"op": "cancel"})
+    wait(lambda: any(m["kind"] == "work" and "cancelled" in m["text"] for m in log()[n0:]), 10, "cancelled end record")
     wait(lambda: not req({"op": "status"})["busy"], 10, "idle after cancel")
     st = req({"op": "status"})
-    check(not st["busy"] and st["queued"] == 0, "cancel stops the call")
-    n1 = len(log()); time.sleep(1.5)
-    check(len(log()) == n1, "nothing is logged after the cancel")
+    check(not st["busy"] and st["queued"] == 0 and st["instances"] == 0, "cancel stops the instance")
 
     # D: a stubborn node keeps the shortest of TRIES tries
     req({"op": "send", "text": "STUBBORN " + "w" * 700})
@@ -214,13 +212,12 @@ try:
         elif x["kind"] == "compact": break
     check(n_retry == 4, "TRIES = 5: four feedback rounds for a node that never fits (%d)" % n_retry)
 
-    # E: a crash loses no accepted message: kill -9 with one written mid-run, not yet consumed
+    # E: a message sent while the engine is down waits in the inbox and is answered at start
     n0 = len(log())
-    req({"op": "send", "text": "TOOLS 4"})
-    wait(lambda: any(m["kind"] == "tool" for m in log()[n0:]), 30, "tool before crash")
-    req({"op": "send", "text": "SURVIVOR"})
     saved = json.load(open(os.path.join(D, "chat", "view.json")))
     eng.kill(); eng.wait()
+    out = subprocess.run([BIN, "send", "SURVIVOR"], env=env, capture_output=True, text=True, timeout=10)
+    check(out.returncode == 0, "facet send works with the engine down: %r" % ((out.stdout, out.stderr),))
     eng = subprocess.Popen([BIN, "engine"], env=env, stdout=subprocess.DEVNULL, stderr=open(os.path.join(D, "engine2.err"), "w"))
     wait(lambda: os.path.exists(os.path.join(D, "lock")) and any(m["text"] == "SURVIVOR" for m in log()[n0:]), 30, "survivor logged after restart")
     err2 = open(os.path.join(D, "engine2.err")).read()
@@ -228,19 +225,19 @@ try:
     wait(idle, 60, "idle after restart")
     L = [(m["kind"], m["text"]) for m in log()[n0:]]
     k = L.index(("user", "SURVIVOR"))
-    check(L[k + 1:k + 2] == [("chat", "ok")], "a message accepted before a crash is answered after the restart")
+    check([x[0] for x in L[k + 1:k + 4]] == ["start", "chat", "work"] and L[k + 2][1] == "ok", "a message sent while the engine was down is answered after the restart: %r" % L[k:])
 
     # G: /model and /zoom
     r = req({"op": "model", "name": "sonnet"})
-    check(r["ok"] and req({"op": "status"})["model"] == "sonnet", "/model switches the master model")
+    check(r["ok"] and req({"op": "status"})["model"] == "sonnet", "/model switches the model of new instances")
     check(req({"op": "model", "name": "gpt"})["ok"] is False, "/model refuses an unknown model")
     z = req({"op": "zoom", "id": 3, "n": 1})["text"]
     check(z.startswith("3+0|note: seed message 3 "), "/zoom gives a message whole")
     check(req({"op": "zoom", "id": 1, "n": 2})["text"] == "No line 1+2.", "/zoom refuses an unaligned line")
     n0 = len(log()); req({"op": "send", "text": "after switch"})
-    wait(lambda: any(m["kind"] in ("talk", "chat") for m in log()[n0:]), 30, "turn after model switch")
-    last = [x for x in fake() if x["kind"] == "turn"][-1]
-    check(last["argv"][last["argv"].index("--model") + 1] == "sonnet", "the next turn runs on the new model")
+    wait(lambda: any(m["kind"] == "work" for m in log()[n0:]), 30, "instance after model switch")
+    last = insts()[-1]
+    check(last["argv"][last["argv"].index("--model") + 1] == "sonnet", "the next instance runs on the new model")
     wait(idle, 60, "idle after model switch")
 
     # F: importing notes
@@ -259,182 +256,44 @@ try:
     check("NOT imported: not a text file" in out3, "a binary file is refused")
     n0 = len(log())
     req({"op": "send", "text": "TOOLS 3"})
-    wait(lambda: req({"op": "status"})["busy"], 10, "turn for queued import")
-    r = req({"op": "note", "text": "during a turn"})
-    check(r["ok"] is True and r.get("queued") is True, "an import during a turn is queued")
-    r2 = req({"op": "note", "text": "during a turn"})
-    check(r2.get("skipped") == "already queued", "the same import twice during a turn is queued once")
+    wait(lambda: req({"op": "status"})["busy"], 10, "an instance for the import test")
+    r = req({"op": "note", "text": "while an instance runs"})
+    check(r["ok"] is True and "i" in r, "an import while an instance runs goes in at once: %r" % r)
+    r2 = req({"op": "note", "text": "while an instance runs"})
+    check(r2.get("skipped") == "already in the memory", "the same import twice is added once")
     wait(idle, 60, "idle after import tests")
-    new = log()[n0:]
-    notes = [x for x in new if x["kind"] == "note"]
-    check(len(notes) == 1 and notes[0]["text"] == "during a turn" and new[-1]["kind"] == "note",
-          "a queued import is logged once, after the turn's messages: %r" % [(x["kind"], x["text"][:40]) for x in new])
 
-    # G: a subagent: its steps stay out of the chat, its cost does not stay out of the log
+    # S: handing on (`facet spawn`): an instance like any other, on agent_model (Sonnet); the
+    # caller is named in its kickoff, its task logged there verbatim; it starts no user message
     n0 = len(log())
-    req({"op": "send", "text": "AGENT please"})
-    wait(lambda: any(m["kind"] in ("talk", "chat") for m in log()[n0:]), 30, "reply after the subagent")
-    wait(idle, 60, "idle after the subagent turn")
-    L = log()[n0:]
-    work = [m for m in L if m["kind"] == "work"]
-    check(len(work) == 1 and work[0]["text"].startswith("[task_fake_1] REPORT:"), "the subagent's report is logged, as kind work, \"[Name] report\"")
-    check(not any("SUBAGENT PROSE" in m["text"] or "grep -r thing" in m["text"] for m in L),
-          "the subagent's own steps and prose are not logged")
-    ev = events()
-    a = [x for x in ev if x["ev"] == "agent"]
-    check(len(a) == 1 and a[0]["reqs"] == 2 and a[0]["eq"] > 0 and a[0]["status"] == "completed",
-          "one agent record, with the requests we counted: %r" % (a[-1] if a else None))
-    check(a and a[0]["tokens"] == 4321 and a[0]["tools"] == 1 and a[0]["task_ms"] == 1234
-          and a[0]["report_bytes"] == len(work[0]["text"]) - len("[task_fake_1] ") and a[0]["ask_bytes"] > 0 and a[0]["task"] == "task_fake_1",
-          "the agent record keeps what it was asked, what it cost and what it left behind")
-    ar = [x for x in ev if x["ev"] == "req" and x["kind"] == "agent"]
-    check(len(ar) == 2 and all(x["tool_use_id"].startswith("toolu_agent") for x in ar),
-          "each subagent request is logged on its own, under the agent that made it (%d)" % len(ar))
-    t = [x for x in ev if x["ev"] == "turn"][-1]
-    check(t["agents"] == 1 and t["agent_reqs"] == 2 and t["agent_eq"] > 0 and t["agent_bytes"] == len(work[0]["text"]) - len("[task_fake_1] "),
-          "the turn record totals what its subagents cost")
-    av = [v.get("argv", []) for v in fake()]
-    # subagents go through `facet spawn` only (README §19): no call defines Task agents or has Task
-    turnav = [a for a, v in zip(av, fake()) if v["kind"] in ("turn", "prime")]
-    check(turnav and not any("--agents" in a for a in turnav) and all(len(x) < 100000 for a in av for x in a),
-          "no call defines Task subagents, and no argument carries the view")
-    check(all("Task" not in a[a.index("--tools") + 1].split(",") for a in turnav), "the master has no Task tool")
-
-    # its run is kept out of the chat, for zoom("Name") (§6 of the gist)
-    z = req({"op": "zoom", "id": "task_fake_1"})["text"]
-    check("SUBAGENT PROSE" in z and "grep -r thing" in z, "zoom(\"task_fake_1\") gives the subagent's whole run: %r" % z[:200])
-    mcp_url = json.loads(av[-1][av[-1].index("--mcp-config") + 1])["mcpServers"]["optchat"]["url"]
-    def mcp(name, args):
-        import urllib.request
-        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}).encode()
-        return json.loads(urllib.request.urlopen(urllib.request.Request(mcp_url, body, {"Content-Type": "application/json"})).read())["result"]["content"]
-    check("SUBAGENT PROSE" in mcp("zoom", {"id": "task_fake_1"})[0]["text"], "the master's zoom tool opens it too")
-    # a subagent's MCP path lists the master's tools exactly, and refuses the ones that write
-    agent_url = mcp_url[:-len("/mcp")] + "/agent"
-    def rpc(url, method, params):
-        import urllib.request
-        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
-        return json.loads(urllib.request.urlopen(urllib.request.Request(url, body, {"Content-Type": "application/json"})).read())["result"]
-    check(rpc(agent_url, "tools/list", {}) == rpc(mcp_url, "tools/list", {}), "a subagent is listed the master's tools, byte for byte")
-    nlog = len(log())
-    r = rpc(agent_url, "tools/call", {"name": "send_chat", "arguments": {"text": "from a subagent"}})
-    check(r["isError"] is True and "refused" in r["content"][0]["text"] and not any(m["text"] == "from a subagent" for m in log()[nlog:]),
-          "a subagent's send_chat is refused: %r" % r)
-    r = rpc(agent_url, "tools/call", {"name": "zoom", "arguments": {"id": 0, "n": 1}})
-    check(r["isError"] is False and r["content"][0]["text"].startswith("0+0|"), "a subagent's zoom works")
-
-    # images: a tool result's image is kept, and zoom(id, 1) gives it back (§5 of the gist)
-    n0 = len(log())
-    req({"op": "send", "text": "IMAGE please"})
-    wait(lambda: any(m["kind"] in ("talk", "chat") for m in log()[n0:]), 30, "reply after the image")
-    wait(idle, 60, "idle after the image turn")
-    im = [m for m in log()[n0:] if m["kind"] == "echo" and "a picture" in m["text"]]
-    got = mcp("zoom", {"id": im[0]["i"], "n": 1}) if im else []
-    check(im and "[image]" in im[0]["text"] and len(got) == 2 and got[1] == {"type": "image", "data": "iVBORw0KGgoFAKE", "mimeType": "image/png"},
-          "zoom(id, 1) gives a message whole, with its images: %r" % got)
-
-    u = [json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))]
-    check({"compact", "prime", "turn", "agent"} <= {x["kind"] for x in u}, "usage logged per request for compact, prime, turn and agent")
-    check(sum(1 for x in u if x["kind"] == "agent") == 2, "a subagent's own requests are priced apart from the turn's")
-    # H: a backgrounded subagent reports after the reply, so its report cannot be that
-    # turn's: it comes in as a message of its own and starts another turn (§9)
-    n0 = len(log())
-    req({"op": "send", "text": "BGAGENT please"})
-    wait(lambda: any(m["kind"] == "work" and m["text"].startswith("[task_fake_bg]") for m in log()[n0:]),
-         30, "the background report joins the chat")
-    wait(idle, 60, "idle after the background report's turn")
-    L = log()[n0:]
-    rep = [m for m in L if m["kind"] == "work" and m["text"].startswith("[task_fake_bg]")]
-    check(len(rep) == 1 and REPORT in rep[0]["text"],
-          "a backgrounded subagent's report joins the chat as one message starting \"[id] \"")
-    check(not any("Async agent launched" in m["text"] for m in L),
-          "the launch receipt is not logged as a report")
-    check(not any("STALE FOLLOW-UP" in m["text"] for m in L),
-          "nothing the follow-up turn says is logged")
-    check(any(m["kind"] in ("talk", "chat") and m["i"] > rep[0]["i"] for m in L), "the report starts a turn")
-    turns = [v for v in fake() if v.get("kind") == "turn"]
-    said = turns[-1]["content"][-1]["text"] if turns else ""
-    check(said.startswith("[task_fake_bg]"), "that turn is a fresh call, with the report as its message")
-    check(not any(v.get("kind") == "followup" for v in fake()), "no message was answered by a follow-up turn")
-    ab = [x for x in events() if x["ev"] == "agent" and x["task"] == "task_fake_bg"]
-    check(len(ab) == 1 and ab[0]["status"] == "completed" and ab[0]["reqs"] == 2
-          and ab[0]["report_bytes"] == len(REPORT) and ab[0]["tokens"] == 4321,
-          "the backgrounded agent's record is finished, with what it cost and left: %r" % (ab[0] if ab else None))
-    u = [json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))]
-    check(sum(1 for x in u if x["kind"] == "agent") == 4, "its own two requests are priced apart too")
-
-    # I: a detached subagent (`facet spawn`) is not a Task call and not owned by any turn: it
-    # must survive the turn that launched it ending, and report later as its own turn (§9)
-    n0 = len(log())
-    u0 = sum(1 for x in (json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))) if x["kind"] == "agent")
-    sp = subprocess.run([BIN, "spawn", "--model", "sonnet", "--kind", "general-purpose", "--desc", "test spawn",
-                          "look into the thing and report back"], env=env, capture_output=True, text=True, timeout=10)
-    check(sp.returncode == 0 and sp.stdout.strip() != "", "facet spawn returns an id at once: %r" % ((sp.stdout, sp.stderr),))
+    sp = subprocess.run([BIN, "spawn", "--desc", "test spawn", "look into the thing and report back"],
+                        env=dict(env, FACET_INSTANCE="inst_parent"), capture_output=True, text=True, timeout=10)
     sid = sp.stdout.strip()
-    check(not req({"op": "status"})["busy"], "the engine is not busy right after a spawn (it is not a turn)")
-    # a normal turn, started right after the spawn, runs and finishes well inside the 1s the
-    # fake's detached agent sleeps before it reports: proof the engine does not wait on it
-    req({"op": "send", "text": "hi again"})
-    wait(lambda: any(m["kind"] in ("talk", "chat") for m in log()[n0:]), 30, "an ordinary turn still runs fine right after a spawn")
-    wait(idle, 10, "idle right after that turn, before the spawn has reported")
-    logged = [m for m in log()[n0:] if m["kind"] == "tool" and m["text"].startswith("spawn " + sid)]
-    check(len(logged) == 1 and logged[0]["text"].endswith("(sonnet, general-purpose, test spawn): look into the thing and report back"),
-          "the spawn's task is logged once, verbatim: %r" % (logged,))
-    check(not any(sid in m["text"] for m in log()[n0:] if m["kind"] != "tool"), "the spawn's report has not arrived yet at that point")
-    wait(lambda: any(m["kind"] == "work" and m["text"].startswith("[%s] " % sid) for m in log()[n0:]),
-         15, "the detached agent's report joins the chat, after the turn that spawned it is long done")
-    wait(idle, 30, "idle after the spawn's own turn")
-    # the shell's "cwd was reset" note is not part of what the command printed
+    check(sp.returncode == 0 and sid.startswith("inst_"), "facet spawn returns a name at once: %r" % ((sp.stdout, sp.stderr),))
+    wait(lambda: any(m["kind"] == "work" and m["text"].startswith("[%s] " % sid) for m in log()[n0:]), 30, "the spawned instance's end record")
+    wait(idle, 30, "idle after spawn")
+    L = [(m["kind"], m["text"]) for m in log()[n0:]]
+    check([k for k, _ in L] == ["start", "work"] and L[0][1] == "[%s] kickoff (sonnet, effort high): task from [inst_parent] (test spawn):\n\nlook into the thing and report back" % sid
+          and L[1][1] == "[%s] (kickoff %d) ok" % (sid, n0), "a handed-on task: its kickoff, then its end record, no user message, no chat: %r" % L)
+    sv = inst_of(sid)
+    check(sv["argv"][sv["argv"].index("--model") + 1] == "sonnet" and sv["content"][-1]["text"].startswith("You are instance [%s]" % sid)
+          and "a task handed to you by [inst_parent]" in sv["content"][-1]["text"], "it runs on sonnet, told who handed it the task")
+    n0 = len(log())
+    sp = subprocess.run([BIN, "spawn", "--wait", "--desc", "waited", "-"], input="wait for me", env=env, capture_output=True, text=True, timeout=30)
+    check(sp.returncode == 0 and re.match(r"^\[inst_[0-9a-f]+\] \(kickoff \d+\) ok$", sp.stdout.strip()) is not None, "spawn --wait prints the end record: %r" % ((sp.stdout, sp.stderr),))
+    wait(idle, 30, "idle after spawn --wait")
+    # the shell's "cwd was reset" note is not part of what a command printed
     n1 = len(log())
     req({"op": "send", "text": "TOOLS 1 CWD"})
-    wait(lambda: any(m["kind"] in ("talk", "chat") for m in log()[n1:]), 30, "the CWD turn finishes")
-    ec = [m["text"] for m in log()[n1:] if m["kind"] == "echo"]
-    check(ec == ["slept 0"], "the cwd-reset line is stripped from an echo: %r" % (ec,))
-    wait(idle, 30, "idle after the CWD turn")
-    L = log()[n0:]
-    rep = [m for m in L if m["kind"] == "work" and m["text"].startswith("[%s] " % sid)]
-    check(len(rep) == 1 and "SPAWN REPORT" in rep[0]["text"],
-          "the detached agent's report starts a turn of its own, the same shape as a backgrounded Task agent's")
-    check(any(m["kind"] in ("talk", "chat") and m["i"] > rep[0]["i"] for m in L), "that turn replies")
+    wait(lambda: any(m["kind"] == "work" for m in log()[n1:]), 30, "the CWD instance ends")
+    wait(idle, 30, "idle after the CWD instance")
+    z = req({"op": "zoom", "id": name_of(log()[n1 + 1])})["text"]
+    check("echo: slept 0" in z and "Shell cwd was reset" not in z, "the cwd-reset line is stripped from a step: %r" % z[-200:])
+    u = [json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))]
+    check({"compact", "prime", "instance"} <= {x["kind"] for x in u}, "usage logged per request for compact, prime and instance")
     ev = events()
-    asp = [x for x in ev if x["ev"] == "agent" and x.get("tool_use_id") == sid]
-    check(len(asp) == 1 and asp[0]["status"] == "done" and asp[0]["reqs"] >= 1 and asp[0]["eq"] > 0
-          and asp[0].get("detached") is True and asp[0]["report_bytes"] == len(rep[0]["text"]) - len("[%s] " % sid),
-          "the detached agent's own cost is recorded, kind agent, status done: %r" % (asp[0] if asp else None))
-    u1 = sum(1 for x in (json.loads(l) for l in open(os.path.join(D, "usage.jsonl"))) if x["kind"] == "agent")
-    check(u1 > u0, "its own requests are priced as kind agent too (%d -> %d)" % (u0, u1))
-    # its request is the master's up to the view: argv but the MCP path (and the --model asked
-    # for here), the same view blocks, then one block with the instructions and the task
-    calls = fake()
-    sv = [v for v in calls if v["kind"] == "spawn"][-1]
-    tv = [v for v in calls if v["kind"] == "turn"][-1]
-    norm = lambda a: [("MCP" if x.startswith("{\"mcpServers\"") else x) for x in a]
-    sa, ta = norm(sv["argv"]), norm(tv["argv"])
-    mi = ta.index("--model")
-    check(sa[:mi + 1] + sa[mi + 2:] == ta[:mi + 1] + ta[mi + 2:] and sa[mi + 1] == "sonnet",
-          "a spawn's arguments are the master's but for the MCP path and the model asked for: %r" % (([x for x in sa if x not in ta], [x for x in ta if x not in sa]),))
-    check(json.loads(sv["argv"][sv["argv"].index("--mcp-config") + 1])["mcpServers"]["optchat"]["url"].endswith("/agent"),
-          "a spawn's MCP path is the subagent one")
-    check(sv["env"]["CLAUDE_CODE_PROMPT_CACHE_TTL"] == tv["env"]["CLAUDE_CODE_PROMPT_CACHE_TTL"], "a spawn has the master's cache TTL")
-    sc = sv["content"]
-    check(len(sc) >= 2 and "".join(b["text"] for b in sc[:-1]).startswith("<chat>\n") and "".join(b["text"] for b in sc[:-1]).endswith("</chat>")
-          and sc[-1]["text"].startswith("Subagent:") and sc[-1]["text"].endswith("look into the thing and report back"),
-          "a spawn is sent the view's blocks, then the instructions and the task in one block")
-
-    # --wait: blocks until the report, prints it, logs it as work and starts no turn
-    n0 = len(log())
-    sp = subprocess.run([BIN, "spawn", "--wait", "--kind", "explore", "--desc", "waited", "-"], input="wait for me",
-                        env=env, capture_output=True, text=True, timeout=30)
-    check(sp.returncode == 0 and sp.stdout.strip().endswith("SPAWN REPORT: looked into it, done"), "spawn --wait prints the report: %r" % ((sp.stdout, sp.stderr),))
-    time.sleep(1.0)
-    L = log()[n0:]
-    w = [m for m in L if m["kind"] == "work"]
-    check(len(w) == 1 and "SPAWN REPORT" in w[0]["text"] and not any(m["kind"] in ("talk", "chat") for m in L),
-          "a waited spawn's report is logged as work and starts no turn: %r" % [(m["kind"], m["text"][:60]) for m in L])
-    sv = [v for v in fake() if v["kind"] == "spawn"][-1]
-    sa = norm(sv["argv"])
-    check(sa == ta, "with no --model, a spawn runs on the master's model and effort: every argument the master's but the MCP path")
-    check("Do not edit" in sv["content"][-1]["text"], "an explore spawn is told to change nothing (same tools)")
+    check(any(x["ev"] == "start" and x["instance"] == sid for x in ev) and any(x["ev"] == "instance" and x["instance"] == sid and x["status"] == "done" for x in ev),
+          "start and end of each instance are in events.jsonl")
 
     # J: cards (cards.rs). The agent opens and answers them through the engine (op `card`, the
     # same call as its MCP card tools); what it does on one is logged as kind `answer`, never a
@@ -466,54 +325,52 @@ try:
     r = req({"op": "card", "do": "close", "id": c1})
     check(r["ok"] and not any(c["id"] == c1 and not c["closed"] for c in json.load(open(CARDS))["cards"]), "a card closes")
 
-    # K: stream and venues. The master's plain text is the stream's only; send_chat (an MCP
-    # tool) is what reaches the chat venue; answer_card reaches the card and the stream, never
-    # the chat; a chat message left unanswered in the chat gets the turn's final text (fallback)
+    # K: stream and venues. An instance's plain text and steps are not in the stream; send_chat
+    # (an MCP tool) is what reaches the chat venue; answer_card reaches the card and the stream,
+    # never the chat; a chat message left unanswered gets the safety net
+    def ends(n0): return [x for x in events() if x["ev"] == "instance" and x["kickoff"] >= n0]
     n0 = len(log())
     req({"op": "send", "text": "CHAT hello from the chat tool"})
-    wait(lambda: any(x["ev"] == "recap_dropped" for x in events()), 30, "recap after send_chat dropped")
+    wait(lambda: any(m["kind"] == "work" for m in log()[n0:]), 30, "end after send_chat")
     wait(idle, 30, "idle after send_chat")
-    L = log()[n0:]
-    check([(m["kind"], m["text"]) for m in L] == [("user", "CHAT hello from the chat tool"), ("chat", "hello from the chat tool")],
-          "send_chat logs kind chat, its call and result leave no tool/echo lines, and the recap after it is dropped: %r" % [(m["kind"], m["text"]) for m in L])
-    check(not any(x.get("fallback") for x in events() if x["ev"] == "turn" and x["first"] == n0), "a turn that sent to the chat gets no fallback")
-
-    n0 = len(log())
-    req({"op": "send", "text": "plain question"})
-    wait(lambda: any(m["kind"] == "chat" for m in log()[n0:]), 30, "fallback chat")
-    wait(idle, 30, "idle after fallback")
     L = [(m["kind"], m["text"]) for m in log()[n0:]]
-    check(L == [("user", "plain question"), ("chat", "ok")], "with no send, the final text goes to the chat as kind chat: %r" % L)
-    check(any(x["ev"] == "fallback" and x["turn"] == n0 for x in events()) and
-          any(x["ev"] == "turn" and x["first"] == n0 and x["fallback"] for x in events()), "the fallback is recorded")
+    nm = L[1][1][1:L[1][1].index("]")]
+    check(L == [("user", "CHAT hello from the chat tool"), L[1], ("chat", "hello from the chat tool"), ("work", "[%s] (kickoff %d) said it" % (nm, n0 + 1))],
+          "send_chat logs kind chat; the end record is the instance's last text: %r" % L)
+    check(any(x["spoke"] and not x["net"] for x in ends(n0)), "an instance that sent to the chat gets no safety net")
 
     n0 = len(log())
     req({"op": "send", "text": "ZOOM please"})
-    wait(lambda: any(m["text"] == "zoomed" for m in log()[n0:]), 30, "reply after zoom")
+    wait(lambda: any(m["kind"] == "work" for m in log()[n0:]), 30, "end after zoom")
     wait(idle, 30, "idle after zoom")
     L = [(m["kind"], m["text"]) for m in log()[n0:]]
-    # since 2521655 zoom and date are logged like any tool, as the gist does (user, 10 Oct)
-    check([k for k, _ in L] == ["user", "tool", "echo", "chat"] and "mcp__optchat__zoom" in L[1][1] and L[2][1].startswith("0+0|"),
-          "a zoom is logged like any tool: its call and its result, then the reply: %r" % [(k, x[:60]) for k, x in L])
+    check([k for k, _ in L] == ["user", "start", "chat", "work"] and L[2][1] == "zoomed", "a zoom, like any step, stays out of the log: %r" % [(k, x[:60]) for k, x in L])
 
     c2 = req({"op": "card", "do": "new", "note": "Other Note", "line": 7, "text": "a comment"})["id"]
     n0 = len(log())
-    req({"op": "send", "text": '[[Other Note]] L7 #%s: "a line" CARD %s please' % (c2, c2), "later": True})
-    wait(lambda: any(m["kind"] in ("talk", "chat") and m["text"] == "noted" for m in log()[n0:]), 30, "reply after answer_card")
+    req({"op": "send", "text": '[[Other Note]] L7 #%s: "a line" CARD %s please' % (c2, c2)})
+    wait(lambda: any(m["kind"] == "work" for m in log()[n0:]), 30, "end after answer_card")
     wait(idle, 30, "idle after answer_card")
     L = [(m["kind"], m["text"]) for m in log()[n0:]]
-    check(L == [("user", '[[Other Note]] L7 #%s: "a line" CARD %s please' % (c2, c2)), ("answer", "#%s on [[Other Note]] L7: card answer" % c2), ("talk", "noted")],
-          "answer_card logs kind answer, and a card-only turn gets no chat fallback: %r" % L)
+    nm = L[1][1][1:L[1][1].index("]")] if len(L) > 1 else ""
+    check(L == [("user", '[[Other Note]] L7 #%s: "a line" CARD %s please' % (c2, c2)), L[1], ("answer", "#%s on [[Other Note]] L7: card answer" % c2), ("work", "[%s] (kickoff %d) noted" % (nm, n0 + 1))],
+          "answer_card logs kind answer, and a card message gets no chat: %r" % L)
     card = [c for c in json.load(open(CARDS))["cards"] if c["id"] == c2][0]
     check([m["text"] for m in card["thread"]] == ["a comment", "card answer"], "answer_card lands on the card")
 
     n0 = len(log())
     req({"op": "send", "text": "CHATFAIL"})
-    wait(lambda: any(m["kind"] == "chat" for m in log()[n0:]), 30, "fallback after a failed send")
+    wait(lambda: any(m["kind"] == "work" for m in log()[n0:]), 30, "end after a failed send")
     wait(idle, 30, "idle after failed send")
     L = [(m["kind"], m["text"]) for m in log()[n0:]]
-    check(L[1][0] == "echo" and "send_chat failed" in L[1][1] and L[-1] == ("chat", "ok"),
-          "a failed send is remembered as an echo, and the fallback still answers: %r" % L)
+    check([k for k, _ in L] == ["user", "start", "chat", "work"] and L[2][1] == "ok" and "it sent no reply" in L[3][1],
+          "a failed send does not count as a reply: the safety net still answers: %r" % L)
+    check(any(x["net"] and not x["spoke"] for x in ends(n0)), "the safety net is recorded")
+
+    n0 = len(log())
+    req({"op": "send", "text": "plain question"})
+    wait(lambda: any(m["kind"] == "work" for m in log()[n0:]), 30, "end after plain question")
+    wait(idle, 30, "idle after plain question")
 
     # what the chat venue shows (the web chat page and Telegram share `Msg::in_chat`; Telegram
     # pushes kind chat alone, unit-tested in log.rs): the real binary's page, served against D
@@ -527,7 +384,7 @@ try:
                 page = urllib.request.urlopen("http://127.0.0.1:%d/tk/f/log?since=-1" % port, timeout=2).read().decode(); break
             except Exception: time.sleep(0.1)
         check("hello from the chat tool" in page and "plain question" in page, "the chat page shows user messages and chat sends")
-        check("said it" not in page and "noted" not in page, "the chat page hides the agent's plain text")
+        check("said it" not in page and "noted" not in page and "kickoff" not in page, "the chat page hides end records and kickoffs")
         check("card answer" not in page and "CARD c2" not in page, "the chat page hides card comments and card answers")
         check("send_chat failed" not in page and "seed message" not in page, "the chat page hides steps and notes")
         get = lambda u: urllib.request.urlopen("http://127.0.0.1:%d/tk%s" % (port, u), timeout=40).read().decode()
@@ -559,7 +416,7 @@ try:
               "a card the agent opens reaches the open page through the held request (%.1fs): %r" % (held.get("s", -1), new))
         wait(idle, 30, "idle after new_card")
         L = [(m["kind"], m["text"]) for m in log()[n0:]]
-        check(L[0] == ("user", "NEWCARD at line five") and L[1][0] == "answer" and L[1][1].startswith("new warn card #")
+        check(L[0] == ("user", "NEWCARD at line five") and L[1][0] == "start" and L[2][0] == "answer" and L[2][1].startswith("new warn card #")
               and not any(k in ("tool", "echo") for k, _ in L), "new_card is logged as kind answer, its call quiet: %r" % L)
         s3 = new[0]["id"] if new else ""
 
@@ -664,11 +521,12 @@ try:
     check(any(m["kind"] == "echo" and "restarting" in m["text"] for m in log()[n0:]), "restart noted in the chat log")
     n0 = len(log())
     req({"op": "send", "text": "after restart"})
-    wait(idle, 30, "turn after restart")
-    check(any(m["kind"] in ("talk", "chat") for m in log()[n0:]), "a turn works after the restart")
+    wait(lambda: any(m["kind"] == "work" for m in log()[n0:]), 30, "instance after restart")
+    wait(idle, 30, "idle after restart")
+    check(any(m["kind"] == "chat" for m in log()[n0:]), "an instance answers after the restart")
     check(req({"op": "restart"})["ok"] is True and not (time.sleep(3) or eng.poll()), "a second restart works too")
 
-    check(os.path.isdir(os.path.join(D, ".git")), "chat directory committed after turns")
+    check(os.path.isdir(os.path.join(D, ".git")), "chat directory committed after instances")
 finally:
     eng.kill()
 print("\n%d failure(s); dir %s" % (len(fails), D))

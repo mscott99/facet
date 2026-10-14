@@ -6,14 +6,13 @@
 // every function here swallows its own errors, and takes no lock but its own.
 //
 //   engine   start: binary, settings, what was loaded
-//   req      one API request: what for (turn+step, node+try, prime), usage, ms, Claude Code version
-//   turn     one fresh call: message ids, settle wait, view size and how much of it the previous
-//            turn's view shared (the cache's chance), steps, duration, how it ended
+//   req      one API request: what for (instance+step, node+try, prime), usage, ms, Claude Code version
+//   start    an instance started: its kickoff id, settle wait, priming, view size and how much of
+//            it the previous start's view shared (the cache's chance)
+//   instance an instance ended: status, requests, eq, tools, whether it spoke, the safety net
 //   node     one compactor node: tries' sizes, the kept size, gate wait, duration, failure
-//   agent    one subagent: what it was asked, its requests and tokens (its own steps never
-//            reach the chat, so this is the only place they are counted), its report's size
 //   limits   the subscription's rate_limit_info, each time it changes
-//   input    a message arrived: how it was taken (starting / queued / held / delivered)
+//   input    a message arrived: how it was taken (starting / queued)
 //   system   a new system prompt version (its text is stored once, by hash, beside the log)
 //   notice   every notice shown to the user
 use serde_json::{json, Value};
@@ -22,7 +21,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 static FILE: Mutex<()> = Mutex::new(());
-/// The previous turn's rendered view, to measure how much of it the next one shares.
+/// The previous start's rendered view, to measure how much of it the next one shares.
 static PREV_VIEW: Mutex<String> = Mutex::new(String::new());
 
 pub fn log(dir: &Path, ev: &str, mut fields: Value) {
@@ -49,7 +48,7 @@ pub fn req(dir: &Path, kind: &str, r: &super::claude::Req, cc: &str, ms: u128, m
     log(dir, "req", tag);
 }
 
-/// View measurements for a turn: size, lines, and the prefix shared with the previous turn's
+/// View measurements for a start: size, lines, and the prefix shared with the previous turn's
 /// view (in bytes, and as the last whole block inside it: where a cache entry could be read back).
 pub fn view_stats(view: &str, parts: usize) -> Value {
     let mut prev = PREV_VIEW.lock().unwrap_or_else(|p| p.into_inner());

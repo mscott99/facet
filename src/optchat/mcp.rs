@@ -2,13 +2,9 @@
 // on a loopback port with a random secret in the path (§9: "MCP over HTTP on a local port").
 // The tool list is a constant: it is part of every cached prefix.
 //
-// The master also gets the output tools (README, "Stream and venues"): send_chat, its only way
-// to speak in the chat venue, and the card tools (new_card, answer_card, fix_card, close_card;
-// list_cards only reads), its way to speak on a line of a note.
-// A subagent (`facet spawn`) is pointed at a second path of the same server, which lists the
-// very same tools, byte for byte and in the same order, since the tool list is part of the
-// prefix it shares with the master (README §19); it refuses the ones that write (`WRITES`): a
-// subagent reports, it never speaks to the user or touches a card.
+// Every instance also gets the output tools (README, "Stream and venues"): send_chat, its only
+// way to speak in the chat venue, and the card tools (new_card, answer_card, fix_card,
+// close_card; list_cards only reads), its way to speak on a line of a note.
 use super::engine::Engine;
 use super::{flat, prompts};
 use serde_json::{json, Value};
@@ -46,14 +42,9 @@ pub fn tools() -> Value {
 }
 
 /// What a successful output-tool call returns (or starts with: a new card's result goes on to
-/// give its id). The turn loop leaves the call and this result out of the log (the `chat` or
-/// `answer` message already says it); anything else, an error, is logged as an echo so a
-/// failed send is remembered.
+/// give its id).
 pub const SENT: &str = "sent";
 pub const ANSWERED: &str = "answered";
-
-/// The tools a subagent is refused: everything that speaks or changes a card.
-pub const WRITES: [&str; 6] = ["send_chat", "send_file", "new_card", "answer_card", "fix_card", "close_card"];
 
 /// The card tools that speak (and so log themselves); `list_cards` only reads.
 pub fn card_action(tool: &str) -> Option<&'static str> {
@@ -61,11 +52,6 @@ pub fn card_action(tool: &str) -> Option<&'static str> {
         "new_card" => Some("new"), "answer_card" => Some("reply"), "fix_card" => Some("fix"),
         "close_card" => Some("close"), "list_cards" => Some("list"), _ => None,
     }
-}
-
-/// The path a subagent is given: the same server and tool list, the writing tools refused.
-pub fn agent_url(master: &str) -> String {
-    match master.strip_suffix("/mcp") { Some(b) => format!("{}/agent", b), None => master.to_string() }
 }
 
 /// zoom(id, n): n = 1 gives the message whole; otherwise the two lines under id+n.
@@ -106,12 +92,10 @@ pub fn start(e: Arc<Engine>) -> String {
     let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
     let sec = secret();
     let path = format!("/{}/mcp", sec);
-    let agent = format!("/{}/agent", sec);
     let url = format!("http://127.0.0.1:{}{}", port, path);
     std::thread::spawn(move || {
         for mut req in server.incoming_requests() {
-            let full = req.url() == path;
-            if !full && req.url() != agent {
+            if req.url() != path {
                 let _ = req.respond(tiny_http::Response::empty(404));
                 continue;
             }
@@ -121,7 +105,7 @@ pub fn start(e: Arc<Engine>) -> String {
             }
             let mut body = String::new();
             let _ = req.as_reader().read_to_string(&mut body);
-            let reply = serde_json::from_str::<Value>(&body).ok().and_then(|v| handle(&e, &v, full));
+            let reply = serde_json::from_str::<Value>(&body).ok().and_then(|v| handle(&e, &v));
             let resp = match reply {
                 None => tiny_http::Response::from_string("").with_status_code(202),
                 Some(r) => tiny_http::Response::from_string(r.to_string()).with_header(
@@ -134,7 +118,7 @@ pub fn start(e: Arc<Engine>) -> String {
 }
 
 /// One JSON-RPC message; None for a notification.
-fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
+fn handle(e: &Arc<Engine>, v: &Value) -> Option<Value> {
     let id = v.get("id")?.clone();
     let method = v["method"].as_str().unwrap_or("");
     let result = match method {
@@ -144,7 +128,6 @@ fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
             "serverInfo": {"name": "optchat", "version": "1"}
         }),
         "ping" => json!({}),
-        // one list for both paths: a subagent's tool list must be the master's (§19)
         "tools/list" => json!({"tools": tools()}),
         "tools/call" => {
             let a = &v["params"]["arguments"];
@@ -159,13 +142,11 @@ fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
                 }
             }
             let (text, err) = match v["params"]["name"].as_str().unwrap_or("") {
-                t if !full && WRITES.contains(&t) => (format!(
-                    "{} is refused: a subagent does not speak to the user or change cards. Put what you would say in your report.", t), true),
                 "zoom" => (match (num("id"), num("n")) {
                     (Some(i), Some(n)) => zoom(&e.mem.lock().unwrap().store, i, n),
-                    // zoom("Name"): an agent's whole run (§6 of the gist)
-                    (None, _) if a["id"].is_string() => super::agent::transcript(e, &st("id")),
-                    _ => "zoom needs id and n (or an agent's name).".into()
+                    // zoom("Name"): an instance's whole run (§6 of the gist)
+                    (None, _) if a["id"].is_string() => super::instance::transcript(e, &st("id")),
+                    _ => "zoom needs id and n (or an instance's name).".into()
                 }, false),
                 "date" => (match num("id") { Some(i) => date(&e.mem.lock().unwrap().store, i), None => "date needs id.".into() }, false),
                 // the mem lock is not held here: logging takes it
@@ -211,12 +192,9 @@ fn handle(e: &Arc<Engine>, v: &Value, full: bool) -> Option<Value> {
 mod tests {
     use super::*;
     #[test]
-    fn a_subagent_sees_the_master_tool_list_and_is_refused_writes() {
-        assert_eq!(agent_url("http://127.0.0.1:5/abc/mcp"), "http://127.0.0.1:5/abc/agent");
+    fn every_instance_has_the_output_tools() {
         let names = |t: Value| t.as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         assert_eq!(names(tools()), ["zoom", "date", "send_chat", "send_file", "new_card", "answer_card", "fix_card", "close_card", "list_cards"]);
-        for w in WRITES { assert!(names(tools()).contains(&w.to_string())); }
-        assert!(!WRITES.contains(&"list_cards") && !WRITES.contains(&"zoom") && !WRITES.contains(&"date"));
     }
 
     #[test]

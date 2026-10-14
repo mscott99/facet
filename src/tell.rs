@@ -8,8 +8,8 @@
 //      next real message. That is a mechanism of the Telegram path, hooked in once, here.
 use crate::cfg::Cfg;
 
-/// `later`: a turn of its own, after the running one, rather than into it at its next tool call.
-pub fn tell(cfg: &Cfg, text: &str, origin: &str, later: bool) -> Result<String, String> {
+/// Every message starts an instance of its own (optchat/turn.rs).
+pub fn tell(cfg: &Cfg, text: &str, origin: &str) -> Result<String, String> {
     let text = text.trim();
     if text.is_empty() { return Err("empty".into()) }
     let prelude = crate::tg::take_prelude();
@@ -18,14 +18,14 @@ pub fn tell(cfg: &Cfg, text: &str, origin: &str, later: bool) -> Result<String, 
         None => text.to_string(),
     };
     let _ = origin;
-    send(cfg, &body, later)?;
+    send(cfg, &body)?;
     Ok(body)
 }
 
 /// The one adapter: the inbox (optchat/inbox.rs), a file on disk the engine drains. It is
 /// written before anyone is answered, so a message is kept whether or not the engine is up.
-fn send(_cfg: &Cfg, line: &str, later: bool) -> Result<(), String> {
-    crate::optchat::inbox::push(line, later).map(|_| ())
+fn send(_cfg: &Cfg, line: &str) -> Result<(), String> {
+    crate::optchat::inbox::push(line).map(|_| ())
 }
 
 /// Is the input path actually there? Not a predicate on a noun — a health check on one adapter.

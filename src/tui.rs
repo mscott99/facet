@@ -2,28 +2,15 @@
 // so the terminal's own scrollback works, §10) with an editable prompt line underneath.
 // Closing it does not stop the engine; the chat goes on and other routes still reach it.
 //
-//   Enter sends (into a running turn, at its next tool call) · Alt-Enter sends for a turn of its
-//   own, after the running one · Ctrl-J: new line · Ctrl-C or Ctrl-D: leave (the engine and any
-//   running turn carry on) · /cancel stops the turn · /help /usage /tree /view /status /stats /resume
+//   Enter sends (each message starts an instance) · Ctrl-J: new line · Ctrl-C or Ctrl-D: leave
+//   (the engine and running instances carry on) · /cancel stops them · /help /usage /tree /view
+//   /status /stats /resume
 use crate::optchat::engine;
 use rustyline::error::ReadlineError;
-use rustyline::{Cmd, ConditionalEventHandler, DefaultEditor, Event, EventContext, EventHandler, ExternalPrinter,
-    KeyCode, KeyEvent, Modifiers, RepeatCount};
+use rustyline::{Cmd, DefaultEditor, ExternalPrinter, KeyCode, KeyEvent, Modifiers};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-/// Set by Alt-Enter for the line it accepts: that line is sent for a turn of its own.
-/// (Terminals send Shift-Enter as a plain Enter; Claude Code's /terminal-setup makes it Alt-Enter.)
-static LATER: AtomicBool = AtomicBool::new(false);
-struct Later;
-impl ConditionalEventHandler for Later {
-    fn handle(&self, _: &Event, _: RepeatCount, _: bool, _: &EventContext) -> Option<Cmd> {
-        LATER.store(true, Ordering::SeqCst);
-        Some(Cmd::AcceptLine)
-    }
-}
 
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
@@ -46,7 +33,6 @@ pub fn run() {
     if !std::io::stdin().is_terminal() { return piped(&dir) }
     let mut rl = DefaultEditor::new().expect("terminal");
     rl.bind_sequence(KeyEvent(KeyCode::Char('j'), Modifiers::CTRL), Cmd::Newline);
-    rl.bind_sequence(KeyEvent(KeyCode::Enter, Modifiers::ALT), EventHandler::Conditional(Box::new(Later)));
     let mut printer = rl.create_external_printer().expect("printer");
     watch(&dir, move |o| printer.print(o).is_ok());
     editor(&dir, rl);
@@ -57,7 +43,7 @@ fn piped(dir: &std::path::Path) {
     watch(dir, |o| { print!("{}", o); std::io::stdout().flush().is_ok() });
     for line in std::io::stdin().lines().map_while(Result::ok) {
         if line.trim().is_empty() { continue }
-        if let Err(e) = send(dir, &line, false) { eprintln!("{}", e); return }
+        if let Err(e) = send(dir, &line) { eprintln!("{}", e); return }
     }
     std::thread::sleep(std::time::Duration::from_millis(500));
     while engine::request(dir, json!({"op": "status"})).map(|v| v["busy"] == true).unwrap_or(false) {
@@ -68,17 +54,17 @@ fn piped(dir: &std::path::Path) {
 
 /// Print the engine's events through `out` until the connection ends.
 /// Texts this client sent and has not seen logged yet: their log echo is not printed again,
-/// since the prompt line already shows them -- unless they are waiting for a turn of their own,
-/// which lands long after it was typed: those are dropped from here when the engine says
-/// `later`, so the log echo prints them again where they go into the chat.
+/// since the prompt line already shows them -- unless they wait behind other starts, which
+/// land later: those are dropped from here when the engine says `queued`, so the log echo
+/// prints them again where they go into the chat.
 static MINE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 fn mine(text: &str) -> bool {
     let mut m = MINE.lock().unwrap();
     match m.iter().position(|x| x == text) { Some(k) => { m.remove(k); true } None => false }
 }
-fn send(dir: &std::path::Path, text: &str, later: bool) -> Result<Value, String> {
+fn send(dir: &std::path::Path, text: &str) -> Result<Value, String> {
     MINE.lock().unwrap().push(text.trim().to_string());
-    engine::request(dir, json!({"op": "send", "text": text, "later": later}))
+    engine::request(dir, json!({"op": "send", "text": text}))
 }
 
 /// Print the engine's events through `out_fn`; if the engine goes away (a restart), keep
@@ -120,14 +106,11 @@ fn watch(dir: &std::path::Path, mut out_fn: impl FnMut(String) -> bool + Send + 
                     }
                 }
                 "accepted" => match s("how").as_str() {
-                    "queued" => Some(format!("{}· queued: it joins the turn that is starting{}", DIM, OFF)),
-                    "held" => Some(format!("{}· the agent is replying: this goes in at its next tool call, or starts the next turn{}", DIM, OFF)),
-                    "delivered" => Some(format!("{}· delivered: the agent sees it when the running tool finishes{}", DIM, OFF)),
-                    "later" => {
-                        // it goes in once the running turn is done: stop hiding its log echo, so
-                        // it is printed again at the point where it joins the chat
+                    "queued" => {
+                        // it is logged once the instances before it have started: stop hiding its
+                        // log echo, so it is printed again where it goes into the chat
                         mine(&s("text"));
-                        Some(format!("{}· next turn: starts when the running turn is done ({} waiting){}", DIM, v["waiting"], OFF))
+                        Some(format!("{}· queued: its instance starts after the ones before it{}", DIM, OFF))
                     }
                     _ => None,
                 },
@@ -171,10 +154,8 @@ fn watch(dir: &std::path::Path, mut out_fn: impl FnMut(String) -> bool + Send + 
 fn editor(dir: &std::path::Path, mut rl: DefaultEditor) {
     let dir = dir.to_path_buf();
     loop {
-        LATER.store(false, Ordering::SeqCst);
         match rl.readline("› ") {
             Ok(line) => {
-                let later = LATER.load(Ordering::SeqCst);
                 let text = line.trim();
                 if text.is_empty() { continue }
                 let _ = rl.add_history_entry(text);
@@ -188,7 +169,7 @@ fn editor(dir: &std::path::Path, mut rl: DefaultEditor) {
                         .map(|v| format!("{}· model {} · /model opus|sonnet to switch{}", DIM, v["model"].as_str().unwrap_or("?"), OFF)),
                     t if t.starts_with("/model ") => engine::request(&dir, json!({"op": "model", "name": t[7..].trim()}))
                         .map(|v| if v["ok"] == true {
-                            format!("{}· next turns use {} (its first turn re-caches the view once){}", DIM, v["model"].as_str().unwrap_or("?"), OFF)
+                            format!("{}· new instances use {} (the first re-caches the view once){}", DIM, v["model"].as_str().unwrap_or("?"), OFF)
                         } else { format!("{}· {}{}", DIM, v["error"].as_str().unwrap_or("refused"), OFF) }),
                     t if t == "/zoom" || t.starts_with("/zoom ") => {
                         // "/zoom 12", "/zoom 8 4", "/zoom 8+4" (as lines are written in /view)
@@ -210,7 +191,7 @@ fn editor(dir: &std::path::Path, mut rl: DefaultEditor) {
                     // a mistyped command must not become a paid turn; a path still goes through
                     t if t.starts_with('/') && !t.contains(' ') && !t[1..].contains('/') =>
                         Ok(format!("{}· unknown command {} · /help lists them{}", DIM, t, OFF)),
-                    _ => send(&dir, &line, later).map(|_| String::new()),
+                    _ => send(&dir, &line).map(|_| String::new()),
                 };
                 match reply {
                     Ok(s) if !s.is_empty() => println!("{}", s),

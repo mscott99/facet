@@ -3,24 +3,24 @@
 // is stale and is taken over. The same socket is how everything else talks to the engine:
 // the terminal client, `facet send`, the web and Telegram routes. One JSON object per line.
 //
-//   -> {"op":"send","text":"...","later":bool}  a user message (queued, or delivered mid-run;
-//                                     with later, a turn of its own after the running one)
-//   -> {"op":"cancel"}                stop the wait or the running call
-//   -> {"op":"note","text":..,"date":..}  import a note (queued during a turn; duplicates skipped)
+//   -> {"op":"send","text":"..."}     a user message: it starts an instance of its own
+//                                     (`later`, from older clients, is ignored)
+//   -> {"op":"spawn","task":..,"model":..,"effort":..,"desc":..,"from":..,"wait":bool}
+//                                     a task handed on: an instance like any other; with wait,
+//                                     the reply comes at its end, with its end record
+//   -> {"op":"cancel"}                stop the start that waits, and every running instance
+//   -> {"op":"note","text":..,"date":..}  import a note (duplicates skipped)
 //   -> {"op":"card","do":"new|reply|fix|kind|close|delete|apply|list",..}  a card (cards.rs):
 //                                     what the agent does on one is logged as kind `answer`;
-//                                     the master's MCP card tools are the same call (`card` below)
+//                                     the MCP card tools are the same call (`card` below)
 //   -> {"op":"answer","id":..,"text":..,"apply":..}  the old name of {"op":"card","do":"reply"}
 //   -> {"op":"restart","serve":bool}  queue a restart of this engine (and of serve, if asked) for
-//                                     when the running turn has ended and no detached spawn is
-//                                     alive; returns at once ("restart queued")
+//                                     when no instance is starting or running; returns at once
 //   -> {"op":"resume"}                lift a compactor pause (`facet resume`)
 //   -> {"op":"view"} / {"op":"status"} / {"op":"zoom","id":..,"n":..}
-//   -> {"op":"model","name":..}       the master model for the next turns
+//   -> {"op":"model","name":..}       the model of the instances user messages start
 //   -> {"op":"watch"}                 then a stream of events, one per line:
 //        {"ev":"msg","i":..,"kind":..,"text":..}   a logged message
-//        {"ev":"delta","text":..}                  streamed reply text (not logged as such)
-//        {"ev":"thought","text":..}                model reasoning: shown, never logged (§2)
 //        {"ev":"notice","text":..}                 engine status
 //        {"ev":"state","busy":bool,"queued":n}
 use super::claude::Req;
@@ -220,17 +220,14 @@ pub struct Engine {
     pub mcp_url: OnceLock<String>,
     watchers: Mutex<Vec<UnixStream>>,
     spend: Mutex<VecDeque<(Instant, f64)>>,
-    /// eq by kind since the last turn ended
-    pub tally: Mutex<std::collections::BTreeMap<String, f64>>,
-    /// the last `rate_limit_info` any call reported, and the session use at the last turn's end
+    /// the last `rate_limit_info` any call reported
     limits: Mutex<Value>,
-    pub util_mark: Mutex<Option<f64>>,
-    /// the master model, switchable at runtime (/model); starts as chat.model
+    /// the model of the instances user messages start, switchable at runtime (/model); starts as chat.model
     model: Mutex<String>,
     /// a restart queued by `facet restart`: Some(also_serve); fires when idle (see `restart_if_idle`)
     pub restart: Mutex<Option<bool>>,
-    /// detached subagents alive (agent.rs): a restart waits for them, their readers are threads of this process
-    pub spawns: std::sync::atomic::AtomicUsize,
+    /// instances alive (instance.rs): a restart waits for them, their readers are threads of this process
+    pub instances: std::sync::atomic::AtomicUsize,
 }
 
 /// An engine over a chat directory, with no socket, compactor or MCP server: for tests.
@@ -245,9 +242,9 @@ pub fn bare(dir: &Path, mcp_url: &str) -> Arc<Engine> {
         mem: Mutex::new(Mem::new(dir.to_path_buf(), store, view, cview)),
         changed: Condvar::new(), gate: Default::default(),
         turn: Mutex::new(turn::State::default()), compact_sys: state_dir(dir).join("system.txt"), mcp_url: OnceLock::new(),
-        watchers: Mutex::new(Vec::new()), spend: Mutex::new(VecDeque::new()), tally: Default::default(),
-        limits: Mutex::new(Value::Null), util_mark: Mutex::new(None),
-        restart: Mutex::new(None), spawns: Default::default(),
+        watchers: Mutex::new(Vec::new()), spend: Mutex::new(VecDeque::new()),
+        limits: Mutex::new(Value::Null),
+        restart: Mutex::new(None), instances: Default::default(),
     });
     let _ = e.mcp_url.set(mcp_url.to_string());
     let _ = std::fs::create_dir_all(state_dir(dir));
@@ -298,15 +295,6 @@ impl Engine {
         first
     }
 
-    /// A message with images (a tool result that returned some): its text is logged as any
-    /// other, and its images are kept beside the log, `chat/images/<id>.json`, so that
-    /// zoom(id, 1) gives the message "whole, with its images" (§3 of the gist's prompt).
-    pub fn log_images(self: &Arc<Self>, kind: &str, text: &str, images: &[Value]) {
-        let Some(i) = self.log_at(kind, text, &super::store::now_iso()) else { return };
-        if images.is_empty() { return }
-        if let Err(x) = super::store::put_images(&self.dir, i, images) { self.notice(&format!("cannot keep the images of message {}: {}", i, x)); }
-    }
-
     fn log_one(self: &Arc<Self>, kind: &str, text: &str, date: &str) -> Option<usize> {
         let r = {
             let mut m = self.mem.lock().unwrap();
@@ -330,7 +318,6 @@ impl Engine {
     pub fn spend(&self, kind: &str, r: &Req) {
         usage::record(&self.dir, kind, r);
         let x = usage::eq(&r.usage);
-        *self.tally.lock().unwrap().entry(kind.to_string()).or_default() += x;
         let mut s = self.spend.lock().unwrap();
         s.push_back((Instant::now(), x));
         while s.front().is_some_and(|f| f.0.elapsed() > Duration::from_secs(3600)) { s.pop_front(); }
@@ -384,8 +371,15 @@ impl Engine {
         else { self.notice(&line) }
     }
 
-    /// Messages waiting for a turn.
-    pub fn queued(&self) -> usize { let t = self.turn.lock().unwrap(); t.queue.len() + t.held.len() + t.later.len() }
+    /// Messages and tasks waiting to start.
+    pub fn queued(&self) -> usize { self.turn.lock().unwrap().queue.len() }
+
+    /// Instances running, for the routes' busy marks.
+    pub fn emit_state(&self) {
+        let n = self.instances.load(std::sync::atomic::Ordering::SeqCst);
+        let q = self.queued();
+        self.emit(json!({"ev": "state", "busy": n > 0 || q > 0, "queued": q, "instances": n}));
+    }
 
     /// Lift the pause and resume the compactor now: for `facet resume` and for proof the limit is
     /// gone (a call that succeeded). Announces once (notice + Telegram) only if it was parked.
@@ -470,11 +464,10 @@ impl Engine {
             }
         });
     }
-    /// The model the next turn uses.
+    /// The model the next user message's instance uses.
     pub fn model(&self) -> String { self.model.lock().unwrap().clone() }
 
     pub fn limits(&self) -> Value { self.limits.lock().unwrap().clone() }
-    pub fn session_used(&self) -> Option<f64> { self.limits.lock().unwrap()["unifiedWindows"]["five_hour"]["utilization"].as_f64() }
 
     pub fn hour_eq(&self) -> f64 {
         self.spend.lock().unwrap().iter().filter(|f| f.0.elapsed() <= Duration::from_secs(3600)).map(|f| f.1).sum()
@@ -484,20 +477,21 @@ impl Engine {
         let mut m = self.mem.lock().unwrap();
         let unbuilt = m.view.parts.iter().filter(|p| !m.store.built(p.l, p.i)).count();
         let t = self.turn.lock().unwrap();
+        let n = self.instances.load(std::sync::atomic::Ordering::SeqCst);
         json!({
             "messages": m.store.t(), "view_parts": m.view.parts.len(), "view_bytes": m.view.size(&m.store),
             "unsummarized": unbuilt, "compacting": m.busy.len(), "failing": m.failed.len(), "held": m.held.len(),
             "compact_view_bytes": m.cview.size(&m.store),
             "paused": m.pause_reason(),
             "paused_until": m.paused().and_then(|u| u.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
-            "busy": t.running, "queued": t.queue.len() + t.held.len() + t.later.len(), "later": t.later.len(),
+            "busy": t.running || n > 0, "queued": t.queue.len(), "instances": n,
             "phase": t.phase, "hour_eq": self.hour_eq().round(),
             "model": self.model(), "compact_model": self.conf.compact_model,
             "mcp": self.mcp_url.get().is_some(),
             "limits": super::usage::limits_line(&self.limits()),
             "dir": self.dir.display().to_string(), "state_dir": state_dir(&self.dir).display().to_string(),
             "pause_line": m.paused().map(|u| format!("paused until {} ({}), {} message(s) queued", hhmm(u),
-                m.pause_reason().unwrap_or_default(), t.queue.len() + t.held.len() + t.later.len())),
+                m.pause_reason().unwrap_or_default(), t.queue.len())),
         })
     }
 }
@@ -571,17 +565,14 @@ pub fn serve() -> ! {
         mem: Mutex::new(Mem::new(dir.clone(), store, view, cview)),
         changed: Condvar::new(), gate: Default::default(),
         turn: Mutex::new(turn::State::default()), compact_sys, mcp_url: OnceLock::new(),
-        watchers: Mutex::new(Vec::new()), spend: Mutex::new(VecDeque::new()), tally: Default::default(),
+        watchers: Mutex::new(Vec::new()), spend: Mutex::new(VecDeque::new()),
         limits: Mutex::new(std::fs::read_to_string(sd.join("limits.json")).ok()
             .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null)),
-        util_mark: Mutex::new(None),
         model: Mutex::new(String::new()),
-        restart: Mutex::new(None), spawns: Default::default(),
+        restart: Mutex::new(None), instances: Default::default(),
     });
     *e.model.lock().unwrap() = std::fs::read_to_string(sd.join("model")).ok().map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty()).unwrap_or_else(|| e.conf.model.clone());
-    let u = e.session_used();
-    *e.util_mark.lock().unwrap() = u;
     {
         let m = e.mem.lock().unwrap();
         let c = &e.conf;
@@ -630,25 +621,20 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
         let reply = match v["op"].as_str().unwrap_or("") {
             "send" => {
                 let text = v["text"].as_str().unwrap_or("").trim().to_string();
-                let later = v["later"].as_bool().unwrap_or(false);
-                if text.is_empty() { json!({"ok": false, "error": "empty"}) } else { turn::input(e, text, later); json!({"ok": true}) }
+                if text.is_empty() { json!({"ok": false, "error": "empty"}) } else { turn::input(e, text); json!({"ok": true}) }
             }
             "cancel" => { turn::cancel(e); json!({"ok": true}) }
-            // a detached subagent (§9): its own `claude -p`, owned by this engine, not by the
-            // turn that asked for it, so it outlives the turn's reply; its report arrives
-            // later as a message of its own
-            // With "wait", this connection is held until the report and gets it in the reply
-            // (`facet spawn --wait`); the report is then logged as work and starts no turn.
+            // a task handed on (`facet spawn`): an instance like any other, which answers the
+            // user itself and writes its own end record. With "wait", this connection is held
+            // until that end record and gets it in the reply (`facet spawn --wait`).
             "spawn" => {
                 let wait = v["wait"].as_bool().unwrap_or(false);
                 let (tx, rx) = std::sync::mpsc::channel();
-                match super::agent::spawn(e, v["model"].as_str().unwrap_or(""), v["effort"].as_str().unwrap_or(""), v["kind"].as_str().unwrap_or(""),
-                    v["desc"].as_str().unwrap_or(""), v["task"].as_str().unwrap_or(""), wait.then_some(tx)) {
+                match turn::spawn(e, v["model"].as_str().unwrap_or(""), v["effort"].as_str().unwrap_or(""),
+                    v["desc"].as_str().unwrap_or(""), v["task"].as_str().unwrap_or(""), v["from"].as_str().unwrap_or(""), wait.then_some(tx)) {
                     Ok(id) if wait => {
-                        let Ok((report, ack)) = rx.recv() else { return };
-                        let ok = writeln!(w, "{}", json!({"ok": true, "id": id, "report": report})).and_then(|_| w.flush()).is_ok();
-                        let _ = ack.send(ok);
-                        if !ok { return }
+                        let Ok(record) = rx.recv() else { return };
+                        if writeln!(w, "{}", json!({"ok": true, "id": id, "report": record})).and_then(|_| w.flush()).is_err() { return }
                         continue;
                     }
                     Ok(id) => json!({"ok": true, "id": id}),
@@ -674,7 +660,7 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
             }
             "restart" => {
                 *e.restart.lock().unwrap() = Some(v["serve"].as_bool().unwrap_or(false));
-                e.notice("restart queued: after the running reply, once no detached agent is alive");
+                e.notice("restart queued: once no instance is starting or running");
                 // idle already (called from a shell, not from a turn): go now
                 let e2 = e.clone();
                 std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(300)); restart_if_idle(&e2); });
@@ -688,14 +674,13 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
             // zoom(id, n) as the agent sees it (§7.1), for a person
             "zoom" => {
                 // a name (zoom("Name")) gives that agent's whole run
-                if let Some(name) = v["id"].as_str() { json!({"text": super::agent::transcript(e, name)}) } else {
+                if let Some(name) = v["id"].as_str() { json!({"text": super::instance::transcript(e, name)}) } else {
                     let m = e.mem.lock().unwrap();
                     json!({"text": super::mcp::zoom(&m.store, v["id"].as_i64().unwrap_or(-1), v["n"].as_i64().unwrap_or(1))})
                 }
             }
-            // the master model for the next turns; kept in the state dir across restarts (it wins
-            // over chat.model). A new model starts with a cold cache once: its first turn writes
-            // the view again.
+            // the model of the instances user messages start; kept in the state dir across
+            // restarts (it wins over chat.model). A new model starts with a cold cache once.
             "model" => {
                 let name = v["name"].as_str().unwrap_or("").trim().to_string();
                 let ok = matches!(name.as_str(), "opus" | "sonnet" | "haiku" | "fable") || name.starts_with("claude-");
@@ -726,11 +711,10 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
     }
 }
 
-/// The two venues output reaches (README, "Stream and venues"). The log is the stream, and
-/// everything lands in it; a venue is where some of it is also delivered. `chat` is the
-/// conversation as the user reads it, on Telegram and the web chat page alike: only what
-/// lands here as kind `chat` (and the user's own messages) is shown there. The master's
-/// plain text (kind `talk`) reaches the stream only.
+/// The two venues output reaches (README, "Stream and venues"). The log is the stream; a venue
+/// is where some of it is also delivered. `chat` is the conversation as the user reads it, on
+/// Telegram and the web chat page alike: only what lands here as kind `chat` (and the user's
+/// own messages) is shown there.
 pub fn chat(e: &Arc<Engine>, text: &str) -> Result<(), String> {
     let text = text.trim();
     if text.is_empty() { return Err("empty".into()) }
@@ -747,9 +731,9 @@ pub fn card(e: &Arc<Engine>, v: &Value) -> Result<Value, String> {
     Ok(r)
 }
 
-/// Fire a queued restart if there is one and nothing would be lost: no turn running, no
-/// detached subagent alive (each has a reader thread in this process that exec would end).
-/// Called when a turn ends and when a detached agent ends. Re-execs this binary with the same
+/// Fire a queued restart if there is one and nothing would be lost: nothing starting, no
+/// instance alive (each has a reader thread in this process that exec would end). Called when
+/// the starter goes idle and when an instance ends. Re-execs this binary with the same
 /// arguments and environment: same pid (so systemd/launchd see no exit), picks up a rebuilt
 /// binary. The socket and the MCP listener are close-on-exec, so the new process finds the old
 /// lock refusing connections, calls it stale, removes it and binds afresh.
@@ -757,10 +741,9 @@ pub fn restart_if_idle(e: &Arc<Engine>) {
     use std::sync::atomic::Ordering::SeqCst;
     let Some(serve) = *e.restart.lock().unwrap() else { return };
     if e.turn.lock().unwrap().running { return }
-    let n = e.spawns.load(SeqCst);
+    let n = e.instances.load(SeqCst);
     if n > 0 {
-        if !e.restart.lock().unwrap().is_some() { return }
-        e.notice(&format!("restart waits for {} detached agent(s)", n));
+        e.notice(&format!("restart waits for {} instance(s)", n));
         return;
     }
     // let in-flight compaction finish rather than kill it mid-spend (at most 30 s)
@@ -769,9 +752,9 @@ pub fn restart_if_idle(e: &Arc<Engine>) {
         std::thread::sleep(Duration::from_millis(500));
     }
     {
-        // claim the restart exactly once; a turn that started meanwhile postpones it
+        // claim the restart exactly once; an instance that started meanwhile postpones it
         let mut r = e.restart.lock().unwrap();
-        if r.is_none() || e.turn.lock().unwrap().running || e.spawns.load(SeqCst) > 0 { return }
+        if r.is_none() || e.turn.lock().unwrap().running || e.instances.load(SeqCst) > 0 { return }
         *r = None;
     }
     e.log("echo", "(engine restarting on request: re-exec of the facet binary)");
@@ -881,6 +864,7 @@ mod tests {
     #[test]
     fn a_limit_pause_ends_by_itself() {
         use std::time::{Duration, Instant};
+        let _env = crate::optchat::CLAUDE_ENV.lock().unwrap_or_else(|p| p.into_inner());
         let d = std::env::temp_dir().join(format!("facet-limit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();

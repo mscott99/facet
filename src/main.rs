@@ -52,13 +52,13 @@ fn usage_of(cmd: &str) -> String {
         "browse" => "facet browse [out.html]   write the memory as an HTML page",
         "import" => "facet import <file>...   import notes into the chat as `note` messages",
         "stats" => "facet stats   token/request usage table",
-        "cancel" => "facet cancel   cancel the running turn",
+        "cancel" => "facet cancel   stop the start that waits and every running instance",
         "init" => "facet init   set up the config",
         "post" => "facet post <file> [slug]   publish a note at /m/<slug>",
         "unpost" => "facet unpost <slug>   unpublish a note",
         "docs" => "facet docs   list published notes",
         "send-file" => "facet send-file PATH [--caption TEXT]   send a file to Telegram",
-        "send" => "facet send [--later] <text...>   send a chat message to the agent",
+        "send" => "facet send <text...>   send a chat message: it starts an instance",
         "push" => "facet push [--log] <text...>   send text to Telegram only (--log also notes it in the chat log)",
         "answer" => "facet answer <id> <text> [--fix <replacement>]   reply on a card",
         "card" | "cards" => "facet card new|reply|fix|close|apply|list ...   work on cards",
@@ -141,8 +141,7 @@ fn main() {
             let cap = rest.iter().position(|a| a == "--caption").and_then(|i| rest.get(i + 1)).cloned();
             match tg::send_file(&cfg, &path, cap.as_deref()) { Ok(()) => println!("sent {}", path), Err(e) => die(&e) }
         }
-        "send" => match tell::tell(&cfg, &rest.iter().filter(|a| *a != "--later").cloned().collect::<Vec<_>>().join(" "),
-                                   "cli", rest.iter().any(|a| a == "--later")) {
+        "send" => match tell::tell(&cfg, &rest.iter().filter(|a| *a != "--later").cloned().collect::<Vec<_>>().join(" "), "cli") {
             Ok(line) => println!("{}", line),
             Err(e) => die(&e),
         },
@@ -166,10 +165,10 @@ fn main() {
             }
         }
 
-        // a subagent that outlives this turn (§9, detached): returns at once; its report
-        // arrives later, as a message of its own. With --wait: blocks, prints the report.
+        // hand a task to a new instance: returns its name at once; it answers the user itself
+        // and writes its own end record. With --wait: blocks, prints the end record.
         "spawn" => {
-            let (mut model, mut kind, mut desc, mut effort) = (String::new(), String::new(), String::new(), String::new());
+            let (mut model, mut desc, mut effort) = (String::new(), String::new(), String::new());
             let mut wait = false;
             let mut words = Vec::new();
             let mut file = String::new();
@@ -179,11 +178,11 @@ fn main() {
                     "--task-file" => { file = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                     "-" => { file = "-".into(); i += 1; }
                     "--model" => { model = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
-                    "--kind" => { kind = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
+                    "--kind" => { i += 2; } // from before instances: every instance is general
                     "--desc" => { desc = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                     "--effort" => { effort = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                     "--wait" => { wait = true; i += 1; }
-                    "-h" | "--help" => { println!("facet spawn [--wait] [--model M] [--effort low|medium|high|xhigh|max] [--kind general-purpose|explore] [--desc D] [--task-file PATH | - | TASK...]\n  runs on Sonnet (conf agent_model) at the master's effort, with the master's prompt, tools and view; --model opus/--effort override\n  --wait: block until the report and print it (logged as work, starts no turn)"); return; }
+                    "-h" | "--help" => { println!("facet spawn [--wait] [--model M] [--effort low|medium|high|xhigh|max] [--desc D] [--task-file PATH | - | TASK...]\n  starts an instance for the task, on Sonnet (conf agent_model) at the configured effort unless --model/--effort say otherwise;\n  it sees the log as of its start, answers the user itself and writes its own end record\n  --wait: block until its end record and print it"); return; }
                     w => { words.push(w.to_string()); i += 1; }
                 }
             }
@@ -197,7 +196,8 @@ fn main() {
                 std::fs::read_to_string(&file).unwrap_or_else(|e| die(&format!("{}: {}", file, e)))
             } else { words.join(" ") };
             match optchat::engine::request(&optchat::engine::dir(),
-                serde_json::json!({"op": "spawn", "model": model, "effort": effort, "kind": kind, "desc": desc, "task": task, "wait": wait})) {
+                serde_json::json!({"op": "spawn", "model": model, "effort": effort, "desc": desc, "task": task, "wait": wait,
+                    "from": std::env::var("FACET_INSTANCE").unwrap_or_default()})) {
                 Ok(v) if v["ok"].as_bool() == Some(true) && wait => println!("{}", v["report"].as_str().unwrap_or("")),
                 Ok(v) if v["ok"].as_bool() == Some(true) => println!("{}", v["id"].as_str().unwrap_or("")),
                 Ok(v) => die(v["error"].as_str().unwrap_or("refused")),
@@ -214,7 +214,7 @@ fn main() {
         }
         "card" | "cards" => card_cmd(&cfg, rest),
 
-        // queue a restart of the engine (re-exec) for when the reply ends and no spawn is alive
+        // queue a restart of the engine (re-exec) for when no instance is starting or running
         "restart" => match optchat::engine::request(&optchat::engine::dir(),
             serde_json::json!({"op": "restart", "serve": rest.iter().any(|a| a == "--serve")})) {
             Ok(v) if v["ok"].as_bool() == Some(true) => println!("restart queued"),
@@ -272,23 +272,22 @@ facet chat                  the conversation in this terminal (starts the engine
 facet engine                run the engine in the foreground (LaunchAgent: launchd/com.facet.engine.plist)
 facet view                  print the view the model sees
 facet browse [out.html]     the whole memory tree as one page (also served at /tree)
-facet import <file>...      add files to the memory, one note each (queued until a running turn is done)
+facet import <file>...      add files to the memory, one note each
 facet stats                 token usage per day and kind
-facet cancel                stop the running turn
+facet cancel                stop the start that waits and every running instance
 facet resume                lift a usage-limit pause now (no restart); one Telegram message
 facet serve                 the web route, plus Telegram if configured
 facet init                  write ~/.config/facet/facet.json from what is already here
 facet post <file> [slug]    publish a note (writes `facet: slug` into its frontmatter)
 facet unpost <slug>         unpublish
 facet docs                  what is published
-facet send [--later] <text> put a message into the conversation (--later: a turn of its own,
-                            after the running one, instead of at its next tool call)
+facet send <text>           put a message into the conversation: it starts an instance
 facet push [--log] <text>   push a message to Telegram; --log also adds it to the chat log as a note (no turn)
-facet spawn [--wait] [--model M] [--effort E] [--kind general-purpose|explore] [--desc D] <task> | --task-file PATH | -
+facet spawn [--wait] [--model M] [--effort E] [--desc D] <task> | --task-file PATH | -
                             (the task from a file, or from stdin with `-`: a quoted heredoc keeps
                             the shell from running backticks in it)
-                            a subagent that outlives this turn: returns its id at once; its
-                            report arrives later, as a message of its own starting \"[id] \"
+                            hand a task to a new instance: returns its name at once; it answers
+                            the user itself and logs its own end record (--wait: prints it)
 facet card new <note> (--line N | --at \"verbatim text\") [--kind comment|info|warn|error]
                  [--fix <replacement>] <text>|-   open a card on a line (text from stdin with -)
 facet card reply <id> <text>|- [--fix <replacement>]

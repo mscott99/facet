@@ -14,7 +14,7 @@ pub struct Msg {
 }
 
 impl Msg {
-    pub fn is_prose(&self) -> bool { matches!(self.kind.as_str(), "user" | "talk" | "chat" | "answer" | "note" | "work") }
+    pub fn is_prose(&self) -> bool { matches!(self.kind.as_str(), "user" | "talk" | "chat" | "answer" | "note" | "work" | "start") }
     /// The chat venue (Telegram and the web chat page; README, "Stream and venues"): the user's
     /// own chat messages and what the agent sent there with `send_chat`. Not its plain text
     /// (`talk`), its steps, card comments and card answers, or subagent reports.
@@ -27,8 +27,8 @@ impl Msg {
     }
 }
 
-/// A subagent's report, logged as a user message starting "[id] " (no space inside the
-/// brackets, which tells it from the Telegram prelude's "[2 command(s) ...]").
+/// An instance's kickoff or end record, or an older subagent's report: a text starting "[id] "
+/// (no space inside the brackets, which tells it from the Telegram prelude's "[2 command(s) ...]").
 pub fn is_report(text: &str) -> bool {
     text.strip_prefix('[').and_then(|t| t.find("] ").map(|k| &t[..k]))
         .is_some_and(|id| !id.is_empty() && !id.contains(char::is_whitespace) && !id.starts_with('['))

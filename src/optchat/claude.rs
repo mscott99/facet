@@ -38,11 +38,9 @@ impl Proc {
         Self::start(Self::command(args, env, cwd))
     }
 
-    /// Like `spawn`, but in its own process group (a `setsid`-equivalent): it does not share
-    /// the master's call's fate. Used for a subagent spawned to outlive the turn that asked
-    /// for it (§9, detached) — the engine process that calls this already outlives any one
-    /// turn, but a process group of its own keeps a signal meant for a terminal or a job's
-    /// whole group from reaching it too.
+    /// Like `spawn`, but in its own process group (a `setsid`-equivalent): an instance
+    /// (instance.rs), which runs on its own for as long as it takes, so a signal meant for a
+    /// terminal or a job's whole group does not reach it.
     pub fn spawn_detached(args: &[String], env: &[(&str, &str)], cwd: &std::path::Path) -> std::io::Result<Proc> {
         use std::os::unix::process::CommandExt;
         let mut cmd = Self::command(args, env, cwd);
@@ -108,7 +106,6 @@ impl Proc {
     pub fn send_text(&mut self, text: &str) -> std::io::Result<()> {
         self.send(json!([{"type": "text", "text": text}]))
     }
-    pub fn take_stdin(&mut self) -> Option<ChildStdin> { self.stdin.take() }
 
     pub fn kill(&mut self) {
         let _ = self.child.kill();

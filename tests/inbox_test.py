@@ -37,8 +37,8 @@ try:
         try: get("/chat"); break
         except Exception: time.sleep(0.1)
     check("not running" in get("/chat") and 'id=down class=at style="color:var(--err)">' in get("/chat"), "engine is down, page says so")
-    check(post("/x/send", text="first while down", later="0") == "queued", "send with the engine down is answered 'queued'")
-    check(post("/x/send", text="second while down", later="1") == "queued", "a second one too")
+    check(post("/x/send", text="first while down") == "queued", "send with the engine down is answered 'queued'")
+    check(post("/x/send", text="second while down") == "queued", "a second one too")
     ob = outbox(get("/chat"))
     check("first while down" in ob and "second while down" in ob and ob.count("ob queued") == 2 and ob.index("first") < ob.index("second"),
           "a reload shows both as queued, in order: %r" % ob[:300])
@@ -55,7 +55,7 @@ try:
     def hold(): held["r"] = get("/f/log?wait=1&since=-1&obh=" + h)
     th = threading.Thread(target=hold); th.start(); time.sleep(1)
     check("r" not in held, "live request is held while nothing changes")
-    post("/x/send", text="third while down", later="0"); th.join(10)
+    post("/x/send", text="third while down"); th.join(10)
     check("third while down" in held.get("r", ""), "the live poll is woken by a new queued message")
     eng = subprocess.Popen([BIN, "engine"], env=env, stdout=subprocess.DEVNULL, stderr=open(os.path.join(D, "engine.err"), "w"))
     wait(lambda: len([m for m in log() if m["kind"] == "user"]) >= 1, 60, "engine takes the inbox")
