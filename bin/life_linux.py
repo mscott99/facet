@@ -533,6 +533,47 @@ def cmd_mail_send(a):
     print(f"sent from {acct['name']}" + (f", copy filed in {saved}" if saved else ""))
 
 
+def cmd_mail_reply(a):
+    """Reply to mail ID: account, recipients, subject and threading all come from the original."""
+    from email.utils import formataddr, parseaddr
+    acct, uid, kind = parse_id(a.id, accounts())
+    c = imap_connect(acct)
+    try:
+        raw = fetch_raw(c, acct, kind, uid)
+    finally:
+        try:
+            c.logout()
+        except Exception:
+            pass
+    if raw is None:
+        sys.exit(f"life: mail reply {a.id!r}: no such message; nothing sent")
+    orig = email.message_from_bytes(raw, policy=policy.default)
+    mine = {acct["user"].lower(), parseaddr(acct.get("from") or "")[1].lower()} - {""}
+    mine |= {x.lower() for x in acct.get("aliases", [])}
+    fmt = lambda p: formataddr(p) if p[0] else p[1]
+    frm = _addrs(orig["Reply-To"]) or _addrs(orig["From"])
+    to_hdr, cc_hdr = _addrs(orig["To"]), _addrs(orig["Cc"])
+    # replying to my own sent mail: answer its recipients, not myself
+    to = to_hdr if frm and frm[0][1] in mine else frm
+    cc = []
+    if a.all:
+        cc = [p for p in to_hdr + cc_hdr if p[1] not in mine]
+    seen, to_l, cc_l = set(), [], []
+    for p, out in [(p, to_l) for p in to] + [(p, cc_l) for p in cc]:
+        if p[1] in seen or (p[1] in mine and out is cc_l):
+            continue
+        seen.add(p[1]); out.append(fmt(p))
+    a.to = list(a.to or []) or to_l
+    a.cc = cc_l + [x for x in (a.cc or []) if x not in cc_l]
+    if not a.to:
+        sys.exit(f"life: mail reply {a.id!r}: no recipient found; pass --to")
+    subj = _dec(str(orig["Subject"] or ""))
+    a.subject = a.subject or (subj if re.match(r"(?i)\s*re\s*:", subj) else "Re: " + subj)
+    a.from_account = acct["name"]
+    a.reply_to = a.id
+    return cmd_mail_send(a)
+
+
 def save_to_sent(acct, m):
     """File a copy in the Sent folder (Gmail does this itself). -> folder name or None."""
     if acct["gmail"]:
