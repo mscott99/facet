@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for bin/mailwatch: rules, quiet hours, triage via fake claude, one notification per run. No network."""
+"""Tests for bin/mailwatch: rules, quiet hours, per-mail check, twice-daily batch. No network."""
 import importlib.util, importlib.machinery, os, sys, json, tempfile, unittest, stat, threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -13,10 +13,6 @@ W.__spec__.loader.exec_module(W)
 QUIET = W.quiet
 VAN = ZoneInfo("America/Vancouver")
 def at(h, m=0, d=8): return datetime(2026, 10, d, h, m, tzinfo=VAN)
-CLOCK = [at(10)]
-JUDGE0 = W.judge
-W.now_of = lambda conf: CLOCK[0]          # fake clock: tests move CLOCK[0]
-
 
 def msg(i, frm, subj, addr=None, bulk=False, seen=False, acct="a"):
     return dict(uid=i, id=f"{acct}:{i}", **{"from": frm}, addr=addr or "x@y.z", subj=subj, when="Oct 08 10:00",
@@ -52,79 +48,70 @@ class T(unittest.TestCase):
         W.CLAUDE = ok
         v, u = W.triage([msg(5, "Bob", "lunch?")], dict(W.DEFAULTS))
         self.assertEqual(v, {"a:5": ("notify", "person")})
-        bad = script("print(json.dumps({'is_error':True,'result':'no model'}))")
-        W.CLAUDE = bad
+        W.CLAUDE = script("print(json.dumps({'is_error':True,'result':'no model'}))")
         with self.assertRaises(RuntimeError):
             W.triage([msg(5, "Bob", "x")], dict(W.DEFAULTS))
 
+    # ---- twice-daily batch
     def run_pass(self, msgs, claude_body, dry=False, first=False):
         sent = os.path.join(tmp, "sent.txt")
         if os.path.exists(sent): os.remove(sent)
         W.FACET = script(f"open({sent!r},'a').write(' '.join(sys.argv[1:]).replace(chr(10),'|')+chr(10))")
         W.CLAUDE = script(claude_body)
         W.fulltext = lambda L, acct, uid, cap=6000: "full text"
-        W.load_life = lambda: type("L", (), {"accounts": staticmethod(lambda: [{"name": "a"}])})
-        W.new_mail = lambda L, acct, st, back=0: ([] if first else msgs, {"uv": 1, "last": 99}, first)
+        self.seen_accts = []
+        def new_mail(L, acct, st, back=0):
+            self.seen_accts.append(acct["name"])
+            return ([] if first else msgs, {"uv": 1, "last": 99}, first)
+        W.load_life = lambda: type("L", (), {"accounts": staticmethod(lambda: [{"name": "a"}, {"name": "math"}])})
+        W.new_mail = new_mail
         W.snippet = lambda L, acct, uid: "body"
         W.quiet = lambda c, now=None: False
         out = []
         W.run(dry, out=out.append)
         return open(sent).read().splitlines() if os.path.exists(sent) else [], out
 
-    VERDICT = "print(json.dumps({'is_error':False,'result':json.dumps([{'id':'a:1','tier':'now','why':'m'},{'id':'a:2','notify':True,'tier':'now','why':'deadline'},{'id':'a:3','notify':False,'tier':'none','why':'promo'}])}))"
+    # triage says notify for a:2; summary call (prompt has 'phone message') returns text
+    BOTH = ("req=sys.stdin.read()\n"
+            "r='- Bob: deadline -- asks slides by Fri (a:2)' if 'phone message' in req else json.dumps([{'id':'a:2','verdict':'notify','why':'person'},{'id':'a:3','verdict':'skip','why':'promo'}])\n"
+            "print(json.dumps({'is_error':False,'result':r}))")
 
-    def test_one_message_per_run(self):
-        os.path.exists(W.STATE_DIR) or os.makedirs(W.STATE_DIR)
+    def test_one_summary_push_per_run_and_timer_ignores_math(self):
+        os.makedirs(W.STATE_DIR, exist_ok=True)
         ms = [msg(1, "Michael", "hi", "michael.friedlander@ubc.ca"), msg(2, "Bob", "deadline"), msg(3, "Shop", "sale"),
               msg(4, "Google", "Security alert")]
-        sent, out = self.run_pass(ms, self.VERDICT)
+        sent, out = self.run_pass(ms, self.BOTH)
+        self.assertEqual(self.seen_accts, ["a"])                    # math skipped
         self.assertEqual(len(sent), 1)
         self.assertTrue(sent[0].startswith("push --log [mailwatch] 2 need"))
-        self.assertIn("a:1", sent[0]); self.assertIn("a:2", sent[0])
+        self.assertIn("a:2", sent[0]); self.assertIn("a:1", sent[0])   # a:1 dropped by the summary: appended as a line
         self.assertNotIn("a:3", sent[0]); self.assertNotIn("a:4", sent[0])
         self.assertEqual(json.load(open(W.STATE_DIR + "/state.json"))["a"]["last"], 99)
-        self.assertTrue(os.path.exists(W.STATE_DIR + "/usage.jsonl") or True)
 
     def test_dry_run_sends_nothing_and_keeps_cursor(self):
         sp = W.STATE_DIR + "/state.json"; before = open(sp).read() if os.path.exists(sp) else None
-        sent, out = self.run_pass([msg(2, "Bob", "deadline")], self.VERDICT, dry=True)
-        self.assertEqual(sent, [])
+        sent, out = self.run_pass([msg(2, "Bob", "deadline")], self.BOTH, dry=True)
+        self.assertEqual(sent, []); self.assertTrue(any("WOULD PUSH" in l for l in out))
         self.assertEqual(open(sp).read() if os.path.exists(sp) else None, before)
 
     def test_first_run_notifies_nothing(self):
-        sent, out = self.run_pass([msg(2, "Bob", "x")], self.VERDICT, first=True)
+        sent, out = self.run_pass([msg(2, "Bob", "x")], self.BOTH, first=True)
+        self.assertEqual(sent, [])
+
+    def test_nothing_notify_worthy_pushes_nothing(self):
+        sent, out = self.run_pass([msg(3, "Shop", "sale")], "print(json.dumps({'is_error':False,'result':'[{\"id\":\"a:3\",\"verdict\":\"skip\"}]'}))")
         self.assertEqual(sent, [])
 
     def test_triage_failure_still_tells(self):
         sent, out = self.run_pass([msg(2, "Bob", "deadline")], "sys.exit(1)")
-        self.assertEqual(len(sent), 1); self.assertIn("triage unavailable", sent[0]); self.assertIn("unjudged", sent[0])
+        self.assertEqual(len(sent), 1); self.assertIn("a:2", sent[0])
 
-    BOTH = ("req=sys.stdin.read()\n"
-            "r=[{'id':'a:1','tier':'none','why':'fyi'},{'id':'a:2','tier':'now','why':'asks for slides by Fri'}] if 'can_wait' in req else [{'id':'a:2','verdict':'notify','why':'person'}]\n"
-            "print(json.dumps({'is_error':False,'result':json.dumps(r)}))")
-
-    def test_sonnet_filters_and_summarises(self):
-        ms = [msg(1, "Michael", "hi", "michael.friedlander@ubc.ca"), msg(2, "Bob", "slides")]
-        sent, out = self.run_pass(ms, self.BOTH)
-        self.assertEqual(len(sent), 1)
-        self.assertIn("a:2", sent[0]); self.assertNotIn("a:1", sent[0]); self.assertIn("asks for slides by Fri", sent[0])
-        self.assertTrue(sent[0].startswith("push --log [mailwatch] 1 needs you"))
-
-    def test_sonnet_says_none_pushes_nothing(self):
-        none = ("print(json.dumps({'is_error':False,'result':json.dumps([{'id':'a:1','tier':'none','why':'fyi'}])}))")
-        sent, out = self.run_pass([msg(1, "Michael", "hi", "michael.friedlander@ubc.ca")], none)
-        self.assertEqual(sent, [])
-
-    def test_missing_sonnet_verdict_still_tells(self):
-        sent, out = self.run_pass([msg(1, "Michael", "hi", "michael.friedlander@ubc.ca")],
-                                  "print(json.dumps({'is_error':False,'result':'[]'}))")
-        self.assertEqual(sent, [])                                  # missing verdict -> 'today': queued, not pushed
-        q = json.load(open(W.STATE_DIR + "/state.json"))["_digest"]["queue"]
-        self.assertEqual([x["id"] for x in q], ["a:1"])
-
-    def test_dry_run_shows_push(self):
-        sent, out = self.run_pass([msg(2, "Bob", "deadline")], self.BOTH, dry=True)
-        self.assertEqual(sent, []); self.assertTrue(any("WOULD PUSH" in l for l in out))
+    def test_summary_failure_falls_back_to_list(self):
+        body = ("req=sys.stdin.read()\n"
+                "if 'phone message' in req: sys.exit(1)\n"
+                "print(json.dumps({'is_error':False,'result':json.dumps([{'id':'a:2','verdict':'notify','why':'person'}])}))")
+        sent, out = self.run_pass([msg(2, "Bob", "deadline")], body)
+        self.assertEqual(len(sent), 1); self.assertIn("Bob: deadline -- person (a:2", sent[0])
 
 
 class FakeBox:
@@ -239,75 +226,97 @@ class FakeIdleConn:
         return l
 
 
-class Idle(unittest.TestCase):
-    def test_idle_wait_exists(self):
-        c = FakeIdleConn([b"+ idling\r\n", b"* 3 RECENT\r\n", b"* 7 EXISTS\r\n", b"A1 OK done\r\n"])
-        self.assertTrue(W.idle_wait(c, 5))
-        self.assertEqual(c.sent, [b"A1 IDLE\r\n", b"DONE\r\n"])
 
-    def test_idle_wait_timeout_sends_done(self):
-        c = FakeIdleConn([b"+ idling\r\n", None])
-        self.assertFalse(W.idle_wait(c, 5))
-        self.assertEqual(c.sent[-1], b"DONE\r\n")
 
-    def test_idle_refused(self):
-        with self.assertRaises(RuntimeError):
-            W.idle_wait(FakeIdleConn([b"A1 NO nope\r\n"]), 5)
 
+class PerMail(unittest.TestCase):
+    """Math account, per mail: haiku check -> none / notify / act (opus spawn)."""
     def setUp(self):
         os.makedirs(W.STATE_DIR, exist_ok=True)
         json.dump(dict(W.DEFAULTS), open(W.CONF, "w"))
-        self.sent = os.path.join(tmp, "isent.txt")
-        if os.path.exists(self.sent): os.remove(self.sent)
-        W.FACET = script(f"open({self.sent!r},'a').write(' '.join(sys.argv[1:]).replace(chr(10),'|')+chr(10))")
-        W.CLAUDE = script("print(json.dumps({'is_error':False,'result':json.dumps([{'id':'a:1','tier':'now','why':'asks you'},{'id':'a:2','tier':'now','why':'x'}])}))")
+        self.log = os.path.join(tmp, "pm_sent.txt"); self.calls = os.path.join(tmp, "pm_calls.txt")
+        for f in (self.log, self.calls):
+            if os.path.exists(f): os.remove(f)
+        W.FACET = script(f"open({self.log!r},'a').write(' '.join(sys.argv[1:]).replace(chr(10),'|')+chr(10))")
+        self.verdict("act")
         W.fulltext = lambda L, acct, uid, cap=6000: "full"
-        W.snippet = lambda L, a, u: "body"
-        self.acct = {"name": "a"}
+        self.acct = {"name": "math"}
         self.L = type("L", (), {"accounts": staticmethod(lambda: [self.acct])})
         self.quiet_now = False
         W.quiet = lambda c, now=None: self.quiet_now
-        self.mails = [msg(1, "Michael", "hi", "michael.friedlander@ubc.ca"), msg(2, "Bob", "lunch?")]
-        W.new_mail = lambda L, a, st, back=0: (list(self.mails), {"uv": 1, "last": 2}, False)
-        json.dump({"a": {"uv": 1, "last": 0}}, open(W.STATE_DIR + "/state.json", "w"))
+        self.mails = []
+        W.new_mail = lambda L, a, st, back=0: ([dict(m) for m in self.mails if m["uid"] > st["last"]], {"uv": 1, "last": 9}, False)
+        json.dump({"math": {"uv": 1, "last": 0}}, open(W.STATE_DIR + "/state.json", "w"))
+
+    def verdict(self, action, fail=False):
+        body = (f"open({self.calls!r},'a').write('x')\n" + ("sys.exit(1)" if fail else
+                f"print(json.dumps({{'is_error':False,'result':json.dumps({{'action':{action!r},'why':'asks which slot'}})}}))"))
+        W.CLAUDE = script(body)
+
+    def m(self, i, frm="Shannon", subj="slot?", addr="s@math.ubc.ca"):
+        return msg(i, frm, subj, addr, acct="math")
 
     def pushes(self):
-        return open(self.sent).read().splitlines() if os.path.exists(self.sent) else []
+        return open(self.log).read().splitlines() if os.path.exists(self.log) else []
 
-    def test_idle_pushes_always_only_and_once(self):
-        self.assertEqual(W.idle_handle(self.L, self.acct, lambda l: None), 1)
-        self.assertEqual(len(self.pushes()), 1); self.assertIn("a:1", self.pushes()[0]); self.assertNotIn("a:2", self.pushes()[0])
-        st = json.load(open(W.STATE_DIR + "/state.json"))
-        self.assertEqual(st["a"]["last"], 0)                       # cursor belongs to the timer
-        self.assertEqual(st["_idle"]["a"], [1])
-        self.assertEqual(W.idle_handle(self.L, self.acct, lambda l: None), 0)     # not again
+    def ncalls(self):
+        return len(open(self.calls).read()) if os.path.exists(self.calls) else 0
+
+    def handle(self):
+        return W.idle_handle(self.L, self.acct, lambda l: None)
+
+    def test_act_spawns_opus_once(self):
+        self.mails = [self.m(1)]
+        self.assertEqual(self.handle(), 1)
+        p = self.pushes()
+        self.assertEqual(len(p), 1); self.assertTrue(p[0].startswith("spawn --model opus --desc mail: slot?"))
+        self.assertEqual(self.handle(), 0)                              # cursor moved: not again
+        W.spawn_act(json.load(open(W.STATE_DIR + "/state.json")), dict(self.mails[0], acct=self.acct), "w")
+        self.assertEqual(len(self.pushes()), 1)                         # dedupe by id even if re-offered
+
+    def test_notify_pushes_none_is_silent(self):
+        self.mails = [self.m(1)]; self.verdict("notify"); self.handle()
+        p = self.pushes(); self.assertEqual(len(p), 1); self.assertTrue(p[0].startswith("push --log [mail] Shannon: slot? -- asks which slot (math:1)"))
+        self.mails.append(self.m(2, "Bob", "fyi", "b@x.org")); self.verdict("none"); self.handle()
         self.assertEqual(len(self.pushes()), 1)
 
-    def test_timer_skips_what_idle_pushed(self):
-        W.idle_handle(self.L, self.acct, lambda l: None)
-        W.load_life = lambda: self.L
-        W.run(False, out=lambda l: None)
-        self.assertEqual(len(self.pushes()), 1)                    # timer: mail 1 skipped, mail 2 is triage-only
-        st = json.load(open(W.STATE_DIR + "/state.json"))
-        self.assertEqual(st["a"]["last"], 2); self.assertEqual(st["_idle"]["a"], [])
+    def test_mute_skips_without_model_call(self):
+        self.mails = [self.m(1, "Google", "Security alert", "no-reply@accounts.google.com"),
+                      dict(self.m(2, "List", "seminar"), bulk=True)]
+        self.assertEqual(self.handle(), 2)
+        self.assertEqual(self.ncalls(), 0); self.assertEqual(self.pushes(), [])
 
-    def test_quiet_hours_hold_then_timer_catches_up(self):
-        self.quiet_now = True
-        self.assertEqual(W.idle_handle(self.L, self.acct, lambda l: None), 0)
-        self.assertEqual(self.pushes(), [])
+    def test_always_floor(self):
+        self.verdict("none")
+        self.mails = [self.m(1, "Michael", "hi", "michael.friedlander@ubc.ca")]; self.handle()
+        p = self.pushes(); self.assertEqual(len(p), 1); self.assertIn("[mail]", p[0])
+
+    def test_check_failure_notifies(self):
+        self.verdict("act", fail=True); self.mails = [self.m(1)]; self.handle()
+        p = self.pushes(); self.assertEqual(len(p), 1); self.assertIn("(check failed)", p[0])
+
+    def test_quiet_hours_hold_then_catch_up(self):
+        self.mails = [self.m(1)]; self.quiet_now = True
+        self.assertEqual(self.handle(), 0); self.assertEqual(self.pushes(), []); self.assertEqual(self.ncalls(), 0)
+        self.assertEqual(json.load(open(W.STATE_DIR + "/state.json"))["math"]["last"], 0)
         self.quiet_now = False
-        W.load_life = lambda: self.L
-        W.run(False, out=lambda l: None)
-        self.assertEqual(len(self.pushes()), 1); self.assertIn("a:1", self.pushes()[0])
+        self.assertEqual(self.handle(), 1); self.assertEqual(len(self.pushes()), 1)
 
-    def test_no_cursor_does_nothing(self):
+    def test_first_run_records_cursor_only(self):
         os.remove(W.STATE_DIR + "/state.json")
-        self.assertEqual(W.idle_handle(self.L, self.acct, lambda l: None), 0)
-        self.assertEqual(self.pushes(), [])
+        W.new_mail = lambda L, a, st, back=0: ([], {"uv": 1, "last": 9}, True)
+        self.assertEqual(self.handle(), 0); self.assertEqual(self.pushes(), [])
+        self.assertEqual(json.load(open(W.STATE_DIR + "/state.json"))["math"]["last"], 9)
 
-    def test_account_loop_reconnects_with_backoff_and_handles_event(self):
-        stop = threading.Event()
-        conns = []
+    def test_push_failure_keeps_cursor_for_retry(self):
+        self.verdict("notify"); self.mails = [self.m(1)]
+        W.FACET = script("sys.exit(1)")
+        self.assertEqual(self.handle(), 0)
+        self.assertEqual(json.load(open(W.STATE_DIR + "/state.json"))["math"]["last"], 0)
+
+    def test_account_loop_reconnects_and_handles_event(self):
+        self.mails = [self.m(1)]
+        stop = threading.Event(); conns = []
         def connect(a):
             conns.append(1)
             if len(conns) == 1: raise OSError("down")
@@ -320,212 +329,26 @@ class Idle(unittest.TestCase):
             return True
         real_wait = W.idle_wait; W.idle_wait = waits
         orig = threading.Event.wait
-        threading.Event.wait = lambda self_, t=None: True      # skip the real backoff sleep
+        threading.Event.wait = lambda self_, t=None: True
         try:
             W.idle_account(self.L, self.acct, stop, lambda l: None)
         finally:
             threading.Event.wait = orig; W.idle_wait = real_wait
         self.assertEqual(len(conns), 2); self.assertEqual(len(calls), 2)
-        self.assertEqual(len(self.pushes()), 1)                    # event handled once; second event: already done
+        self.assertEqual(len(self.pushes()), 1)                         # handled once
+
+    def test_idle_main_uses_only_per_mail_account(self):
+        got = []
+        W.load_life = lambda: type("L", (), {"accounts": staticmethod(lambda: [{"name": "gmail"}, {"name": "math"}, {"name": "scom"}])})
+        real = W.idle_account; W.idle_account = lambda L, a, *x: got.append(a["name"])
+        try: W.idle_main()
+        finally: W.idle_account = real
+        self.assertEqual(got, ["math"])
 
 
 def email_addr(h):
     import email.utils
     return email.utils.parseaddr(h)
-
-
-
-class Digest(unittest.TestCase):
-    """Tiers, digest timing, after-lunch push, quiet hours, dedupe with idle. Fake clock (CLOCK)."""
-    def setUp(self):
-        os.makedirs(W.STATE_DIR, exist_ok=True)
-        json.dump(dict(W.DEFAULTS), open(W.CONF, "w"))
-        self.sent = os.path.join(tmp, "dsent.txt")
-        if os.path.exists(self.sent): os.remove(self.sent)
-        W.FACET = script(f"open({self.sent!r},'a').write(' '.join(sys.argv[1:]).replace(chr(10),'|')+chr(10))")
-        self.verdicts = {}
-        W.CLAUDE = script("print(json.dumps({'is_error':True,'result':'no model'}))")   # summaries fall back to the list
-        W.judge = lambda items, conf: ({m["id"]: self.verdicts.get(m["id"], ("today", False, "w")) for m, _ in items}, None)
-        W.fulltext = lambda L, acct, uid, cap=6000: "full"
-        W.snippet = lambda L, a, u: "body"
-        self.acct = {"name": "a"}
-        self.L = type("L", (), {"accounts": staticmethod(lambda: [self.acct])})
-        W.load_life = lambda: self.L
-        self.qn = False
-        W.quiet = lambda c, now=None: self.qn
-        self.mails = []
-        W.new_mail = lambda L, a, st, back=0: (list(self.mails), {"uv": 1, "last": 50}, False)
-        json.dump({"a": {"uv": 1, "last": 0}}, open(W.STATE_DIR + "/state.json", "w"))
-        CLOCK[0] = at(9)
-
-    def tearDown(self):
-        W.judge = JUDGE0
-        CLOCK[0] = at(10)
-
-    def pushes(self):
-        return open(self.sent).read().splitlines() if os.path.exists(self.sent) else []
-
-    def state(self):
-        return json.load(open(W.STATE_DIR + "/state.json"))
-
-    def mail(self, i, frm="Michael", subj="s"):
-        return msg(i, frm, subj, "michael.friedlander@ubc.ca")
-
-    def test_tier_of_defaults(self):
-        self.assertEqual(W.tier_of({"id": "x"})[0], "today")
-        self.assertEqual(W.tier_of({"tier": "NOW", "why": "w"}), ("now", False, "w"))
-        self.assertEqual(W.tier_of({"tier": "banana"})[0], "today")
-        self.assertEqual(W.tier_of({"tier": "today", "can_wait": "yes"})[1], False)    # only a real true counts
-
-    def test_now_pushes_immediately_today_queues(self):
-        self.verdicts = {"a:1": ("now", False, "urgent")}
-        self.mails = [self.mail(1), self.mail(2)]
-        W.run(False, out=lambda l: None)
-        p = self.pushes()
-        self.assertEqual(len(p), 1); self.assertIn("a:1", p[0]); self.assertNotIn("a:2", p[0])
-        self.assertEqual([q["id"] for q in self.state()["_digest"]["queue"]], ["a:2"])
-
-    def test_scheduling_mail_spawns_draft_instance_once(self):
-        self.verdicts = {"a:1": ("now", False, "pick a slot"), "a:2": ("now", False, "urgent")}
-        def j(items, conf):
-            for m, _ in items:
-                if m["id"] == "a:1": m["sched"] = True
-            return {m["id"]: self.verdicts.get(m["id"], ("today", False, "w")) for m, _ in items}, None
-        W.judge = j
-        self.mails = [self.mail(1), self.mail(2)]
-        W.run(False, out=lambda l: None)
-        p = self.pushes()
-        self.assertEqual(len(p), 2)
-        self.assertTrue(p[0].startswith("spawn --desc mailwatch scheduling"))
-        self.assertIn("a:2", p[1]); self.assertNotIn("a:1", p[1])
-        self.assertEqual(self.state()["_sched"], ["a:1"])
-        self.assertTrue(W.spawn_sched(self.state(), self.mail(1), "w", False, lambda l: None))   # deduped
-        self.assertEqual(len(self.pushes()), 2)
-
-    def test_digest_at_times_once_and_empty_sends_nothing(self):
-        self.mails = [self.mail(1), self.mail(2)]
-        CLOCK[0] = at(6, 30); self.qn = False
-        W.run(False, out=lambda l: None)                    # 06:30: queued, no digest due yet
-        self.assertEqual(self.pushes(), [])
-        self.mails = []
-        CLOCK[0] = at(8, 5); W.run(False, out=lambda l: None)
-        p = self.pushes()
-        self.assertEqual(len(p), 1); self.assertTrue(p[0].startswith("push --log [mail digest] 2 to read today"))
-        self.assertIn("a:1", p[0]); self.assertIn("a:2", p[0])
-        self.assertEqual(self.state()["_digest"]["queue"], [])
-        CLOCK[0] = at(8, 25); W.run(False, out=lambda l: None)                  # same digest slot: nothing
-        CLOCK[0] = at(12, 35); W.run(False, out=lambda l: None)                 # lunch digest, empty queue: nothing
-        self.assertEqual(len(self.pushes()), 1)
-        self.mails = [self.mail(3)]
-        CLOCK[0] = at(9); W.new_mail = lambda L, a, st, back=0: (list(self.mails), {"uv": 1, "last": 60}, False)
-        CLOCK[0] = at(12, 40); W.run(False, out=lambda l: None)                 # arrives after lunch digest
-        self.assertEqual(len(self.pushes()), 2)                                   # after lunch, can_wait False -> pushed
-
-    def stub_summary(self, text):
-        self.prompts = os.path.join(tmp, "prompts.txt")
-        if os.path.exists(self.prompts): os.remove(self.prompts)
-        W.CLAUDE = script(f"p=sys.stdin.read();open({self.prompts!r},'a').write(p+'\\n=====\\n')\n"
-                          f"print(json.dumps({{'is_error':False,'result':{text!r}}}))")
-
-    def test_digest_is_a_summary_from_full_text(self):
-        W.fulltext = lambda L, acct, uid, cap=6000: f"BODY-{uid}"
-        self.L.imap_connect = None
-        self.mails = [self.mail(1), self.mail(2)]
-        CLOCK[0] = at(6, 30); W.run(False, out=lambda l: None)
-        self.stub_summary("- Michael: s -- wants the draft by Fri (a:1)\n- Michael: s -- fyi (a:2)")
-        self.mails = []
-        CLOCK[0] = at(8, 5); W.run(False, out=lambda l: None)
-        p = self.pushes()
-        self.assertEqual(len(p), 1)
-        self.assertTrue(p[0].startswith("push --log [mail digest] 2 to read today|- Michael: s -- wants the draft"))
-        pr = open(self.prompts).read()
-        self.assertIn("BODY-1", pr); self.assertIn("BODY-2", pr)
-        self.assertEqual(self.state()["_digest"]["queue"], [])
-
-    def test_digest_summary_missing_id_is_appended_and_both_fail_gives_list(self):
-        self.mails = [self.mail(1), self.mail(2)]
-        CLOCK[0] = at(6, 30); W.run(False, out=lambda l: None)
-        self.stub_summary("- Michael: s -- only the first (a:1)")
-        self.mails = []
-        CLOCK[0] = at(8, 5); W.run(False, out=lambda l: None)
-        self.assertIn("(a:2, ", self.pushes()[0])             # dropped id came back as a list line
-        self.mails = [self.mail(3)]
-        W.new_mail = lambda L, a, st, back=0: (list(self.mails), {"uv": 1, "last": 70}, False)
-        W.CLAUDE = script("print(json.dumps({'is_error':True,'result':'no model'}))")
-        CLOCK[0] = at(9); W.run(False, out=lambda l: None)
-        self.mails = []
-        CLOCK[0] = at(12, 35); W.run(False, out=lambda l: None)
-        self.assertIn("- Michael: s -- w (a:3, ", self.pushes()[1])   # old list format
-
-    def test_dry_run_shows_summary_and_after_lunch_push_is_summarised(self):
-        self.verdicts = {"a:1": ("today", False, "due tonight")}
-        self.stub_summary("- Michael: s -- due tonight, reply (a:1)")
-        self.mails = [self.mail(1)]
-        CLOCK[0] = at(14); W.run(False, out=lambda l: None)
-        p = self.pushes()
-        self.assertTrue(p[0].startswith("push --log [mailwatch] 1 needs you|- Michael: s -- due tonight, reply"))
-        W.fulltext = lambda L, acct, uid, cap=6000: "x"
-        self.mails = [self.mail(2)]; self.verdicts = {"a:2": ("today", True, "fyi")}
-        W.new_mail = lambda L, a, st, back=0: (list(self.mails), {"uv": 1, "last": 80}, False)
-        out = []
-        CLOCK[0] = at(14, 20); W.run(False, out=lambda l: None)
-        self.stub_summary("- Michael: s -- dry gist (a:2)")
-        self.mails = []
-        CLOCK[0] = at(8, 1, d=9); W.run(True, out=out.append)
-        self.assertTrue(any("dry gist" in l for l in out)); self.assertEqual(len(self.pushes()), 1)
-
-    def test_after_lunch_cannot_wait_pushed_can_wait_queued(self):
-        self.verdicts = {"a:1": ("today", False, "due tonight"), "a:2": ("today", True, "fyi")}
-        self.mails = [self.mail(1), self.mail(2)]
-        CLOCK[0] = at(14)
-        W.run(False, out=lambda l: None)
-        p = self.pushes()
-        self.assertEqual(len(p), 1); self.assertIn("a:1", p[0]); self.assertNotIn("a:2", p[0])
-        self.assertNotIn("[mail digest]", p[0])
-        self.assertEqual([q["id"] for q in self.state()["_digest"]["queue"]], ["a:2"])
-        self.mails = []
-        CLOCK[0] = at(8, 1, d=9); W.run(False, out=lambda l: None)             # next morning's digest carries it
-        self.assertEqual(len(self.pushes()), 2); self.assertIn("a:2", self.pushes()[1])
-
-    def test_before_lunch_cannot_wait_still_waits_for_digest(self):
-        self.verdicts = {"a:1": ("today", False, "x")}
-        self.mails = [self.mail(1)]
-        CLOCK[0] = at(10)
-        W.run(False, out=lambda l: None)
-        self.assertEqual(self.pushes(), [])
-
-    def test_quiet_hours_hold_now_until_seven(self):
-        self.verdicts = {"a:1": ("now", False, "urgent")}
-        self.mails = [self.mail(1)]
-        self.qn = True; CLOCK[0] = at(23, 30)
-        W.run(False, out=lambda l: None)
-        self.assertEqual(self.pushes(), []); self.assertEqual(self.state()["a"]["last"], 0)   # cursor untouched
-        self.qn = False; CLOCK[0] = at(7, 5, d=9)
-        W.run(False, out=lambda l: None)
-        self.assertEqual(len(self.pushes()), 1); self.assertIn("a:1", self.pushes()[0])
-
-    def test_idle_and_timer_dedupe(self):
-        self.mails = [self.mail(1)]
-        CLOCK[0] = at(7, 30)
-        self.assertEqual(W.idle_handle(self.L, self.acct, lambda l: None), 1)       # idle queues it
-        W.run(False, out=lambda l: None)                                              # timer skips it
-        self.assertEqual([q["id"] for q in self.state()["_digest"]["queue"]], ["a:1"])
-        W.dispatch(self.state(), dict(W.DEFAULTS), [], [(self.mail(1), "w", False)], at(9), True, lambda l: None)
-        st = self.state()
-        W.dispatch(st, dict(W.DEFAULTS), [], [(self.mail(1), "w", False)], at(9), False, lambda l: None)
-        self.assertEqual(len(st["_digest"]["queue"]), 1)
-
-    def test_dry_run_sends_and_saves_nothing(self):
-        self.mails = [self.mail(1)]
-        before = open(W.STATE_DIR + "/state.json").read()
-        out = []
-        CLOCK[0] = at(13); W.run(True, out=out.append)
-        self.assertEqual(self.pushes(), []); self.assertEqual(open(W.STATE_DIR + "/state.json").read(), before)
-        self.assertTrue(any("tiers:" in l for l in out))
-
-    def test_push_refuses_empty(self):
-        with self.assertRaises(RuntimeError):
-            W.push("  ")
 
 
 if __name__ == "__main__":

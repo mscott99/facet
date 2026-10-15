@@ -1,9 +1,8 @@
 [Unit]
-Description=Run mailwatch every 20 minutes
+Description=Run mailwatch (gmail, scom) at 08:00 and 17:00 Vancouver time
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=20min
+OnCalendar=*-*-* 08,17:00:00 America/Vancouver
 Persistent=true
 
 [Install]

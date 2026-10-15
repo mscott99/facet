@@ -992,91 +992,50 @@ Settings and secrets in `~/.config/facet/`, the memory in `~/.optchat`, engine s
 `~/.local/share/facet/` (see **logs**). Everything else lives in the vault or in the memory,
 on purpose: delete this program and nothing is lost but a port number.
 
-## mailwatch (cheap periodic mail check)
+## mailwatch (mail triage that wakes OptChat only when needed)
 
-`bin/mailwatch` runs every 20 minutes from a systemd `--user` timer (`systemd/mailwatch.{service,timer}`,
-`Persistent=true`) and wakes OptChat only when something deserves attention. Read-only: IMAP PEEK, never
-replies, never deletes or moves mail, never prints message bodies. Its one write is the `\Seen` flag on mail
-that is obviously not worth reading (see "Marking read" below).
+`bin/mailwatch` has two paths and no overlap. It never replies, deletes or moves mail, and never logs bodies; its
+one write is the `\Seen` flag on obviously-skippable mail of the batch path (see "Marking read").
 
-1. **No LLM.** For each account in `~/.config/life/accounts.json`, list INBOX mail with UID above the cursor in
-   `~/.local/state/mailwatch/state.json` (per account: UIDVALIDITY + last UID). The first run only records
-   the cursor. Nothing new: exit silently.
-2. **Rules** (`~/.config/life/mailwatch.json`, written with defaults on first run; case-insensitive globs
-   against `From <addr> | Subject`): `always` (straight to notify), `mute`, plus `bulk_headers_mute`
-   (List-Unsubscribe / List-Id / Precedence bulk / Auto-Submitted ⇒ mute, even if `always` would match) and
-   `skip_seen` (already read elsewhere ⇒ mute). `quiet_hours` (default 23:00-07:00, `timezone`): the run
-   does nothing and leaves the cursor, so the first run afterwards catches up.
-3. **One batched triage** of the remainder: `claude -p --model haiku` (falls back to `fallback_model` sonnet),
-   From/Subject/date + first 600 chars of the unquoted text, max `max_batch` (25) messages; strict JSON
-   `{id, notify, why}`. Token/cost log: `~/.local/state/mailwatch/usage.jsonl`. If triage fails, those
-   messages are reported as "triage unavailable" rather than silently dropped.
+**Per mail: the math account** (`bin/mailwatch --idle`, `systemd/mailwatch-idle.service`, `Restart=always`). One IMAP
+IDLE connection on the account named by `per_mail_account` (default `math`), reconnected at least every 10 minutes
+(reconnect = catch-up). Each new mail (UID above the cursor in `~/.local/state/mailwatch/state.json`) is handled
+alone and the cursor moves per mail:
+- mute-rule / bulk-header / already-read mail: skipped, no model call, nothing marked read.
+- otherwise ONE `claude -p --model haiku` call (`model`, falling back to `fallback_model`) on that mail (headers +
+  unquoted full text, 6000 chars) returning `{"action": "none"|"notify"|"act", "why": ...}`.
+  - `act` (a reply must be drafted, or he must choose/confirm/change a time): `facet spawn --model opus --desc "mail: ..."`
+    with `ACT_TASK`: read mail and thread, check calendar and chat memory, recommend, draft the reply (to
+    `/tmp/mail_<id>.txt`), propose the calendar change, end message to chat ending "say 'send' to send it". The
+    instance NEVER sends mail or changes the calendar before his explicit 'send'. Deduped by id (`_sched` in state).
+  - `notify`: one `facet push --log "[mail] <from>: <subject> -- <why> (<id>)"`.
+  - `none`: silent (logged in `judged.jsonl`, no bodies). `always` senders are at least `notify`.
+  - If the check fails (after the sonnet fallback): `notify` with "(check failed)". If a push or spawn command fails the
+    cursor stays and the mail is retried at the next wake.
+- Quiet hours (`quiet_hours`, 23:00-07:00 in `timezone`): nothing runs, the cursor stays; the first wake after 07:00
+  catches up. The first run only records the cursor.
 
-4. **One Sonnet judgement** of the candidates (`always` mail plus triage `notify`; `unsure` is never escalated, and
-   stays unread). One `claude -p --model sonnet` (`judge_model`) call reads each candidate's full text (PEEK,
-   text/plain, quotes stripped, 6000 chars each) and says per mail whether it truly needs his attention, with a
-   short why (who, what is asked, deadline). Verdicts are tiers, see "Tiers and digests" below; a missing or garbled
-   verdict counts as `today` (never `now`). If Sonnet fails, every
-   candidate is pushed with its triage-level reason (`(unjudged)`), so an always-sender mail is never dropped.
-   Mail Sonnet calls not needed is only noted in `~/.local/state/mailwatch/judged.jsonl` (no bodies); it is *not*
-   marked read.
+**Twice daily: the other accounts** (gmail, scom; `systemd/mailwatch.timer`, `OnCalendar=*-*-* 08,17:00:00
+America/Vancouver`, `Persistent=true`; the timer skips `per_mail_account`). Cursor per account as above, then
+(1) rules from `~/.config/life/mailwatch.json` (written with defaults on first run; case-insensitive globs against
+`From <addr> | Subject`): `always` (straight to notify), `mute`, `bulk_headers_mute`, `skip_seen`; (2) one batched
+`claude -p --model haiku` triage (sonnet fallback) of the rest, From/Subject/date + first 600 chars, max `max_batch`
+(25), verdict `notify`/`skip`/`unsure`, cost log in `usage.jsonl`; (3) if anything is notify-worthy, ONE sonnet summary
+(`summarize()`: full text re-fetched with PEEK, most pressing first, ids kept, haiku fallback, plain list if both
+fail) pushed with `facet push --log "[mailwatch] N need you ..."`. A triage failure reports those messages as
+"triage unavailable". Both paths share a file lock (`~/.local/state/mailwatch/lock`). `facet push` refuses empty text.
 
-If anything needs him, ONE `facet push --log "[mailwatch] N need you\n- from: subject -- why (id, date)"`:
-straight to Telegram, no Opus turn, and the same text is added to the chat log as a `note` (queued like an import
-while a turn is running, so it never starts a turn but OptChat sees it later). `facet push --log` pushes first;
-if only the logging fails it warns on stderr and still exits 0, so the push is never repeated. `--dry-run` prints
-`WOULD PUSH:` plus the text. Ids work with `life mail show/thread`. Quiet hours hold everything until morning.
+**Marking read** (config `mark_read`, default true; batch path only). `\Seen` is set only on (a) mail matching a
+`mute` rule or carrying bulk headers, and (b) mail the triage returns as a confident `skip`. Never marked: `always`
+matches, notified or `unsure` mail, anything matching `never_mark` (default: siam, yaniv, friedlander, nserc,
+editorialmanager, fogs, grad@ubc.ca, smacfar@math.ubc.ca, manuscript, submission, springer, elsevier, referee), a
+`skip` on a `Re:`/`Fwd:` subject, or anything when triage fails. Every mark is appended to `marked.jsonl`.
+- `bin/mailwatch --sweep [--days N] [--dry-run]` (default 30 days): same decisions over already-unread mail; never
+  notifies. Always dry-run first.
+- `bin/mailwatch --unmark [acct:uid ...] [--since DAYS]` puts logged messages back to unread.
 
-**Tiers and digests.** Only mail needing immediate attention notifies instantly. The one batched Sonnet call returns
-per mail `tier` = `now` (action within hours: same-day meeting change, deadline today, supervisor waiting),
-`today` (read it today) or `none`, and for `today` also `can_wait` (true = can wait till tomorrow morning). Both the
-timer and the `--idle` path use it (`tiers()` + `dispatch()` in `bin/mailwatch`).
-- `now`: pushed at once with `facet push --log` (`[mailwatch] N need you`), as before.
-- `today`: appended to a queue in `state.json` under `_digest.queue` (deduped by account:uid, so idle and timer never
-  double-queue). Config `digest_times` (default `["08:00","12:30"]`, in the config's `timezone`): the first timer run
-  after each time sends ONE message `[mail digest] N to read today` and clears the queue; empty queue sends nothing.
-  The message is a **summary**: one Sonnet call (`digest_model`, haiku `fallback_digest_model`) over the queued mails' full
-  text (re-fetched with PEEK, never marked read) gives, per mail or thread, sender, subject, 1-2 sentences of what it
-  says and what is asked by when, and the id, most pressing first; a dropped id is appended as a list line; if both
-  models fail the old one-line-per-mail list is sent. The after-lunch "cannot wait" push is summarised the same way.
-  `--dry-run` shows the summary. `_digest.last` stops a slot firing twice.
-- After the day's last digest time, `today` mail with `can_wait` false is pushed at once (together with any `now`
-  mail, one message); with `can_wait` true it stays queued for the next morning's digest.
-- Quiet hours (23:00-07:00) stay hard. Nothing runs then: the timer and idle return before touching mail or the
-  cursor, so a `now` mail that arrived overnight is simply found by the first timer run at/after 07:00 and pushed
-  then (`today` mail from then waits for the 08:00 digest).
-- `facet push` (and `mailwatch.push()`) refuse empty text.
-- `--dry-run` prints each tier decision, `tiers: now=N today=N none=N`, queue/push decisions and the digest it would
-  send; it saves nothing. Tests use a fake clock.
-
-**Marking read** (config `mark_read`, default true). Set `\Seen` only on (a) mail matching a `mute` rule or
-carrying bulk headers, and (b) mail the triage returns as `skip`. The triage verdict is 3-way
-(`notify` / `skip` / `unsure`); `skip` is for confident cases only, anything else, a triage failure, or a missing
-verdict leaves the mail unread. Never marked, whatever else matches: `always`-rule matches, notified mail, `unsure`
-mail, senders/subjects matching `never_mark` (default: siam, yaniv, friedlander, nserc, editorialmanager, fogs,
-grad@ubc.ca, manuscript, submission, springer, elsevier, referee; extend it in `mailwatch.json`), and a triage `skip`
-on a `Re:`/`Fwd:` subject. Every mark is appended to `~/.local/state/mailwatch/marked.jsonl`
-(`ts, account, uid, uv, sender, subject, reason`).
-
-- `bin/mailwatch --sweep [--days N] [--dry-run]` (default 30 days): same decisions over mail that is already unread;
-  never notifies; prints a summary grouped by reason. Always dry-run first.
-- `bin/mailwatch --unmark [acct:uid ...] [--since DAYS]` puts logged messages back to unread (everything logged if
-  no selector); undone entries are recorded in the log and skipped next time.
-
-**Push on receipt** (`bin/mailwatch --idle`, `systemd/mailwatch-idle.service`, `Restart=always`). One IMAP IDLE
-connection per account (threads; raw IDLE commands since imaplib has none), renewed every 25 minutes, reconnect with
-5 s..5 min backoff. Idle costs no model calls. On a new-mail event it reads headers only (PEEK, never marks read) and,
-for mail from an `always` sender (not bulk), runs the same Sonnet read -> `facet push --log` path immediately for just
-those mails. Everything else waits for the 20-minute timer, which stays as the backstop (and catches up after
-disconnects). Shared state: both take an exclusive file lock (`~/.local/state/mailwatch/lock`); the timer owns the
-UID cursor, idle records what it pushed in `state.json` under `_idle` (per account), the timer skips those uids and
-prunes them once the cursor passes. So nothing is notified twice. Quiet hours are never broken: idle does nothing
-then, and the first timer run after 07:00 handles the held mail. Install: `cp systemd/mailwatch* ~/.config/systemd/user/
-&& systemctl --user daemon-reload && systemctl --user enable --now mailwatch-idle.service`; log: `journalctl --user -u
-mailwatch-idle` ("[acct] idle: connected").
-
-`bin/mailwatch --dry-run [--last N]` prints decisions, sends nothing, leaves the cursor alone (`--last N`
-pretends the cursor is N messages back per account, and ignores quiet hours). Install:
-`cp systemd/mailwatch.* ~/.config/systemd/user/ && systemctl --user daemon-reload &&
-systemctl --user enable --now mailwatch.timer`. Env overrides for tests: `MAILWATCH_{STATE_DIR,CONFIG,CLAUDE,FACET}`.
-Tests: `python3 tests/mailwatch_test.py`. Cost: about $0.0005-0.002 per triage call, none when nothing needs triage.
+`bin/mailwatch --dry-run [--last N]` runs the batch path, prints decisions and `WOULD PUSH:`, sends nothing, keeps
+the cursor (`--last N` pretends the cursor is N messages back). Install: `cp systemd/mailwatch* ~/.config/systemd/user/
+&& systemctl --user daemon-reload && systemctl --user enable --now mailwatch.timer mailwatch-idle.service`; log:
+`journalctl --user -u mailwatch-idle`. Env overrides for tests: `MAILWATCH_{STATE_DIR,CONFIG,CLAUDE,FACET}`. Tests:
+`python3 tests/mailwatch_test.py`. Stale config keys (`digest_times`, `judge_model`, ...) are ignored.
