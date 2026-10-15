@@ -385,6 +385,23 @@ class Digest(unittest.TestCase):
         self.assertEqual(len(p), 1); self.assertIn("a:1", p[0]); self.assertNotIn("a:2", p[0])
         self.assertEqual([q["id"] for q in self.state()["_digest"]["queue"]], ["a:2"])
 
+    def test_scheduling_mail_spawns_draft_instance_once(self):
+        self.verdicts = {"a:1": ("now", False, "pick a slot"), "a:2": ("now", False, "urgent")}
+        def j(items, conf):
+            for m, _ in items:
+                if m["id"] == "a:1": m["sched"] = True
+            return {m["id"]: self.verdicts.get(m["id"], ("today", False, "w")) for m, _ in items}, None
+        W.judge = j
+        self.mails = [self.mail(1), self.mail(2)]
+        W.run(False, out=lambda l: None)
+        p = self.pushes()
+        self.assertEqual(len(p), 2)
+        self.assertTrue(p[0].startswith("spawn --desc mailwatch scheduling"))
+        self.assertIn("a:2", p[1]); self.assertNotIn("a:1", p[1])
+        self.assertEqual(self.state()["_sched"], ["a:1"])
+        self.assertTrue(W.spawn_sched(self.state(), self.mail(1), "w", False, lambda l: None))   # deduped
+        self.assertEqual(len(self.pushes()), 2)
+
     def test_digest_at_times_once_and_empty_sends_nothing(self):
         self.mails = [self.mail(1), self.mail(2)]
         CLOCK[0] = at(6, 30); self.qn = False
