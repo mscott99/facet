@@ -39,6 +39,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 pub struct Conf {
     pub name: String,
+    /// the person the agent works for, as the prompt names him
+    pub user: String,
     pub model: String,
     pub effort: String,
     pub tools: String,
@@ -69,6 +71,7 @@ impl Conf {
         let s = |k: &str, d: &str| c.str(&format!("chat.{}", k), d);
         Conf {
             name: s("name", "Facet"),
+            user: s("user", "Matthew"),
             model: s("model", "opus"),
             effort: s("effort", "high"),
             tools: s("tools", "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch"),
@@ -560,7 +563,7 @@ pub fn serve() -> ! {
     // one system prompt for turns and compactions (§5 of the gist); the compactor reads it
     // from the same file the turns do
     let compact_sys = sd.join("system.txt");
-    std::fs::write(&compact_sys, prompts::system(&conf.name)).expect("system prompt");
+    std::fs::write(&compact_sys, prompts::system(&conf.name, &conf.user)).expect("system prompt");
 
     let e = Arc::new(Engine {
         dir: dir.clone(), conf,
@@ -584,12 +587,12 @@ pub fn serve() -> ! {
             "nodes": m.store.levels.iter().map(|l| l.iter().filter(|x| x.is_some()).count()).sum::<usize>(),
             "view_lines": m.view.parts.len(), "view_bytes": m.view.size(&m.store), "startup_ms": t0.elapsed().as_millis(),
             "load_notes": m.store.notes,
-            "conf": {"name": c.name, "model": c.model, "effort": c.effort, "tools": c.tools, "compact_model": c.compact_model,
+            "conf": {"name": c.name, "user": c.user, "model": c.model, "effort": c.effort, "tools": c.tools, "compact_model": c.compact_model,
                      "compact_effort": c.compact_effort, "ttl": c.ttl, "prime": c.prime, "jobs": c.jobs, "view": c.view,
                      "budget_hour_eq": c.budget_hour, "cwd": c.cwd.display().to_string()},
         }));
     }
-    super::events::system(&dir, "system", &prompts::system(&e.conf.name));
+    super::events::system(&dir, "system", &prompts::system(&e.conf.name, &e.conf.user));
     let url = mcp::start(e.clone());
     let _ = e.mcp_url.set(url);
     e.load_pause();

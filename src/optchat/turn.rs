@@ -327,7 +327,7 @@ pub fn tools(e: &Engine) -> String {
 /// Its priming request must use exactly these.
 pub fn shared_args(e: &Engine, model: &str, effort: &str, mcp_url: &str) -> Vec<String> {
     let sd = state_dir(&e.dir);
-    let sys = prompts::system(&e.conf.name);
+    let sys = prompts::system(&e.conf.name, &e.conf.user);
     super::events::system(&e.dir, "system", &sys);
     let f = sd.join("system.txt");
     if std::fs::read_to_string(&f).ok().as_deref() != Some(sys.as_str()) { let _ = std::fs::write(&f, &sys); }
