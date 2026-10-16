@@ -350,12 +350,13 @@ fn limit_hit(e: &Arc<Engine>, text: &str, error: bool) -> bool {
 /// `route` (chat, cards; the last call counts) and logged once, unchanged, as its end record
 /// (`work`), at this moment. The chat venue reads it from the log (`log::end_body`); a card
 /// gets it as a reply. With no `route` call it goes back where the message came from: a chat
-/// message to the chat, a card's message to that card, a handed-on task nowhere. With one,
+/// message to the chat, a card's message to that card, a handed-on task nowhere (to the chat
+/// if spawned with `--chat`). With one,
 /// what it leaves out is off: `route {chat: false}` posts nowhere (memory only), as when a
 /// card is closed with nothing to say on it.
 #[allow(clippy::too_many_arguments)]
 fn finish(e: &Arc<Engine>, job: &Job, sv: &str, owed: bool, status: &str, last: &str, spoke: bool, ending: Option<Value>, mut trace: Value) {
-    let served_chat = owed && crate::log::wants_chat(&job.text);
+    let served_chat = job.chat || (owed && crate::log::wants_chat(&job.text));
     let origin_card: Vec<String> = if owed { crate::cards::from_card(&job.text).map(|c| vec![c.to_string()]).unwrap_or_default() } else { vec![] };
     let text = last.to_string();
     let (chat, cards) = match &ending {
@@ -461,7 +462,7 @@ mod tests {
 
     #[test]
     fn end_records_name_what_they_serve() {
-        let j = Job { id: "inst_1".into(), model: "opus".into(), effort: "high".into(), text: "hi".into(), from: None, desc: String::new(), wait: None, inbox: None, resume: None };
+        let j = Job { id: "inst_1".into(), model: "opus".into(), effort: "high".into(), text: "hi".into(), from: None, desc: String::new(), wait: None, inbox: None, resume: None, chat: false };
         assert_eq!(serves(&j, Some(41), &[]), "answers 41");
         assert_eq!(serves(&j, Some(41), &[45, 47]), "answers 41, 45, 47");
         let t = Job { from: Some("inst_0".into()), desc: "check (a); b".into(), model: "sonnet".into(), text: "do X".into(), ..j };
@@ -557,7 +558,7 @@ mod tests {
 
         // a handed-on task: an instance like any other, on agent_model; --wait gets its record
         let (tx, rx) = std::sync::mpsc::channel();
-        let id = turn::spawn(&e, "", "", "look", "find the thing", &c, Some(tx)).unwrap();
+        let id = turn::spawn(&e, "", "", "look", "find the thing", &c, false, Some(tx)).unwrap();
         let rec = rx.recv_timeout(Duration::from_secs(20)).unwrap();
         assert_eq!(rec, format!("[{}] (task from [{}]: look) LEARNED: something", id, c));
         let m = msgs(&e);

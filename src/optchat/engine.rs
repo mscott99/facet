@@ -5,7 +5,7 @@
 //
 //   -> {"op":"send","text":"..."}     a user message: it starts an instance of its own
 //                                     (`later`, from older clients, is ignored)
-//   -> {"op":"spawn","task":..,"model":..,"effort":..,"desc":..,"from":..,"wait":bool}
+//   -> {"op":"spawn","task":..,"model":..,"effort":..,"desc":..,"from":..,"wait":bool,"chat":bool}
 //                                     a task handed on: an instance like any other; with wait,
 //                                     the reply comes at its end, with its end record
 //   -> {"op":"cancel"}                stop the start that waits, and every running instance
@@ -636,7 +636,7 @@ fn client(e: &Arc<Engine>, conn: UnixStream) {
                 let wait = v["wait"].as_bool().unwrap_or(false);
                 let (tx, rx) = std::sync::mpsc::channel();
                 match turn::spawn(e, v["model"].as_str().unwrap_or(""), v["effort"].as_str().unwrap_or(""),
-                    v["desc"].as_str().unwrap_or(""), v["task"].as_str().unwrap_or(""), v["from"].as_str().unwrap_or(""), wait.then_some(tx)) {
+                    v["desc"].as_str().unwrap_or(""), v["task"].as_str().unwrap_or(""), v["from"].as_str().unwrap_or(""), v["chat"].as_bool().unwrap_or(false), wait.then_some(tx)) {
                     Ok(id) if wait => {
                         let Ok(record) = rx.recv() else { return };
                         if writeln!(w, "{}", json!({"ok": true, "id": id, "report": record})).and_then(|_| w.flush()).is_err() { return }

@@ -35,6 +35,8 @@ pub struct Job {
     pub inbox: Option<String>,
     /// a start again, after `wait_for`: the same instance, the same message
     pub resume: Option<Resume>,
+    /// a handed-on task whose end goes to the chat unless it routes elsewhere (`facet spawn --chat`)
+    pub chat: bool,
 }
 
 /// What an instance that deferred (`wait_for`) keeps for its next start: the message it
@@ -176,19 +178,19 @@ pub fn input_item(e: &Arc<Engine>, it: &super::inbox::Item) {
         }
     }
     let inbox = Some(it.id.clone()).filter(|i| !i.is_empty());
-    let job = Job { id: new_id(), model: e.model(), effort: e.conf.effort.clone(), text: it.text.clone(), from: None, desc: String::new(), wait: None, inbox, resume: None };
+    let job = Job { id: new_id(), model: e.model(), effort: e.conf.effort.clone(), text: it.text.clone(), from: None, desc: String::new(), wait: None, inbox, resume: None, chat: false };
     enqueue(e, job);
 }
 
 /// A task handed on (`facet spawn`): an instance like any other, by default on `agent_model`
 /// (Sonnet). Returns its name at once; with a waiter, its end record goes there too.
-pub fn spawn(e: &Arc<Engine>, model: &str, effort: &str, desc: &str, task: &str, from: &str, wait: Option<Waiter>) -> Result<String, String> {
+pub fn spawn(e: &Arc<Engine>, model: &str, effort: &str, desc: &str, task: &str, from: &str, chat: bool, wait: Option<Waiter>) -> Result<String, String> {
     let task = task.trim();
     if task.is_empty() { return Err("empty task".into()) }
     let pick = |x: &str, d: &str| if x.trim().is_empty() { d.to_string() } else { x.trim().to_string() };
     let job = Job {
         id: new_id(), model: pick(model, &e.conf.agent_model), effort: pick(effort, &e.conf.effort),
-        text: task.to_string(), from: Some(from.trim().to_string()), desc: desc.trim().to_string(), wait, inbox: None, resume: None,
+        text: task.to_string(), from: Some(from.trim().to_string()), desc: desc.trim().to_string(), wait, inbox: None, resume: None, chat,
     };
     let id = job.id.clone();
     enqueue(e, job);

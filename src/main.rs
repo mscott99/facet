@@ -169,7 +169,7 @@ fn main() {
         // and writes its own end record. With --wait: blocks, prints the end record.
         "spawn" => {
             let (mut model, mut desc, mut effort) = (String::new(), String::new(), String::new());
-            let mut wait = false;
+            let (mut wait, mut chat) = (false, false);
             let mut words = Vec::new();
             let mut file = String::new();
             let mut i = 0;
@@ -182,7 +182,8 @@ fn main() {
                     "--desc" => { desc = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                     "--effort" => { effort = rest.get(i + 1).cloned().unwrap_or_default(); i += 2; }
                     "--wait" => { wait = true; i += 1; }
-                    "-h" | "--help" => { println!("facet spawn [--wait] [--model M] [--effort low|medium|high|xhigh|max] [--desc D] [--task-file PATH | - | TASK...]\n  starts an instance for the task, on Sonnet (conf agent_model) at the configured effort unless --model/--effort say otherwise;\n  it sees the log as of its start, answers the user itself and writes its own end record\n  --wait: block until its end record and print it"); return; }
+                    "--chat" => { chat = true; i += 1; }
+                    "-h" | "--help" => { println!("facet spawn [--wait] [--chat] [--model M] [--effort low|medium|high|xhigh|max] [--desc D] [--task-file PATH | - | TASK...]\n  starts an instance for the task, on Sonnet (conf agent_model) at the configured effort unless --model/--effort say otherwise;\n  it sees the log as of its start, answers the user itself and writes its own end record\n  --wait: block until its end record and print it\n  --chat: its end message goes to the chat (unless it routes elsewhere), not only to memory"); return; }
                     w => { words.push(w.to_string()); i += 1; }
                 }
             }
@@ -196,7 +197,7 @@ fn main() {
                 std::fs::read_to_string(&file).unwrap_or_else(|e| die(&format!("{}: {}", file, e)))
             } else { words.join(" ") };
             match optchat::engine::request(&optchat::engine::dir(),
-                serde_json::json!({"op": "spawn", "model": model, "effort": effort, "desc": desc, "task": task, "wait": wait,
+                serde_json::json!({"op": "spawn", "model": model, "effort": effort, "desc": desc, "task": task, "wait": wait, "chat": chat,
                     "from": std::env::var("FACET_INSTANCE").unwrap_or_default()})) {
                 Ok(v) if v["ok"].as_bool() == Some(true) && wait => println!("{}", v["report"].as_str().unwrap_or("")),
                 Ok(v) if v["ok"].as_bool() == Some(true) => println!("{}", v["id"].as_str().unwrap_or("")),
@@ -283,7 +284,7 @@ facet unpost <slug>         unpublish
 facet docs                  what is published
 facet send <text>           put a message into the conversation: it starts an instance
 facet push [--log] <text>   push a message to Telegram; --log also adds it to the chat log as a note (no turn)
-facet spawn [--wait] [--model M] [--effort E] [--desc D] <task> | --task-file PATH | -
+facet spawn [--wait] [--chat] [--model M] [--effort E] [--desc D] <task> | --task-file PATH | -
                             (the task from a file, or from stdin with `-`: a quoted heredoc keeps
                             the shell from running backticks in it)
                             hand a task to a new instance: returns its name at once; it answers
