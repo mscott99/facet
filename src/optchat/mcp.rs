@@ -28,6 +28,8 @@ pub fn tools() -> Value {
                 "cards": {"type": "array", "items": {"type": "string"}}}, "required": ["chat"]}}));
         a.push(json!({"name": "wait_for", "description": prompts::WAIT_DOC,
             "inputSchema": {"type": "object", "properties": {"instance": st, "note": st}, "required": ["instance"]}}));
+        a.push(json!({"name": "pass_to", "description": prompts::PASS_DOC,
+            "inputSchema": {"type": "object", "properties": {"instance": st}, "required": ["instance"]}}));
         a.push(json!({"name": "send_file", "description": "Send a file from the server's disk to the user's Telegram chat as a document (max 50 MB). Also logs a line in the chat.",
             "inputSchema": {"type": "object", "properties": {"path": st, "caption": st}, "required": ["path"]}}));
         a.push(json!({"name": "new_card", "description": prompts::NEW_CARD_DOC,
@@ -51,6 +53,8 @@ pub fn tools() -> Value {
 pub const SENT: &str = "sent";
 pub const ANSWERED: &str = "answered";
 pub const ROUTED: &str = "Set: your final text goes there when you end (a later route call replaces this).";
+
+pub const PASSING: &str = "Passed: end now, with one short line (it is dropped). It gets your message when you end.";
 
 pub const WAITING: &str = "Deferred: end now, with one short line (it is dropped). You start again when it ends.";
 
@@ -174,6 +178,18 @@ fn handle(e: &Arc<Engine>, v: &Value, inst: Option<&str>) -> Option<Value> {
                         Err(x) => (format!("wait_for failed: {}", x), true),
                     },
                 },
+                "pass_to" => match inst {
+                    None => ("pass_to: only an instance can pass a message on.".into(), true),
+                    Some(me) => {
+                        let to = st("instance");
+                        let to = to.trim().trim_start_matches('[').trim_end_matches(']').to_string();
+                        let taking = e.owners.lock().unwrap().tap_of(&to).is_some();
+                        match e.turn.lock().unwrap().pass(me, &to, taking) {
+                            Ok(_) => (PASSING.into(), false),
+                            Err(x) => (format!("pass_to failed: {}", x), true),
+                        }
+                    }
+                },
                 "send_file" => {
                     let cap = a["caption"].as_str().unwrap_or("");
                     match crate::tg::send_file(&crate::cfg::Cfg::load(), &st("path"), Some(cap)) {
@@ -214,7 +230,7 @@ mod tests {
     #[test]
     fn every_instance_has_the_output_tools() {
         let names = |t: Value| t.as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
-        assert_eq!(names(tools()), ["zoom", "date", "send_chat", "route", "wait_for", "send_file", "new_card", "answer_card", "fix_card", "close_card", "list_cards"]);
+        assert_eq!(names(tools()), ["zoom", "date", "send_chat", "route", "wait_for", "pass_to", "send_file", "new_card", "answer_card", "fix_card", "close_card", "list_cards"]);
     }
 
     #[test]

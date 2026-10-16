@@ -55,7 +55,7 @@ leaves out, not to confirm it. Zoom freely.
 
 Your view is the log as it stood when you started: the end records of instances
 that had ended by then. Those still running are listed after the view, with what
-they serve: that work is under way; do not do it again; say so if it matters. If you need its result first, call wait_for and end: you start again once it ends. Another instance may be editing the same files: re-read a file right
+they serve: that work is under way; do not do it again; say so if it matters. If you need its result first, call wait_for and end: you start again once it ends. If your message belongs to its work (it corrects, adds to or answers what that instance is doing), call pass_to and end instead: it gets your message verbatim, as if sent to it, and answers it. Another instance may be editing the same files: re-read a file right
 before you edit it, change only what you read, and never write over text you
 have not read. The user may send you a message while you run (it arrives as a
 message of its own, and is in the log as `(to [you]) ...`): answer it in your
@@ -146,6 +146,7 @@ pub const ZOOM_DOC: &str = "Open the line id+n of the view into the two lines of
 pub const DATE_DOC: &str = "The date and time of message id.";
 pub const ROUTE_DOC: &str = "Choose where your final message (your final text, always logged to memory unchanged) is posted: chat (Telegram and the chat page) on or off, and cards (ids) to reply on. Without it, it goes back where your message came from; with it, only to what it names, so route {chat: false} posts it nowhere, to memory only (as when you close a card with nothing to ask). The last call counts.";
 pub const WAIT_DOC: &str = "Defer your turn until the running instance named (as `[Name]` in your running list) ends, when its result is what you need: you end now, unanswered, and are started again on the same message, under your name, with the log as it then stands, its end record in your view. Meanwhile others see you waiting for it. note: what you have found or done so far, given to your next start. After the call end at once: your final text is dropped and nothing is logged.";
+pub const PASS_DOC: &str = "Pass the message you answer to the running instance named (as `[Name]` in your running list), when it belongs to that instance's work: it is written into its input verbatim, as a message sent to it while it runs, and it answers it in its end message. Better than wait_for when the message changes or adds to what it does; wait_for when yours is a job of its own that needs its result. After the call end at once: your final text is dropped and nothing is logged. If it has ended before taking it, you start again on your message, its end record in your view.";
 pub const SEND_DOC: &str = "Send text to the user in the chat (Telegram and the chat page) now, before your end: for what cannot wait. It is also logged.";
 pub const ANSWER_DOC: &str = "Say something on the card with this id (from `[[Note]] L<n> #<id>`): it appears on that card only, not in the chat; it is also logged. On the card that started you, your end message also lands, as your reply. fix, only if you mean it: replacement text for the card's lines, which the user can apply with a button.";
 pub const NEW_CARD_DOC: &str = "Open a card on a line of a note: shown under that line, live on any open page. note: its name or path. anchor: verbatim text from the note, unique in it (preferred), or line: a 1-based line number. text: what you say (markdown, math). kind: comment (default), info, warn or error, only a colour. fix: replacement text for the anchored lines, only if you mean it. Returns the card's id.";
@@ -180,6 +181,16 @@ pub fn resumed(after: &str, note: &str, extra: &[usize]) -> String {
 /// A message the user sent to an instance while it runs, as the instance reads it.
 pub fn injected(msg: usize, text: &str) -> String {
     format!("Message {} from the user, sent to you while you run. Your final message answers it too.\n\n{}", msg, text.trim())
+}
+
+/// A user message another instance passed on (`pass_to`), as the instance it goes to reads it.
+pub fn passed(msg: usize, by: &str, text: &str) -> String {
+    format!("Message {} from the user, passed on to you by [{}], which judged it part of your work. Your final message answers it too; if it came from a card, its reply goes there only if you name that card in route.\n\n{}", msg, by, text.trim())
+}
+
+/// The start block's end for an instance started again because its `pass_to` found the other ended.
+pub fn unpassed(to: &str) -> String {
+    format!("\n\nYou ran on this before and passed it to [{}], which ended before taking it; its end record is in your view. Answer it yourself.", to)
 }
 
 pub fn named(p: &str, name: &str) -> String { p.replace("{NAME}", name) }

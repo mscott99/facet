@@ -45,6 +45,8 @@ pub struct Resume {
     pub extra: Vec<usize>,
     pub after: String,
     pub note: String,
+    /// started again because its `pass_to` found the other ended, not after `wait_for`
+    pub unpassed: bool,
 }
 
 #[derive(Default)]
@@ -65,6 +67,8 @@ pub struct State {
     pub waiting: Vec<(String, Job)>,
     /// `wait_for` calls not yet acted on: instance -> (the one it waits for, its note)
     pub deferring: std::collections::HashMap<String, (String, String)>,
+    /// `pass_to` calls not yet acted on: instance -> the one it passes its message to
+    pub passing: std::collections::HashMap<String, String>,
 }
 
 impl State {
@@ -86,6 +90,22 @@ impl State {
         }
         self.deferring.insert(who.to_string(), (on.to_string(), note.trim().to_string()));
         Ok(())
+    }
+
+    /// `pass_to(to)` by `who`: allowed if `who` answers a user message and `to` runs, takes
+    /// messages (`taking`: it has its tap), and is not itself passing or waiting.
+    pub fn pass(&mut self, who: &str, to: &str, taking: bool) -> Result<String, String> {
+        let to = to.trim().trim_start_matches('[').trim_end_matches(']');
+        if to == who { return Err("an instance cannot pass to itself".into()) }
+        let mine = self.live.iter().find(|(i, _)| i == who).map(|x| x.1.clone()).unwrap_or_default();
+        if !mine.contains(", answers ") { return Err("only an instance answering a user message can pass it on".into()) }
+        if !self.live.iter().any(|(i, _)| i == to) { return Err(format!("[{}] is not running: answer it yourself, its end record is in the log", to)) }
+        if self.waits_for(to).is_some() { return Err(format!("[{}] is waiting for another instance: wait_for it instead, or answer yourself", to)) }
+        if self.passing.contains_key(to) { return Err(format!("[{}] is passing its own message on", to)) }
+        if !taking { return Err(format!("[{}] is finishing and takes no more messages: wait_for it instead", to)) }
+        if self.deferring.contains_key(who) { return Err("you already called wait_for".into()) }
+        self.passing.insert(who.to_string(), to.to_string());
+        Ok(to.to_string())
     }
 }
 
@@ -150,7 +170,7 @@ pub fn input_item(e: &Arc<Engine>, it: &super::inbox::Item) {
             if let Some(i) = e.log_at("user", &format!("(to [{}]) {}", inst, text), &super::store::now_iso()) {
                 o.own(i, &inst);
                 o.inbox(&it.id, i);
-                let _ = tap.send(super::owners::Inject { msg: i, text });
+                let _ = tap.send(super::owners::Inject { msg: i, text, via: None });
                 return
             }
         }

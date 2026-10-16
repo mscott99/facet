@@ -14,8 +14,9 @@ use std::sync::mpsc::Sender;
 /// time can have answered.
 const KEEP: usize = 5000;
 
-/// A message for a running instance: its place in the log, and the text sent to the model.
-pub struct Inject { pub msg: usize, pub text: String }
+/// A message for a running instance: its place in the log, the text sent to the model, and
+/// the instance that passed it on (`pass_to`), if it came that way.
+pub struct Inject { pub msg: usize, pub text: String, pub via: Option<String> }
 
 #[derive(Default)]
 pub struct Owners {
@@ -46,6 +47,8 @@ impl Owners {
     }
     /// It takes no more messages. Idempotent.
     pub fn untap(&mut self, inst: &str) { self.taps.remove(inst); }
+    /// The tap of `inst`, if it still takes messages.
+    pub fn tap_of(&self, inst: &str) -> Option<&Sender<Inject>> { self.taps.get(inst) }
 
     /// The running instance a message is for, if any: nothing when it names none, or one that
     /// has ended (never the latest instead: an older instance's thread is not for it).
