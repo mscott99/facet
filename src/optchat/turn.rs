@@ -33,6 +33,18 @@ pub struct Job {
     pub wait: Option<Waiter>,
     /// the inbox item a user message came in as (owners.rs: replies to it find its instance)
     pub inbox: Option<String>,
+    /// a start again, after `wait_for`: the same instance, the same message
+    pub resume: Option<Resume>,
+}
+
+/// What an instance that deferred (`wait_for`) keeps for its next start: the message it
+/// serves, those sent to it while it ran, whom it waited for and the note it left itself.
+#[derive(Clone, Debug, Default)]
+pub struct Resume {
+    pub msg: Option<usize>,
+    pub extra: Vec<usize>,
+    pub after: String,
+    pub note: String,
 }
 
 #[derive(Default)]
@@ -47,7 +59,34 @@ pub struct State {
     pub epoch: u64,
     pub phase: String,
     /// instances running now, oldest first: name, and the line a new instance is shown
+    /// (one waiting is still here, its line saying whom it waits for)
     pub live: Vec<(String, String)>,
+    /// deferred instances (`wait_for`), each with the one it waits for
+    pub waiting: Vec<(String, Job)>,
+    /// `wait_for` calls not yet acted on: instance -> (the one it waits for, its note)
+    pub deferring: std::collections::HashMap<String, (String, String)>,
+}
+
+impl State {
+    /// Whom `who` waits for, or is about to.
+    pub fn waits_for(&self, who: &str) -> Option<&str> {
+        self.deferring.get(who).map(|(o, _)| o.as_str())
+            .or_else(|| self.waiting.iter().find(|(_, j)| j.id == who).map(|(o, _)| o.as_str()))
+    }
+
+    /// `wait_for(on)` by `who`: allowed if `on` runs (or waits) and waiting would not close a loop.
+    pub fn defer(&mut self, who: &str, on: &str, note: &str) -> Result<(), String> {
+        let on = on.trim().trim_start_matches('[').trim_end_matches(']');
+        if on == who { return Err("an instance cannot wait for itself".into()) }
+        if !self.live.iter().any(|(i, _)| i == on) { return Err(format!("[{}] is not running: zoom its end record instead", on)) }
+        let mut at = on;
+        while let Some(n) = self.waits_for(at) {
+            if n == who { return Err(format!("[{}] already waits, through others, for you", on)) }
+            at = n;
+        }
+        self.deferring.insert(who.to_string(), (on.to_string(), note.trim().to_string()));
+        Ok(())
+    }
 }
 
 fn new_id() -> String {
@@ -60,7 +99,7 @@ fn new_id() -> String {
 /// of the engine loses none of them (§2). Handed-on tasks are not: a restart waits for the
 /// starter to be idle, so none is ever queued then.
 fn save(e: &Engine, t: &State) {
-    let all: Vec<&String> = t.queue.iter().filter(|j| j.from.is_none()).map(|j| &j.text).collect();
+    let all: Vec<&String> = t.queue.iter().filter(|j| j.from.is_none() && j.resume.is_none()).map(|j| &j.text).collect();
     let f = state_dir(&e.dir).join("queue.json");
     if all.is_empty() { let _ = std::fs::remove_file(&f); return }
     let tmp = f.with_extension("tmp");
@@ -117,7 +156,7 @@ pub fn input_item(e: &Arc<Engine>, it: &super::inbox::Item) {
         }
     }
     let inbox = Some(it.id.clone()).filter(|i| !i.is_empty());
-    let job = Job { id: new_id(), model: e.model(), effort: e.conf.effort.clone(), text: it.text.clone(), from: None, desc: String::new(), wait: None, inbox };
+    let job = Job { id: new_id(), model: e.model(), effort: e.conf.effort.clone(), text: it.text.clone(), from: None, desc: String::new(), wait: None, inbox, resume: None };
     enqueue(e, job);
 }
 
@@ -129,18 +168,22 @@ pub fn spawn(e: &Arc<Engine>, model: &str, effort: &str, desc: &str, task: &str,
     let pick = |x: &str, d: &str| if x.trim().is_empty() { d.to_string() } else { x.trim().to_string() };
     let job = Job {
         id: new_id(), model: pick(model, &e.conf.agent_model), effort: pick(effort, &e.conf.effort),
-        text: task.to_string(), from: Some(from.trim().to_string()), desc: desc.trim().to_string(), wait, inbox: None,
+        text: task.to_string(), from: Some(from.trim().to_string()), desc: desc.trim().to_string(), wait, inbox: None, resume: None,
     };
     let id = job.id.clone();
     enqueue(e, job);
     Ok(id)
 }
 
+/// A deferred instance, started again (instance.rs): ahead of the queue.
+pub fn requeue(e: &Arc<Engine>, job: Job) { enqueue(e, job) }
+
 fn enqueue(e: &Arc<Engine>, job: Job) {
     let bytes = job.text.len();
-    let text = if job.from.is_none() { job.text.clone() } else { String::new() };
+    let text = if job.from.is_none() && job.resume.is_none() { job.text.clone() } else { String::new() };
     let mut t = e.turn.lock().unwrap();
-    t.queue.push_back(job);
+    // one started again goes first: its message came before any still queued
+    if job.resume.is_some() { t.queue.push_front(job) } else { t.queue.push_back(job) }
     let how = if t.running { "queued" } else {
         t.running = true;
         t.cancel = false;
@@ -164,7 +207,9 @@ pub fn cancel(e: &Arc<Engine>) {
     let mut t = e.turn.lock().unwrap();
     t.epoch += 1;
     if t.running { t.cancel = true; }
+    let waiting: Vec<Job> = t.waiting.drain(..).map(|(_, j)| j).collect();
     drop(t);
+    for j in waiting { super::instance::cancel_waiting(e, j); }
     let _m = e.mem.lock().unwrap();
     e.changed.notify_all();
 }
@@ -188,7 +233,10 @@ fn run(e: &Arc<Engine>) {
             t.cancel = false;
             save(e, &t);
             drop(t);
-            for j in left { if j.from.is_none() { e.log("user", &j.text); } }
+            for j in left {
+                if j.resume.is_some() { super::instance::cancel_waiting(e, j); }
+                else if j.from.is_none() { e.log("user", &j.text); }
+            }
             e.notice("cancelled");
             break;
         }
@@ -199,6 +247,12 @@ fn run(e: &Arc<Engine>) {
         let (view, parts) = { let m = e.mem.lock().unwrap(); (m.view.render(&m.store), m.view.parts.len()) };
         let mut vstats = super::events::view_stats(&view, parts);
         vstats["settle_ms"] = json!(settle_ms);
+        if let Some(r) = &job.resume {
+            let msg = r.msg;
+            { let t = e.turn.lock().unwrap(); save(e, &t); }
+            super::instance::launch(e, job, view, msg, epoch, vstats);
+            continue;
+        }
         let msg = if job.from.is_none() { e.log("user", &job.text); Some(e.mem.lock().unwrap().store.t() - 1) } else { None };
         if let Some(i) = msg {
             let mut o = e.owners.lock().unwrap();

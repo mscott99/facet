@@ -26,6 +26,8 @@ pub fn tools() -> Value {
         a.push(json!({"name": "route", "description": prompts::ROUTE_DOC,
             "inputSchema": {"type": "object", "properties": {"chat": {"type": "boolean"},
                 "cards": {"type": "array", "items": {"type": "string"}}}, "required": ["chat"]}}));
+        a.push(json!({"name": "wait_for", "description": prompts::WAIT_DOC,
+            "inputSchema": {"type": "object", "properties": {"instance": st, "note": st}, "required": ["instance"]}}));
         a.push(json!({"name": "send_file", "description": "Send a file from the server's disk to the user's Telegram chat as a document (max 50 MB). Also logs a line in the chat.",
             "inputSchema": {"type": "object", "properties": {"path": st, "caption": st}, "required": ["path"]}}));
         a.push(json!({"name": "new_card", "description": prompts::NEW_CARD_DOC,
@@ -49,6 +51,8 @@ pub fn tools() -> Value {
 pub const SENT: &str = "sent";
 pub const ANSWERED: &str = "answered";
 pub const ROUTED: &str = "Set: your final text goes there when you end (a later route call replaces this).";
+
+pub const WAITING: &str = "Deferred: end now, with one short line (it is dropped). You start again when it ends.";
 
 /// The card tools that speak (and so log themselves); `list_cards` only reads.
 pub fn card_action(tool: &str) -> Option<&'static str> {
@@ -163,6 +167,13 @@ fn handle(e: &Arc<Engine>, v: &Value, inst: Option<&str>) -> Option<Value> {
                 },
                 // the instance reads its own call (instance.rs) and posts its final text there
                 "route" => (ROUTED.into(), false),
+                "wait_for" => match inst {
+                    None => ("wait_for: only an instance can wait.".into(), true),
+                    Some(me) => match e.turn.lock().unwrap().defer(me, &st("instance"), &st("note")) {
+                        Ok(()) => (WAITING.into(), false),
+                        Err(x) => (format!("wait_for failed: {}", x), true),
+                    },
+                },
                 "send_file" => {
                     let cap = a["caption"].as_str().unwrap_or("");
                     match crate::tg::send_file(&crate::cfg::Cfg::load(), &st("path"), Some(cap)) {
@@ -203,7 +214,7 @@ mod tests {
     #[test]
     fn every_instance_has_the_output_tools() {
         let names = |t: Value| t.as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
-        assert_eq!(names(tools()), ["zoom", "date", "send_chat", "route", "send_file", "new_card", "answer_card", "fix_card", "close_card", "list_cards"]);
+        assert_eq!(names(tools()), ["zoom", "date", "send_chat", "route", "wait_for", "send_file", "new_card", "answer_card", "fix_card", "close_card", "list_cards"]);
     }
 
     #[test]

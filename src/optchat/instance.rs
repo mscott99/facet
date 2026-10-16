@@ -65,12 +65,18 @@ pub fn end_record(id: &str, serves: &str, status: &str, text: &str, to: &[String
 /// start: the instances started after it, while it runs, see it in their running list (not
 /// memory). Called by the starter (turn.rs), one at a time, with the view as it stands now.
 pub fn launch(e: &Arc<Engine>, job: Job, view: String, msg: Option<usize>, epoch: u64, mut stats: Value) {
-    e.instances.fetch_add(1, SeqCst);
-    let sv = serves(&job, msg, &[]);
+    // one started again (after `wait_for`) was counted, and listed, all along
+    if job.resume.is_none() { e.instances.fetch_add(1, SeqCst); }
+    let extra = job.resume.as_ref().map(|r| r.extra.clone()).unwrap_or_default();
+    let sv = serves(&job, msg, &extra);
     let running: Vec<String> = {
         let mut t = e.turn.lock().unwrap();
-        let r = t.live.iter().map(|(_, l)| l.clone()).collect();
-        t.live.push((job.id.clone(), format!("[{}] ({}, {})", job.id, job.model, sv)));
+        let r = t.live.iter().filter(|(i, _)| i != &job.id).map(|(_, l)| l.clone()).collect();
+        let line = format!("[{}] ({}, {})", job.id, job.model, sv);
+        match t.live.iter_mut().find(|(i, _)| i == &job.id) {
+            Some(l) => l.1 = line,
+            None => t.live.push((job.id.clone(), line)),
+        }
         r
     };
     // its own URL names it, so what it says in the chat is known to be its (owners.rs)
@@ -80,7 +86,8 @@ pub fn launch(e: &Arc<Engine>, job: Job, view: String, msg: Option<usize>, epoch
     let mut env = turn::env(e);
     env.push(("FACET_INSTANCE", job.id.clone()));
     let envr: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let head = prompts::start(&job.id, msg, &running, job.from.as_deref(), &job.text);
+    let mut head = prompts::start(&job.id, msg, &running, job.from.as_deref(), &job.text);
+    if let Some(r) = &job.resume { head.push_str(&prompts::resumed(&r.after, &r.note, &r.extra)); }
     let started = Proc::spawn_detached(&args, &envr, &e.conf.cwd)
         .and_then(|mut p| p.send(turn::content(&view, &head)).map(|_| p));
     stats["instance"] = json!(job.id); stats["msg"] = json!(msg); stats["model"] = json!(job.model);
@@ -106,7 +113,9 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, msg: Option<usize>, epoch: u64, rx
     let mut last = String::new();
     let mut status = "failed";
     // the messages the user sent it while it ran, in the log (they are answered by its end message)
-    let mut answered: Vec<usize> = Vec::new();
+    let mut answered: Vec<usize> = job.resume.as_ref().map(|r| r.extra.clone()).unwrap_or_default();
+    // it called `wait_for`: whom for, and its note
+    let mut deferred: Option<(String, String)> = None;
     // its first result is in and its input closed: claude finishes the messages it still has
     // queued (each may end in a result of its own) and exits
     let mut closing = false;
@@ -174,6 +183,14 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, msg: Option<usize>, epoch: u64, rx
                 if ok { e.proof_of_life(); }
                 status = if ok { "done" } else { "failed" };
                 if !ok { break }
+                // it deferred: no more messages into it; those sent meanwhile go to its next start
+                let d = e.turn.lock().unwrap().deferring.remove(&job.id);
+                if let Some(d) = d {
+                    e.owners.lock().unwrap().untap(&job.id);
+                    while let Ok(m) = rx.try_recv() { answered.push(m.msg); }
+                    deferred = Some(d);
+                    break
+                }
                 // no more messages into it from now on (under the lock they are sent under);
                 // what was sent before is read, and if it got any, claude is left to finish them
                 e.owners.lock().unwrap().untap(&job.id);
@@ -188,7 +205,43 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, msg: Option<usize>, epoch: u64, rx
     if status != "cancelled" && status != "timed out" { p.finish(); }
     if let Some(r) = meter.take() { e.spend("instance", &r); }
     let trace = json!({"reqs": reqs, "eq": eq.round(), "tools": tool_uses, "ms": at.elapsed().as_millis()});
+    if let Some((on, note)) = deferred { return park(&e, job, msg, answered, on, note, trace) }
     finish(&e, &job, &serves(&job, msg, &answered), msg.is_some(), status, &turn::cap(last.trim()), spoke, ending, trace);
+}
+
+/// `wait_for`: the instance has ended without answering. It stays counted (a restart waits for
+/// it) and listed, its line naming whom it waits for, so no other instance takes up its work;
+/// nothing is logged. When that one ends (`finish`), it is started again: same name, same
+/// message, the view as it then stands. If that one has already ended, at once.
+#[allow(clippy::too_many_arguments)]
+fn park(e: &Arc<Engine>, mut job: Job, msg: Option<usize>, extra: Vec<usize>, on: String, note: String, mut trace: Value) {
+    let sv = serves(&job, msg, &extra);
+    let mark = json!({"type": "facet", "text": format!("(deferred: waits for [{}]{})", on, if note.is_empty() { String::new() } else { format!("; note: {}", note) })});
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir(e).join(format!("{}.jsonl", job.id))) { let _ = writeln!(f, "{}", mark); }
+    trace["instance"] = json!(job.id); trace["serves"] = json!(sv); trace["status"] = json!("deferred");
+    trace["model"] = json!(job.model); trace["on"] = json!(on);
+    super::events::log(&e.dir, "instance", trace);
+    job.resume = Some(turn::Resume { msg, extra, after: on.clone(), note });
+    let mut t = e.turn.lock().unwrap();
+    if let Some(l) = t.live.iter_mut().find(|(i, _)| i == &job.id) {
+        l.1 = format!("[{}] ({}, {}, waiting for [{}])", job.id, job.model, sv, on);
+    }
+    let id = job.id.clone();
+    if t.live.iter().any(|(i, _)| i == &on) {
+        t.waiting.push((on.clone(), job));
+        drop(t);
+        e.notice(&format!("[{}] waits for [{}]", id, on));
+    } else {
+        drop(t);
+        turn::requeue(e, job);
+    }
+    e.emit_state();
+}
+
+/// A deferred instance stopped by a cancel before it started again: it ends as cancelled.
+pub fn cancel_waiting(e: &Arc<Engine>, job: Job) {
+    let r = job.resume.clone().unwrap_or_default();
+    finish(e, &job, &serves(&job, r.msg, &r.extra), r.msg.is_some(), "cancelled", "", false, None, json!({}));
 }
 
 /// Write the messages the user has sent to this instance into its input, as they came.
@@ -251,7 +304,17 @@ fn finish(e: &Arc<Engine>, job: &Job, sv: &str, owed: bool, status: &str, last: 
     trace["instance"] = json!(job.id); trace["serves"] = json!(sv); trace["status"] = json!(status);
     trace["model"] = json!(job.model); trace["spoke"] = json!(spoke); trace["net"] = json!(net); trace["ended"] = json!(ending.is_some()); trace["to"] = json!(to); trace["record_bytes"] = json!(record.len());
     super::events::log(&e.dir, "instance", trace);
-    e.turn.lock().unwrap().live.retain(|(i, _)| i != &job.id);
+    // those waiting for it start again (under the same lock its leaving the live list is
+    // decided under, so a `wait_for` racing its end cannot be lost)
+    let woken: Vec<Job> = {
+        let mut t = e.turn.lock().unwrap();
+        t.live.retain(|(i, _)| i != &job.id);
+        t.deferring.remove(&job.id);
+        let (w, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut t.waiting).into_iter().partition(|(on, _)| on == &job.id);
+        t.waiting = keep;
+        w.into_iter().map(|(_, j)| j).collect()
+    };
+    for j in woken { turn::requeue(e, j); }
     e.owners.lock().unwrap().untap(&job.id);
     e.instances.fetch_sub(1, SeqCst);
     let line = usage::limits_line(&e.limits());
@@ -301,6 +364,7 @@ pub fn transcript(e: &Engine, name: &str) -> String {
                     out.push(format!("echo: {}", turn::cap(&turn::strip_cwd_note(&t))));
                 }
             },
+            "facet" => out.push(format!("echo: {}", ev["text"].as_str().unwrap_or(""))),
             _ => {}
         }
     }
@@ -313,7 +377,7 @@ mod tests {
 
     #[test]
     fn end_records_name_what_they_serve() {
-        let j = Job { id: "inst_1".into(), model: "opus".into(), effort: "high".into(), text: "hi".into(), from: None, desc: String::new(), wait: None, inbox: None };
+        let j = Job { id: "inst_1".into(), model: "opus".into(), effort: "high".into(), text: "hi".into(), from: None, desc: String::new(), wait: None, inbox: None, resume: None };
         assert_eq!(serves(&j, Some(41), &[]), "answers 41");
         assert_eq!(serves(&j, Some(41), &[45, 47]), "answers 41, 45, 47");
         let t = Job { from: Some("inst_0".into()), desc: "check (a); b".into(), model: "sonnet".into(), text: "do X".into(), ..j };
@@ -426,6 +490,65 @@ mod tests {
         assert_eq!(m[8..].iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["work"], "{:?}", m);
         assert_eq!(m[8].1, format!("[{}] (answers 7) LEARNED: something", f));
 
+        let _ = std::fs::remove_dir_all(state_dir(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `wait_for`: the deferring instance ends unanswered and unlogged, stays listed as waiting,
+    /// and starts again, same name and message, once the other has ended, its end record in view.
+    #[test]
+    fn a_deferred_instance_starts_again_after_the_one_it_waits_for() {
+        let _env = crate::optchat::CLAUDE_ENV.lock().unwrap_or_else(|p| p.into_inner());
+        let d = std::env::temp_dir().join(format!("facet-defer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let ins = d.join("in");
+        std::fs::create_dir_all(&ins).unwrap();
+        let fake = d.join("fake.sh");
+        std::fs::write(&fake, format!("#!/bin/sh\n\
+            [ \"$DISABLE_PROMPT_CACHING\" = 1 ] && {{ echo '{{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"no priming here\"}}'; exit 0; }}\n\
+            IFS= read -r line\n\
+            printf '%s\\n' \"$line\" >> '{}'/\"$FACET_INSTANCE\"\n\
+            case \"$line\" in *'(message 0).'*) sleep 2;; *) sleep 0.7;; esac\n\
+            echo '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"DONE-HERE\"}}'\n",
+            ins.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FACET_CLAUDE", &fake); }
+        let e = crate::optchat::engine::bare(&d, "");
+        let msgs = |e: &Engine| e.mem.lock().unwrap().store.msgs.iter().map(|m| (m.kind.clone(), m.text.clone())).collect::<Vec<_>>();
+        let until = |what: &str, f: &dyn Fn() -> bool| {
+            let t = Instant::now();
+            while !f() { assert!(t.elapsed() < Duration::from_secs(20), "timed out: {}", what); std::thread::sleep(Duration::from_millis(20)); }
+        };
+        let live = |e: &Engine| e.turn.lock().unwrap().live.iter().map(|x| x.0.clone()).collect::<Vec<_>>();
+        turn::input(&e, "SLOW one".into());
+        until("first running", &|| live(&e).len() == 1);
+        turn::input(&e, "waiter two".into());
+        until("second running", &|| live(&e).len() == 2);
+        let (a, b) = { let l = live(&e); (l[0].clone(), l[1].clone()) };
+        {
+            let mut t = e.turn.lock().unwrap();
+            assert!(t.defer(&b, &b, "").is_err());
+            assert!(t.defer(&b, "inst_gone", "").is_err());
+            t.defer(&b, &format!("[{}]", a), "half done").unwrap();
+            // a loop is refused
+            assert!(t.defer(&a, &b, "").is_err());
+        }
+        until("second waits", &|| e.turn.lock().unwrap().waiting.len() == 1);
+        assert!(e.turn.lock().unwrap().live.iter().any(|(i, l)| i == &b && l.contains(&format!("waiting for [{}]", a))));
+        assert!(!msgs(&e).iter().any(|m| m.0 == "work"), "nothing logged at a defer");
+        assert_eq!(e.instances.load(SeqCst), 2);
+        until("both ended", &|| msgs(&e).iter().filter(|m| m.0 == "work").count() == 2 && e.instances.load(SeqCst) == 0 && !e.turn.lock().unwrap().running);
+        let m = msgs(&e);
+        assert_eq!(m[2].1, format!("[{}] (answers 0; to chat) DONE-HERE", a));
+        assert_eq!(m[3].1, format!("[{}] (answers 1; to chat) DONE-HERE", b));
+        let sent = std::fs::read_to_string(ins.join(&b)).unwrap();
+        let starts: Vec<&str> = sent.lines().collect();
+        assert_eq!(starts.len(), 2, "{}", sent);
+        assert!(!starts[0].contains("DONE-HERE"));
+        assert!(starts[1].contains(&format!("[{}] (answers 0; to chat) DONE-HERE", a)) && starts[1].contains("half done") && starts[1].contains("(message 1)"), "{}", starts[1]);
+        assert!(transcript(&e, &b).contains("deferred: waits for"));
         let _ = std::fs::remove_dir_all(state_dir(&d));
         let _ = std::fs::remove_dir_all(&d);
     }

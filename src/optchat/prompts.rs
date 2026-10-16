@@ -55,7 +55,7 @@ leaves out, not to confirm it. Zoom freely.
 
 Your view is the log as it stood when you started: the end records of instances
 that had ended by then. Those still running are listed after the view, with what
-they serve: that work is under way; do not do it again; say so if it matters. Another instance may be editing the same files: re-read a file right
+they serve: that work is under way; do not do it again; say so if it matters. If you need its result first, call wait_for and end: you start again once it ends. Another instance may be editing the same files: re-read a file right
 before you edit it, change only what you read, and never write over text you
 have not read. The user may send you a message while you run (it arrives as a
 message of its own, and is in the log as `(to [you]) ...`): answer it in your
@@ -145,6 +145,7 @@ Non-ASCII characters cost 2-4 bytes.";
 pub const ZOOM_DOC: &str = "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.";
 pub const DATE_DOC: &str = "The date and time of message id.";
 pub const ROUTE_DOC: &str = "Choose where your final message (your final text, always logged to memory unchanged) is posted: chat (Telegram and the chat page) on or off, and cards (ids) to reply on. Without it, it goes back where your message came from; with it, only to what it names, so route {chat: false} posts it nowhere, to memory only (as when you close a card with nothing to ask). The last call counts.";
+pub const WAIT_DOC: &str = "Defer your turn until the running instance named (as `[Name]` in your running list) ends, when its result is what you need: you end now, unanswered, and are started again on the same message, under your name, with the log as it then stands, its end record in your view. Meanwhile others see you waiting for it. note: what you have found or done so far, given to your next start. After the call end at once: your final text is dropped and nothing is logged.";
 pub const SEND_DOC: &str = "Send text to the user in the chat (Telegram and the chat page) now, before your end: for what cannot wait. It is also logged.";
 pub const ANSWER_DOC: &str = "Say something on the card with this id (from `[[Note]] L<n> #<id>`): it appears on that card only, not in the chat; it is also logged. On the card that started you, your end message also lands, as your reply. fix, only if you mean it: replacement text for the card's lines, which the user can apply with a button.";
 pub const NEW_CARD_DOC: &str = "Open a card on a line of a note: shown under that line, live on any open page. note: its name or path. anchor: verbatim text from the note, unique in it (preferred), or line: a 1-based line number. text: what you say (markdown, math). kind: comment (default), info, warn or error, only a colour. fix: replacement text for the anchored lines, only if you mean it. Returns the card's id.";
@@ -164,6 +165,16 @@ pub fn start(id: &str, msg: Option<usize>, running: &[String], from: Option<&str
         format!("Running now, started before you: {}.", running.join("; "))
     };
     format!("You are instance [{}]. {} Below is {}.\n\n{}", id, run, what, text.trim())
+}
+
+/// The start block's end for an instance started again after `wait_for`.
+pub fn resumed(after: &str, note: &str, extra: &[usize]) -> String {
+    let mut s = format!("\n\nYou ran on this before and deferred until [{}] ended; it has, and its end record is in your view. Pick up from there.", after);
+    if !note.is_empty() { s.push_str(&format!(" Your note then: {}", note.trim())); }
+    if !extra.is_empty() {
+        s.push_str(&format!(" You also answer messages {}, sent to you while you ran (in the log).", extra.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")));
+    }
+    s
 }
 
 /// A message the user sent to an instance while it runs, as the instance reads it.
