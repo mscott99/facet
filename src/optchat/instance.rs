@@ -107,7 +107,7 @@ pub fn launch(e: &Arc<Engine>, job: Job, view: String, msg: Option<usize>, epoch
             e.owners.lock().unwrap().tap(&job.id, tx);
             std::thread::spawn(move || run(e2, p, job, msg, epoch, rx));
         }
-        Err(x) => finish(&e2, &job, &sv, msg.is_some(), "failed to start", &x.to_string(), false, None, json!({})),
+        Err(x) => finish(&e2, &job, &sv, msg.is_some(), "failed to start", &x.to_string(), false, None, &[], json!({})),
     }
 }
 
@@ -135,6 +135,10 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, msg: Option<usize>, epoch: u64, rx
     let mut quiet = Instant::now();
     // where its final message goes: the input of its `route` call, the last one counting
     let mut ending: Option<Value> = None;
+    // cards it closed (a close_card call that succeeded): its end goes to none of them unless
+    // `route` names it, so closing the card it came from does not reopen it with a reply
+    let mut closing_ids: Vec<(String, String)> = Vec::new();
+    let mut closed: Vec<String> = Vec::new();
     loop {
         if e.turn.lock().unwrap().epoch != epoch { status = "cancelled"; p.kill(); break }
         inject(&mut p, &rx, &mut answered);
@@ -171,12 +175,19 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, msg: Option<usize>, epoch: u64, rx
                         tool_uses += 1;
                         if b["name"].as_str().is_some_and(|n| n.ends_with("__route")) { ending = Some(b["input"].clone()); }
                         if speaks(b["name"].as_str().unwrap_or("")) { speaking.push(b["id"].as_str().unwrap_or("").to_string()); }
+                        if b["name"].as_str().is_some_and(|n| n.ends_with("__close_card")) {
+                            let c = b["input"]["id"].as_str().unwrap_or("").trim().trim_start_matches('#').to_string();
+                            if !c.is_empty() { closing_ids.push((b["id"].as_str().unwrap_or("").to_string(), c)); }
+                        }
                     }
                     _ => {}
                 }
             },
             "user" => for b in ev["message"]["content"].as_array().cloned().unwrap_or_default() {
                 let id = b["tool_use_id"].as_str().unwrap_or("");
+                if b["type"] == "tool_result" && !b["is_error"].as_bool().unwrap_or(false) {
+                    if let Some((_, c)) = closing_ids.iter().find(|(t, _)| t == id) { closed.push(c.clone()); }
+                }
                 if b["type"] == "tool_result" && speaking.iter().any(|x| x == id) && !b["is_error"].as_bool().unwrap_or(false) {
                     let t = match &b["content"] { Value::String(x) => x.clone(), c => c[0]["text"].as_str().unwrap_or("").to_string() };
                     if t == super::mcp::SENT || t.starts_with(super::mcp::ANSWERED) { spoke = true; }
@@ -249,7 +260,7 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, msg: Option<usize>, epoch: u64, rx
     let trace = json!({"reqs": reqs, "eq": eq.round(), "tools": tool_uses, "ms": at.elapsed().as_millis()});
     if let Some((on, note)) = deferred { return park(&e, job, msg, answered, on, note, trace) }
     if let Some((to, took)) = passed { return hand(&e, job, msg, answered, to, took, trace) }
-    finish(&e, &job, &serves(&job, msg, &answered), msg.is_some(), status, &turn::cap(last.trim()), spoke, ending, trace);
+    finish(&e, &job, &serves(&job, msg, &answered), msg.is_some(), status, &turn::cap(last.trim()), spoke, ending, &closed, trace);
 }
 
 /// `wait_for`: the instance has ended without answering. It stays counted (a restart waits for
@@ -317,7 +328,7 @@ fn hand(e: &Arc<Engine>, mut job: Job, msg: Option<usize>, extra: Vec<usize>, to
 /// A deferred instance stopped by a cancel before it started again: it ends as cancelled.
 pub fn cancel_waiting(e: &Arc<Engine>, job: Job) {
     let r = job.resume.clone().unwrap_or_default();
-    finish(e, &job, &serves(&job, r.msg, &r.extra), r.msg.is_some(), "cancelled", "", false, None, json!({}));
+    finish(e, &job, &serves(&job, r.msg, &r.extra), r.msg.is_some(), "cancelled", "", false, None, &[], json!({}));
 }
 
 /// Write the messages the user has sent to this instance into its input, as they came.
@@ -351,20 +362,20 @@ fn limit_hit(e: &Arc<Engine>, text: &str, error: bool) -> bool {
 /// (`work`), at this moment. The chat venue reads it from the log (`log::end_body`); a card
 /// gets it as a reply. With no `route` call it goes back where the message came from: a chat
 /// message to the chat, a card's message to that card, a handed-on task nowhere (to the chat
-/// if spawned with `--chat`). With one,
+/// if spawned with `--chat`), but never to a card it closed itself. With one,
 /// what it leaves out is off: `route {chat: false}` posts nowhere (memory only), as when a
 /// card is closed with nothing to say on it.
 #[allow(clippy::too_many_arguments)]
-fn finish(e: &Arc<Engine>, job: &Job, sv: &str, owed: bool, status: &str, last: &str, spoke: bool, ending: Option<Value>, mut trace: Value) {
+fn finish(e: &Arc<Engine>, job: &Job, sv: &str, owed: bool, status: &str, last: &str, spoke: bool, ending: Option<Value>, closed: &[String], mut trace: Value) {
     let served_chat = job.chat || (owed && crate::log::wants_chat(&job.text));
     let origin_card: Vec<String> = if owed { crate::cards::from_card(&job.text).map(|c| vec![c.to_string()]).unwrap_or_default() } else { vec![] };
     let text = last.to_string();
-    let (chat, cards) = match &ending {
+    let (chat, cards): (bool, Vec<String>) = match &ending {
         Some(v) => (
             v["chat"].as_bool().unwrap_or(served_chat),
             v["cards"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(|s| s.trim().trim_start_matches('#').to_string())).filter(|c| !c.is_empty()).collect()).unwrap_or_default(),
         ),
-        None => (served_chat, origin_card),
+        None => (served_chat, origin_card.into_iter().filter(|c| !closed.contains(c)).collect()),
     };
     let net = ending.is_none() && (chat || !cards.is_empty());
     let mut to = Vec::new();

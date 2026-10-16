@@ -85,7 +85,8 @@ A card is a thread on a line of a note; its answer belongs to that card alone.
 When a card's message started you, your end message is posted on that card as
 your reply, so whatever you also say there with the card tools along the way
 appears beside it. Reply only when {USER} has something to decide or answer;
-else edit, close it, and route {chat: false}. Give a card a fix only when you mean its lines replaced. `facet review` opens
+else edit and close it: a closed card gets no end message (a reply would reopen
+it), so your end message then goes to memory only. Give a card a fix only when you mean its lines replaced. `facet review` opens
 many cards on a note in one call.
 
 Anything you start in the background is killed when you end: run long tasks in
@@ -144,14 +145,14 @@ Non-ASCII characters cost 2-4 bytes.";
 
 pub const ZOOM_DOC: &str = "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.";
 pub const DATE_DOC: &str = "The date and time of message id.";
-pub const ROUTE_DOC: &str = "Choose where your final message (your final text, always logged to memory unchanged) is posted: chat (Telegram and the chat page) on or off, and cards (ids) to reply on. Without it, it goes back where your message came from; with it, only to what it names, so route {chat: false} posts it nowhere, to memory only (as when you close a card with nothing to ask). The last call counts.";
+pub const ROUTE_DOC: &str = "Choose where your final message (your final text, always logged to memory unchanged) is posted: chat (Telegram and the chat page) on or off, and cards (ids) to reply on. Without it, it goes back where your message came from; with it, only to what it names, so route {chat: false} posts it nowhere, to memory only (a card you closed is skipped anyway). The last call counts.";
 pub const WAIT_DOC: &str = "Defer your turn until the running instance named (as `[Name]` in your running list) ends, when its result is what you need: you end now, unanswered, and are started again on the same message, under your name, with the log as it then stands, its end record in your view, with any message sent to you meanwhile. Meanwhile others see you waiting for it. note: what you have found or done so far, given to your next start. After the call end at once: your final text is dropped and nothing is logged.";
 pub const PASS_DOC: &str = "Pass the message you answer to the running instance named (as `[Name]` in your running list), when it belongs to that instance's work: it is written into its input verbatim, as a message sent to it while it runs, and it answers it in its end message. Better than wait_for when the message changes or adds to what it does; wait_for when yours is a job of its own that needs its result. After the call end at once: your final text is dropped and nothing is logged. If it has ended before taking it, you start again on your message, its end record in your view.";
 pub const SEND_DOC: &str = "Send text to the user in the chat (Telegram and the chat page) now, before your end: for what cannot wait. It is also logged.";
 pub const ANSWER_DOC: &str = "Say something on the card with this id (from `[[Note]] L<n> #<id>`): it appears on that card only, not in the chat; it is also logged. On the card that started you, your end message also lands, as your reply. fix, only if you mean it: replacement text for the card's lines, which the user can apply with a button.";
 pub const NEW_CARD_DOC: &str = "Open a card on a line of a note: shown under that line, live on any open page. note: its name or path. anchor: verbatim text from the note, unique in it (preferred), or line: a 1-based line number. text: what you say (markdown, math). kind: comment (default), info, warn or error, only a colour. fix: replacement text for the anchored lines, only if you mean it. Returns the card's id.";
 pub const FIX_CARD_DOC: &str = "Set the fix of the card with this id: replacement text for its lines, applied when the user presses its button. An empty fix takes it off.";
-pub const CLOSE_CARD_DOC: &str = "Close the card with this id (off every page, kept on file); delete: true removes it outright.";
+pub const CLOSE_CARD_DOC: &str = "Close the card with this id (off every page, kept on file); delete: true removes it outright. Your end message then skips it (a reply would reopen it), unless route names it.";
 pub const LIST_CARDS_DOC: &str = "The open cards, one line each (id, kind, note, line, last message, [fix]); note narrows to one note.";
 
 /// An instance's first block after the view: its name, the instances running now, and what
