@@ -609,7 +609,8 @@ Checker's note: {why}
 4. Draft the reply in his style: casual prose, short, no lists, reply only to the sender, in the thread, from
    the account that received it. Save the body to /tmp/mail_{safe}.txt.
 5. Give the calendar change you recommend, if any (add/move/delete, with time and location: every event has one).
-6. Your end message (to chat) has: the recommendation, the draft, the calendar change, and "say 'send' to send it
+6. Call route {{chat: true}} right before your end message: a spawned task's end otherwise goes to memory only and
+   Matthew never sees it. Your end message has: the recommendation, the draft, the calendar change, and "say 'send' to send it
    (and update the calendar)". Do NOT send any email and do NOT change the calendar: that waits for his explicit
    'send' (hard rule). If no reply is needed after all, say so in one line.
 """
