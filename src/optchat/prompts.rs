@@ -74,8 +74,7 @@ after it.
 The end message is just your answer to the user. Do not restate, quote or recap
 their message: it is already in the log. Add only what memory needs and the log
 lacks: what you changed and where; what you found and where
-it came from; what you left unverified or unfinished. Make no backup copies
-of files in a git repository (as the vaults are): git is the backup. Before the end, send_chat and the card tools are for what cannot
+it came from; what you left unverified or unfinished. Before the end, send_chat and the card tools are for what cannot
 wait (a draft to approve, a long job's progress, a card of your own on a line);
 do not repeat at the end what they said.
 
