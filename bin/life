@@ -165,6 +165,10 @@ def cmd_mail_reply(a):
     need_macos("mail reply")
 
 
+def cmd_mail_forward(a):
+    need_macos("mail forward")
+
+
 def cmd_mail_send(a):
     body = open(a.body_file).read() if a.body_file else (a.body or "")
     q = lambda s: s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
@@ -379,6 +383,14 @@ def main():
     s.add_argument("--attach", action="append", metavar="PATH", help="attach a file (repeatable)")
     s.add_argument("--send", action="store_true", help="actually send (default: print the draft)")
     s.set_defaults(fn=cmd_mail_reply)
+    s = m.add_parser("forward", help="forward mail ID: same account, 'Fwd:' subject, original inline with its attachments (Linux)")
+    s.add_argument("id", help="<account>:<uid>[:s|:a] as printed by `life mail inbox|search|thread`")
+    s.add_argument("--to", action="append", required=True); s.add_argument("--cc", action="append")
+    s.add_argument("--body", help="your note above the forwarded message"); s.add_argument("--body-file")
+    s.add_argument("--subject", help="override subject (default: Fwd: original)")
+    s.add_argument("--attach", action="append", metavar="PATH", help="attach a file (repeatable)")
+    s.add_argument("--send", action="store_true", help="actually send (default: print the draft)")
+    s.set_defaults(fn=cmd_mail_forward)
 
     c = sub.add_parser("cal").add_subparsers(dest="c")
     s = c.add_parser("next"); s.add_argument("--days", type=int, default=14); s.add_argument("--past", type=int, default=0)
@@ -442,7 +454,7 @@ def main():
         name = getattr(getattr(a, "fn", None), "__name__", "cmd_cal" if a.top == "cal" else "")
         if a.top == "cal" and not hasattr(a, "fn"):
             a.days, a.past = 14, 0
-        if name in ("cmd_mail_list", "cmd_mail_show", "cmd_mail_thread", "cmd_mail_send", "cmd_mail_reply", "cmd_cal", "cmd_cal_add", "cmd_cal_list"):
+        if name in ("cmd_mail_list", "cmd_mail_show", "cmd_mail_thread", "cmd_mail_send", "cmd_mail_reply", "cmd_mail_forward", "cmd_cal", "cmd_cal_add", "cmd_cal_list"):
             return getattr(linux(), name)(a)
     if not hasattr(a, "fn"):
         if a.top == "cal":

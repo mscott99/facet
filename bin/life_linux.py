@@ -488,7 +488,18 @@ def build_message(acct, a):
             m["References"] = " ".join(refs + [mid])
         quoted = "\n".join("> " + l if l else ">" for l in body_text(orig).rstrip().splitlines())
         body = body.rstrip() + f"\n\nOn {orig['Date']}, {orig['From']} wrote:\n{quoted}\n"
+    fid = getattr(a, "forward_of", None)
+    fwd_atts = []
+    if fid:
+        orig = fetch_orig(fid, "mail forward")
+        hdr = "\n".join(f"{k}: {_dec(str(orig[k]))}" for k in ("From", "Date", "Subject", "To", "Cc") if orig[k])
+        body = body.rstrip() + "\n\n---------- Forwarded message ---------\n" + hdr + "\n\n" + body_text(orig).rstrip() + "\n"
+        fwd_atts = [p for p in orig.iter_attachments()]
     m.set_content(body)
+    for part in fwd_atts:
+        data = part.get_payload(decode=True) or b""
+        maintype, subtype = part.get_content_type().split("/", 1)
+        m.add_attachment(data, maintype=maintype, subtype=subtype, filename=part.get_filename() or "attachment")
     for path in getattr(a, "attach", None) or []:
         ctype, enc = mimetypes.guess_type(path)
         if ctype is None or enc:
@@ -497,6 +508,31 @@ def build_message(acct, a):
         with open(path, "rb") as f:
             m.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=os.path.basename(path))
     return m
+
+
+def fetch_orig(rid, what):
+    racct, uid, kind = parse_id(rid, accounts())
+    c = imap_connect(racct)
+    try:
+        raw = fetch_raw(c, racct, kind, uid)
+    finally:
+        try:
+            c.logout()
+        except Exception:
+            pass
+    if raw is None:
+        sys.exit(f"life: {what} {rid!r}: no such message; nothing sent")
+    return email.message_from_bytes(raw, policy=policy.default)
+
+
+def cmd_mail_forward(a):
+    """Forward mail ID: same account, 'Fwd:' subject, original headers+body inline, its attachments kept."""
+    acct, _, _ = parse_id(a.id, accounts())
+    subj = _dec(str(fetch_orig(a.id, "mail forward")["Subject"] or ""))
+    a.subject = a.subject or (subj if re.match(r"(?i)\s*(fwd?|fw)\s*:", subj) else "Fwd: " + subj)
+    a.from_account = acct["name"]
+    a.forward_of = a.id
+    return cmd_mail_send(a)
 
 
 def smtp_send(acct, m, rcpts):
