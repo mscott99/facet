@@ -145,7 +145,7 @@ Non-ASCII characters cost 2-4 bytes.";
 pub const ZOOM_DOC: &str = "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.";
 pub const DATE_DOC: &str = "The date and time of message id.";
 pub const ROUTE_DOC: &str = "Choose where your final message (your final text, always logged to memory unchanged) is posted: chat (Telegram and the chat page) on or off, and cards (ids) to reply on. Without it, it goes back where your message came from; with it, only to what it names, so route {chat: false} posts it nowhere, to memory only (as when you close a card with nothing to ask). The last call counts.";
-pub const WAIT_DOC: &str = "Defer your turn until the running instance named (as `[Name]` in your running list) ends, when its result is what you need: you end now, unanswered, and are started again on the same message, under your name, with the log as it then stands, its end record in your view. Meanwhile others see you waiting for it. note: what you have found or done so far, given to your next start. After the call end at once: your final text is dropped and nothing is logged.";
+pub const WAIT_DOC: &str = "Defer your turn until the running instance named (as `[Name]` in your running list) ends, when its result is what you need: you end now, unanswered, and are started again on the same message, under your name, with the log as it then stands, its end record in your view, with any message sent to you meanwhile. Meanwhile others see you waiting for it. note: what you have found or done so far, given to your next start. After the call end at once: your final text is dropped and nothing is logged.";
 pub const PASS_DOC: &str = "Pass the message you answer to the running instance named (as `[Name]` in your running list), when it belongs to that instance's work: it is written into its input verbatim, as a message sent to it while it runs, and it answers it in its end message. Better than wait_for when the message changes or adds to what it does; wait_for when yours is a job of its own that needs its result. After the call end at once: your final text is dropped and nothing is logged. If it has ended before taking it, you start again on your message, its end record in your view.";
 pub const SEND_DOC: &str = "Send text to the user in the chat (Telegram and the chat page) now, before your end: for what cannot wait. It is also logged.";
 pub const ANSWER_DOC: &str = "Say something on the card with this id (from `[[Note]] L<n> #<id>`): it appears on that card only, not in the chat; it is also logged. On the card that started you, your end message also lands, as your reply. fix, only if you mean it: replacement text for the card's lines, which the user can apply with a button.";
@@ -181,6 +181,11 @@ pub fn resumed(after: &str, note: &str, extra: &[usize]) -> String {
 /// A message the user sent to an instance while it runs, as the instance reads it.
 pub fn injected(msg: usize, text: &str) -> String {
     format!("Message {} from the user, sent to you while you run. Your final message answers it too.\n\n{}", msg, text.trim())
+}
+
+/// A message the user sent to an instance while it waited to start again, in its start block.
+pub fn held(msg: usize, text: &str) -> String {
+    format!("\n\nMessage {} from the user, sent to you while you waited. Your final message answers it too.\n\n{}", msg, text.trim())
 }
 
 /// A user message another instance passed on (`pass_to`), as the instance it goes to reads it.

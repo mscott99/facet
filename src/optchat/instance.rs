@@ -67,6 +67,11 @@ pub fn end_record(id: &str, serves: &str, status: &str, text: &str, to: &[String
 pub fn launch(e: &Arc<Engine>, job: Job, view: String, msg: Option<usize>, epoch: u64, mut stats: Value) {
     // one started again (after `wait_for`) was counted, and listed, all along
     if job.resume.is_none() { e.instances.fetch_add(1, SeqCst); }
+    // what was sent to it while it waited to start again: answered with the rest, shown in its
+    // start block (one sent from now until its tap goes into its input as it runs)
+    let held = if job.resume.is_some() { e.owners.lock().unwrap().take_held(&job.id) } else { vec![] };
+    let mut job = job;
+    if let Some(r) = job.resume.as_mut() { r.extra.extend(held.iter().map(|(i, _)| *i)); }
     let extra = job.resume.as_ref().map(|r| r.extra.clone()).unwrap_or_default();
     let sv = serves(&job, msg, &extra);
     let running: Vec<String> = {
@@ -88,7 +93,8 @@ pub fn launch(e: &Arc<Engine>, job: Job, view: String, msg: Option<usize>, epoch
     let envr: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let mut head = prompts::start(&job.id, msg, &running, job.from.as_deref(), &job.text);
     if let Some(r) = &job.resume {
-        head.push_str(&if r.unpassed { prompts::unpassed(&r.after) } else { prompts::resumed(&r.after, &r.note, &r.extra) });
+        head.push_str(&if r.unpassed { prompts::unpassed(&r.after) } else { prompts::resumed(&r.after, &r.note, &r.extra[..r.extra.len() - held.len()]) });
+        for (i, text) in &held { head.push_str(&prompts::held(*i, text)); }
     }
     let started = Proc::spawn_detached(&args, &envr, &e.conf.cwd)
         .and_then(|mut p| p.send(turn::content(&view, &head)).map(|_| p));
@@ -190,7 +196,8 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, msg: Option<usize>, epoch: u64, rx
                 // it deferred: no more messages into it; those sent meanwhile go to its next start
                 let d = e.turn.lock().unwrap().deferring.remove(&job.id);
                 if let Some(d) = d {
-                    e.owners.lock().unwrap().untap(&job.id);
+                    // held: what is sent to it from now on waits for its next start
+                    e.owners.lock().unwrap().hold(&job.id);
                     while let Ok(m) = rx.try_recv() { answered.push(m.msg); }
                     deferred = Some(d);
                     break
@@ -221,6 +228,8 @@ fn run(e: Arc<Engine>, mut p: Proc, job: Job, msg: Option<usize>, epoch: u64, rx
                         }
                         None => false,
                     };
+                    // the other had ended: it starts again on its message, so it is held
+                    if !took { o.hold(&job.id); }
                     passed = Some((to, took));
                     break
                 }
@@ -614,15 +623,21 @@ mod tests {
         assert!(e.turn.lock().unwrap().live.iter().any(|(i, l)| i == &b && l.contains(&format!("waiting for [{}]", a))));
         assert!(!msgs(&e).iter().any(|m| m.0 == "work"), "nothing logged at a defer");
         assert_eq!(e.instances.load(SeqCst), 2);
+        // a message sent to it while it waits starts no instance: it is kept for its next start
+        turn::input_item(&e, &crate::optchat::inbox::Item { id: String::new(), text: "HELD extra".into(), to: Some(crate::optchat::inbox::Target::Log { i: 1 }) });
+        assert_eq!(msgs(&e)[2].1, format!("(to [{}]) HELD extra", b));
+        assert_eq!(e.instances.load(SeqCst), 2);
+        assert!(e.turn.lock().unwrap().queue.is_empty());
         until("both ended", &|| msgs(&e).iter().filter(|m| m.0 == "work").count() == 2 && e.instances.load(SeqCst) == 0 && !e.turn.lock().unwrap().running);
         let m = msgs(&e);
-        assert_eq!(m[2].1, format!("[{}] (answers 0; to chat) DONE-HERE", a));
-        assert_eq!(m[3].1, format!("[{}] (answers 1; to chat) DONE-HERE", b));
+        assert_eq!(m[3].1, format!("[{}] (answers 0; to chat) DONE-HERE", a));
+        assert_eq!(m[4].1, format!("[{}] (answers 1, 2; to chat) DONE-HERE", b));
+        assert_eq!(m.len(), 5, "{:?}", m);
         let sent = std::fs::read_to_string(ins.join(&b)).unwrap();
         let starts: Vec<&str> = sent.lines().collect();
         assert_eq!(starts.len(), 2, "{}", sent);
         assert!(!starts[0].contains("DONE-HERE"));
-        assert!(starts[1].contains(&format!("[{}] (answers 0; to chat) DONE-HERE", a)) && starts[1].contains("half done") && starts[1].contains("(message 1)"), "{}", starts[1]);
+        assert!(starts[1].contains(&format!("[{}] (answers 0; to chat) DONE-HERE", a)) && starts[1].contains("half done") && starts[1].contains("(message 1)") && starts[1].contains("Message 2 from the user, sent to you while you waited") && starts[1].contains("HELD extra"), "{}", starts[1]);
         assert!(transcript(&e, &b).contains("deferred: waits for"));
         let _ = std::fs::remove_dir_all(state_dir(&d));
         let _ = std::fs::remove_dir_all(&d);

@@ -157,20 +157,20 @@ pub fn input(e: &Arc<Engine>, text: String) {
 }
 
 /// A message that names a running instance goes into it (instance.rs), logged at once as
-/// `(to [inst_x]) text`, which is no new message to answer but one more for that instance. Any
+/// `(to [inst_x]) text`, which is no new message to answer but one more for that instance; one
+/// waiting to start again (`wait_for`) gets it at that start, no new instance meanwhile. Any
 /// other, or one for an instance that has ended, starts an instance of its own.
 pub fn input_item(e: &Arc<Engine>, it: &super::inbox::Item) {
     if let Some(to) = &it.to {
         // the lock is held through the send: an instance takes its tap away under it, then
         // reads what was sent, so no message is sent into a tap that is no longer read
         let mut o = e.owners.lock().unwrap();
-        if let Some((inst, tap)) = o.resolve(to) {
-            let (inst, tap) = (inst.to_string(), tap.clone());
+        if let Some(inst) = o.resolve(to) {
             let text = it.text.trim().to_string();
             if let Some(i) = e.log_at("user", &format!("(to [{}]) {}", inst, text), &super::store::now_iso()) {
                 o.own(i, &inst);
                 o.inbox(&it.id, i);
-                let _ = tap.send(super::owners::Inject { msg: i, text, via: None });
+                o.send(&inst, i, text);
                 return
             }
         }
