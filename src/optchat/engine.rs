@@ -68,7 +68,7 @@ impl Conf {
         }
         let s = |k: &str, d: &str| c.str(&format!("chat.{}", k), d);
         Conf {
-            name: s("name", "OptChat"),
+            name: s("name", "Facet"),
             model: s("model", "opus"),
             effort: s("effort", "high"),
             tools: s("tools", "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch"),

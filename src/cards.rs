@@ -416,7 +416,7 @@ const THREAD_EACH: usize = 600;
 const THREAD_ALL: usize = 2400;
 
 /// The card's thread before the reply `text` (its last entry, when it is that reply), in order,
-/// one speaker-marked line each ("you:" is OptChat, "user:" the user), each cut to
+/// one speaker-marked line each ("you:" is Facet, "user:" the user), each cut to
 /// `THREAD_EACH`; past `THREAD_ALL`, the first message stays and the oldest after it are left out.
 fn thread_before(c: &Value, text: &str) -> String {
     let mut t: Vec<String> = c["thread"].as_array().map(|a| a.iter().map(|m| {
